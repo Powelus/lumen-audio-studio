@@ -12,5 +12,6 @@ pub mod fft;
 pub mod fm;
 pub mod mist;
 pub mod patch;
+pub mod presets;
 pub mod synth;
 pub mod wavetable;
