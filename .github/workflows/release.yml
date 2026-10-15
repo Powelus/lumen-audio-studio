@@ -59,17 +59,25 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - name: Linux libraries for audio and MIDI
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p las-cli --target ${{ matrix.target }}
+      - run: cargo build --release --locked -p las-cli -p las-app --target ${{ matrix.target }}
       - name: Smoke test the built binary
         if: matrix.smoke
         shell: bash
         run: |
           bin="target/${{ matrix.target }}/release/las${{ matrix.ext }}"
           "$bin" --version | grep -F "$VERSION"
+          # the app has no window to open on a runner, but it must start far enough to report its version
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            "target/${{ matrix.target }}/release/lumen" --version | grep -F "$VERSION"
+          fi
+          test -f "target/${{ matrix.target }}/release/lumen${{ matrix.ext }}"
           "$bin" render-facet examples/facet-bell.json -o smoke.wav
           # a 32-bit float stereo WAV with real audio in it (header is 44 bytes plus fact/data chunks)
           test "$(wc -c < smoke.wav)" -gt 100000
@@ -87,7 +95,7 @@ jobs:
         run: |
           name="las-$VERSION-${{ matrix.name }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/las${{ matrix.ext }}" LICENSE README.md CHANGELOG.md "dist/$name/"
+          cp "target/${{ matrix.target }}/release/las${{ matrix.ext }}" "target/${{ matrix.target }}/release/lumen${{ matrix.ext }}" LICENSE README.md CHANGELOG.md "dist/$name/"
           cp -r examples "dist/$name/examples"
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then
