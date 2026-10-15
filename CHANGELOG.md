@@ -2,6 +2,17 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.4 - 2026-10-15
+
+Polaris, the wavetable synth, and the engine behind Vortex, Monolith, Zenith, Nebula and TriOsc.
+
+- Wavetable synth engine ported from the web version: four wavetable oscillators with unison and ten warp modes, sub oscillator, noise, two filters in twelve types (low, high and band pass in 12 and 24 dB, notch, peak, ladder, formant, comb), four envelopes, four LFOs, a 21-source modulation matrix, mono, legato and glide. Output matches the original sample for sample on eleven reference renders covering every warp mode and filter type.
+- 23 built-in band-limited, mip-mapped wavetables and the FFT behind them, checked against the original.
+- `las render-synth` and `examples/synth-supersaw.json`.
+- In the app: Polaris with tabs for oscillators, filters, envelopes and LFOs, a modulation matrix editor, and voice and global controls. Polaris is the default instrument.
+- Wavetables and patches are prepared off the audio thread and swapped in.
+- Engines share a `Playable` trait, so the command line tool and the app treat them alike.
+
 ## 0.2.0-alpha.3 - 2026-10-15
 
 Mist, the granular synth, joins Facet.

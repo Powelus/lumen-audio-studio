@@ -1,0 +1,781 @@
+[
+ {
+  "name": "init",
+  "seed": 1,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0.0,
+    "key": 60,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 60
+   }
+  ]
+ },
+ {
+  "name": "unison_warps",
+  "seed": 2,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0,
+     "table": "saw",
+     "voices": 7,
+     "detune": 0.5,
+     "spread": 1,
+     "blend": 0.5,
+     "warp": "pwm",
+     "warpAmt": 0.6,
+     "level": 0.6
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "sync",
+     "voices": 3,
+     "detune": 0.3,
+     "warp": "sync",
+     "warpAmt": 0.3,
+     "route": "B",
+     "oct": -1,
+     "level": 0.5,
+     "pos": 0.4
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "fm",
+     "warp": "fm",
+     "warpAmt": 0.5,
+     "route": "AB",
+     "level": 0.4,
+     "pos": 0.7,
+     "semi": 7
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "formant",
+     "warp": "mirror",
+     "warpAmt": 0.5,
+     "route": "direct",
+     "level": 0.3,
+     "pos": 0.3
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0.0,
+    "key": 48,
+    "vel": 0.8
+   },
+   {
+    "t": "on",
+    "time": 0.01,
+    "key": 64,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 48
+   },
+   {
+    "t": "off",
+    "time": 0.13,
+    "key": 64
+   }
+  ]
+ },
+ {
+  "name": "warps2",
+  "seed": 3,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0,
+     "table": "bell",
+     "warp": "ring",
+     "warpAmt": 0.6,
+     "voices": 2
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "noise",
+     "warp": "quantize",
+     "warpAmt": 0.5,
+     "pos": 0.3,
+     "level": 0.3
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "harmonics",
+     "warp": "bend+",
+     "warpAmt": 0.7,
+     "route": "B",
+     "pos": 0.5,
+     "level": 0.4
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "organ",
+     "warp": "bend-",
+     "warpAmt": 0.6,
+     "route": "B",
+     "pos": 0.8,
+     "level": 0.4
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0.0,
+    "key": 55,
+    "vel": 0.8
+   },
+   {
+    "t": "on",
+    "time": 0.02,
+    "key": 67,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 55
+   },
+   {
+    "t": "off",
+    "time": 0.13999999999999999,
+    "key": 67
+   }
+  ]
+ },
+ {
+  "name": "filters_ladder_comb",
+  "seed": 4,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0,
+     "table": "saw",
+     "warp": "asym",
+     "warpAmt": 0.6
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    }
+   ],
+   "filters": [
+    {
+     "on": true,
+     "type": "ladder",
+     "cutoff": 1500,
+     "res": 0.6,
+     "drive": 0.3,
+     "envAmt": 2,
+     "keytrack": 0.5
+    },
+    {
+     "on": true,
+     "type": "comb",
+     "cutoff": 400,
+     "res": 0.5
+    }
+   ],
+   "env": [
+    {
+     "a": 0.005,
+     "d": 0.2,
+     "s": 0.8,
+     "r": 0.1
+    },
+    {
+     "a": 0.005,
+     "d": 0.15,
+     "s": 0.2,
+     "r": 0.1
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0.0,
+    "key": 52,
+    "vel": 0.8
+   },
+   {
+    "t": "on",
+    "time": 0.01,
+    "key": 59,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 52
+   },
+   {
+    "t": "off",
+    "time": 0.13,
+    "key": 59
+   }
+  ]
+ },
+ {
+  "name": "filters_formant_bp24",
+  "seed": 5,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "square",
+     "route": "B",
+     "oct": 1,
+     "level": 0.4
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    }
+   ],
+   "filterRouting": "parallel",
+   "filters": [
+    {
+     "on": true,
+     "type": "formant",
+     "cutoff": 800,
+     "res": 0.5
+    },
+    {
+     "on": true,
+     "type": "bp24",
+     "cutoff": 2000,
+     "res": 0.4,
+     "envAmt": 1
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0.0,
+    "key": 57,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 57
+   }
+  ]
+ },
+ {
+  "name": "filters_peak_notch",
+  "seed": 6,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0,
+     "table": "saw",
+     "voices": 3,
+     "detune": 0.3
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    }
+   ],
+   "filters": [
+    {
+     "on": true,
+     "type": "peak",
+     "cutoff": 1200,
+     "res": 0.7,
+     "velAmt": 1
+    },
+    {
+     "on": true,
+     "type": "notch",
+     "cutoff": 900,
+     "res": 0.6
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0.0,
+    "key": 50,
+    "vel": 0.8
+   },
+   {
+    "t": "on",
+    "time": 0.01,
+    "key": 62,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 50
+   },
+   {
+    "t": "off",
+    "time": 0.13,
+    "key": 62
+   }
+  ]
+ },
+ {
+  "name": "filters_lp12_hp24",
+  "seed": 7,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0,
+     "table": "saw",
+     "voices": 3,
+     "detune": 0.3
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    }
+   ],
+   "filters": [
+    {
+     "on": true,
+     "type": "lp12",
+     "cutoff": 2500,
+     "res": 0.5,
+     "drive": 0.5
+    },
+    {
+     "on": true,
+     "type": "hp24",
+     "cutoff": 300,
+     "res": 0.3
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0.0,
+    "key": 60,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 60
+   }
+  ]
+ },
+ {
+  "name": "filters_bp12_hp12",
+  "seed": 8,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0,
+     "table": "saw",
+     "voices": 3,
+     "detune": 0.3
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    }
+   ],
+   "filters": [
+    {
+     "on": true,
+     "type": "bp12",
+     "cutoff": 1500,
+     "res": 0.6
+    },
+    {
+     "on": true,
+     "type": "hp12",
+     "cutoff": 200,
+     "res": 0.2
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0.0,
+    "key": 64,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 64
+   }
+  ]
+ },
+ {
+  "name": "modulation",
+  "seed": 9,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0,
+     "voices": 5,
+     "detune": 0.4,
+     "spread": 0.8,
+     "level": 0.6
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "analog",
+     "pos": 0.2,
+     "level": 0.4,
+     "route": "B"
+    },
+    {
+     "randPhase": 0,
+     "on": true,
+     "table": "basic",
+     "route": "B",
+     "level": 0.3
+    },
+    {
+     "randPhase": 0
+    }
+   ],
+   "lfo": [
+    {
+     "shape": "square",
+     "rate": 7,
+     "delay": 0.05
+    },
+    {
+     "shape": "triangle",
+     "rate": 3
+    },
+    {
+     "shape": "saw",
+     "sync": true,
+     "div": 0.25
+    },
+    {}
+   ],
+   "macros": [
+    0.5,
+    0.3,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "filters": [
+    {
+     "on": true,
+     "type": "lp24",
+     "cutoff": 3000,
+     "res": 0.3
+    },
+    {
+     "on": false,
+     "type": "hp12",
+     "cutoff": 20,
+     "res": 0.1
+    }
+   ],
+   "mod": [
+    {
+     "src": "lfo1",
+     "dest": "osc0.pos",
+     "amt": 0.4
+    },
+    {
+     "src": "lfo2",
+     "dest": "osc0.detune",
+     "amt": 0.3
+    },
+    {
+     "src": "lfo3",
+     "dest": "f0.cutoff",
+     "amt": 0.3
+    },
+    {
+     "src": "env2",
+     "dest": "osc1.pos",
+     "amt": 0.5
+    },
+    {
+     "src": "env3",
+     "dest": "osc0.pitch",
+     "amt": 0.05
+    },
+    {
+     "src": "env4",
+     "dest": "pan",
+     "amt": 0.3
+    },
+    {
+     "src": "macro1",
+     "dest": "osc0.warpAmt",
+     "amt": 0.4
+    },
+    {
+     "src": "macro2",
+     "dest": "f0.res",
+     "amt": 0.3
+    },
+    {
+     "src": "vel",
+     "dest": "amp",
+     "amt": 0.3
+    },
+    {
+     "src": "note",
+     "dest": "osc1.pitch",
+     "amt": 0.02
+    },
+    {
+     "src": "mw",
+     "dest": "osc2.pos",
+     "amt": 0.6
+    },
+    {
+     "src": "at",
+     "dest": "f0.drive",
+     "amt": 0.4
+    },
+    {
+     "src": "lfo2",
+     "dest": "osc1.pan",
+     "amt": 0.5
+    },
+    {
+     "src": "lfo1",
+     "dest": "osc2.level",
+     "amt": 0.2
+    }
+   ]
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0,
+    "key": 55,
+    "vel": 0.7
+   },
+   {
+    "t": "on",
+    "time": 0.01,
+    "key": 62,
+    "vel": 0.5,
+    "pan": 0.4
+   },
+   {
+    "t": "cc",
+    "time": 0.04,
+    "cc": "mw",
+    "value": 0.8
+   },
+   {
+    "t": "cc",
+    "time": 0.05,
+    "cc": "at",
+    "value": 0.6
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 55
+   },
+   {
+    "t": "off",
+    "time": 0.13,
+    "key": 62
+   }
+  ]
+ },
+ {
+  "name": "mono_glide_bend",
+  "seed": 10,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    }
+   ],
+   "voice": {
+    "mono": true,
+    "legato": true,
+    "glide": 0.1,
+    "pbRange": 12
+   },
+   "tune": 0.3
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0,
+    "key": 48,
+    "vel": 0.9
+   },
+   {
+    "t": "on",
+    "time": 0.05,
+    "key": 55,
+    "vel": 0.7
+   },
+   {
+    "t": "cc",
+    "time": 0.07,
+    "cc": "pb",
+    "value": 0.5
+   },
+   {
+    "t": "off",
+    "time": 0.1,
+    "key": 55
+   },
+   {
+    "t": "off",
+    "time": 0.11,
+    "key": 48
+   }
+  ]
+ },
+ {
+  "name": "poly_steal_sub",
+  "seed": 11,
+  "patch": {
+   "osc": [
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    },
+    {
+     "randPhase": 0
+    }
+   ],
+   "voice": {
+    "poly": 2
+   },
+   "sub": {
+    "on": true,
+    "wave": "square",
+    "oct": -1,
+    "level": 0.5,
+    "route": "A"
+   },
+   "noise": {
+    "on": false
+   }
+  },
+  "events": [
+   {
+    "t": "on",
+    "time": 0,
+    "key": 60,
+    "vel": 0.8,
+    "fine": 10
+   },
+   {
+    "t": "on",
+    "time": 0.02,
+    "key": 64,
+    "vel": 0.8
+   },
+   {
+    "t": "on",
+    "time": 0.04,
+    "key": 67,
+    "vel": 0.8,
+    "pan": -0.5
+   },
+   {
+    "t": "on",
+    "time": 0.06,
+    "key": 72,
+    "vel": 0.8
+   },
+   {
+    "t": "off",
+    "time": 0.12,
+    "key": 72
+   }
+  ]
+ }
+]

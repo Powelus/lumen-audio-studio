@@ -8,6 +8,9 @@
 
 pub mod biquad;
 pub mod engine;
+pub mod fft;
 pub mod fm;
 pub mod mist;
 pub mod patch;
+pub mod synth;
+pub mod wavetable;

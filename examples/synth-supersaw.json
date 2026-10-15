@@ -1,0 +1,30 @@
+{
+  "seed": 2,
+  "patch": {
+    "osc": [
+      { "table": "saw", "voices": 7, "detune": 0.45, "spread": 0.9, "blend": 0.6, "level": 0.6 },
+      { "on": true, "table": "analog", "pos": 0.55, "warp": "bend+", "warpAmt": 0.25, "oct": -1, "level": 0.5, "route": "B" },
+      { "on": false },
+      { "on": false }
+    ],
+    "sub": { "on": true, "wave": "sine", "oct": -1, "level": 0.45, "route": "direct" },
+    "filters": [{ "on": true, "type": "lp24", "cutoff": 1400, "res": 0.3, "envAmt": 2.2, "keytrack": 0.4 }],
+    "env": [{ "a": 0.01, "d": 0.4, "s": 0.8, "r": 0.5 }, { "a": 0.005, "d": 0.45, "s": 0.2, "r": 0.4 }],
+    "lfo": [{ "shape": "triangle", "rate": 0.4 }],
+    "mod": [
+      { "src": "lfo1", "dest": "osc1.pos", "amt": 0.3 },
+      { "src": "env2", "dest": "osc0.detune", "amt": 0.2 }
+    ],
+    "voice": { "poly": 8 }
+  },
+  "events": [
+    { "t": "on", "time": 0, "key": 45, "vel": 0.9 },
+    { "t": "on", "time": 0, "key": 57, "vel": 0.8 },
+    { "t": "on", "time": 0, "key": 64, "vel": 0.8 },
+    { "t": "on", "time": 0, "key": 69, "vel": 0.8 },
+    { "t": "off", "time": 2.5, "key": 45 },
+    { "t": "off", "time": 2.5, "key": 57 },
+    { "t": "off", "time": 2.5, "key": 64 },
+    { "t": "off", "time": 2.5, "key": 69 }
+  ]
+}

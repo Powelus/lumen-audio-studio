@@ -17,8 +17,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Lumen Audio Studio")
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([900.0, 560.0]),
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([960.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native(

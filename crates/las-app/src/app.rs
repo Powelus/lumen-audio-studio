@@ -7,6 +7,8 @@ use eframe::egui::{self, Color32, RichText, Ui};
 use las_dsp::fm::{default_fm_json, ALGORITHMS};
 use las_dsp::mist::default_mist_json;
 use las_dsp::patch::{default_engine_json, merge_patch};
+use las_dsp::synth::{default_synth_json, mod_destinations, MOD_SOURCES};
+use las_dsp::wavetable::table_ids;
 use serde_json::{json, Value};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -27,10 +29,19 @@ const MIST_PRESETS: [(&str, &str); 2] = [
     ("Pad", include_str!("../../../examples/mist-pad.json")),
 ];
 
+const POLARIS_PRESETS: [(&str, &str); 2] = [
+    ("Init", "{}"),
+    (
+        "Supersaw",
+        include_str!("../../../examples/synth-supersaw.json"),
+    ),
+];
+
 fn presets(i: Instrument) -> &'static [(&'static str, &'static str)] {
     match i {
         Instrument::Facet => &FACET_PRESETS,
         Instrument::Mist => &MIST_PRESETS,
+        Instrument::Polaris => &POLARIS_PRESETS,
     }
 }
 
@@ -38,6 +49,7 @@ fn index(i: Instrument) -> usize {
     match i {
         Instrument::Facet => 0,
         Instrument::Mist => 1,
+        Instrument::Polaris => 2,
     }
 }
 
@@ -68,10 +80,12 @@ pub struct App {
     status: String,
     midi_name: Option<String>,
     inst: Instrument,
-    /// Defaults and the current patch of each instrument, Facet then Mist.
-    defaults: [Value; 2],
-    patches: [Value; 2],
-    presets: [usize; 2],
+    /// Defaults and the current patch of each instrument: Facet, Mist, Polaris.
+    defaults: [Value; 3],
+    patches: [Value; 3],
+    presets: [usize; 3],
+    /// Which page of the Polaris panel is showing.
+    tab: Tab,
     /// What Mist reads from: the built-in texture or a dropped file.
     source_name: String,
     volume: f64,
@@ -84,10 +98,20 @@ pub struct App {
     error: Option<String>,
 }
 
-fn full_defaults() -> [Value; 2] {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Oscillators,
+    Filters,
+    Modulators,
+    Matrix,
+    Global,
+}
+
+fn full_defaults() -> [Value; 3] {
     [
         merge_patch(&default_engine_json(), &default_fm_json()),
         merge_patch(&default_engine_json(), &default_mist_json()),
+        default_synth_json(),
     ]
 }
 
@@ -108,10 +132,11 @@ impl App {
             _midi: midi,
             status,
             midi_name,
-            inst: Instrument::Facet,
+            inst: Instrument::Polaris,
             defaults: full_defaults(),
             patches: full_defaults(),
-            presets: [0, 0],
+            presets: [0, 0, 0],
+            tab: Tab::Oscillators,
             source_name: "built-in texture".into(),
             volume: 0.8,
             octave: 4,
@@ -119,11 +144,15 @@ impl App {
             clicked: None,
             error: None,
         };
+        app.load_preset(Instrument::Polaris, 1);
         app.load_preset(Instrument::Mist, 1);
         app.load_preset(Instrument::Facet, 1);
-        // `lumen --mist` starts on Mist
+        // `lumen --mist` or `--facet` start on that instrument (Polaris is the default)
         if std::env::args().any(|a| a == "--mist") {
             app.switch(Instrument::Mist);
+        }
+        if std::env::args().any(|a| a == "--facet") {
+            app.switch(Instrument::Facet);
         }
         app
     }
@@ -312,7 +341,11 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Lumen Audio Studio").color(ACCENT));
             ui.separator();
-            for (inst, name) in [(Instrument::Facet, "Facet"), (Instrument::Mist, "Mist")] {
+            for (inst, name) in [
+                (Instrument::Polaris, "Polaris"),
+                (Instrument::Facet, "Facet"),
+                (Instrument::Mist, "Mist"),
+            ] {
                 if ui.selectable_label(self.inst == inst, name).clicked() {
                     self.switch(inst);
                 }
@@ -535,6 +568,582 @@ impl App {
         }
     }
 
+    fn polaris_panel(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            for (tab, name) in [
+                (Tab::Oscillators, "Oscillators"),
+                (Tab::Filters, "Filters"),
+                (Tab::Modulators, "Envelopes and LFOs"),
+                (Tab::Matrix, "Modulation"),
+                (Tab::Global, "Voice and global"),
+            ] {
+                ui.selectable_value(&mut self.tab, tab, name);
+            }
+        });
+        ui.add_space(6.0);
+        let mut changed = false;
+        match self.tab {
+            Tab::Oscillators => changed |= self.oscillators(ui),
+            Tab::Filters => changed |= self.filters(ui),
+            Tab::Modulators => changed |= self.modulators(ui),
+            Tab::Matrix => changed |= self.matrix(ui),
+            Tab::Global => changed |= self.globals(ui),
+        }
+        if changed {
+            self.push_patch(Instrument::Polaris);
+        }
+    }
+
+    fn oscillators(&mut self, ui: &mut Ui) -> bool {
+        let mut changed = false;
+        let pct = |v: f64| format!("{:.0}%", v * 100.0);
+        let tables: Vec<(&str, &str)> = table_ids().map(|t| (t, t)).collect();
+        let warps = [
+            ("none", "No warp"),
+            ("sync", "Sync"),
+            ("bend+", "Bend +"),
+            ("bend-", "Bend -"),
+            ("pwm", "PWM"),
+            ("mirror", "Mirror"),
+            ("fm", "FM"),
+            ("ring", "Ring"),
+            ("quantize", "Quantize"),
+            ("asym", "Asym"),
+        ];
+        let routes = [
+            ("A", "Filter A"),
+            ("B", "Filter B"),
+            ("AB", "A + B"),
+            ("direct", "Direct"),
+        ];
+        egui::Grid::new("oscs").num_columns(2).show(ui, |ui| {
+            for o in 0..4 {
+                let base = format!("/osc/{o}");
+                ui.group(|ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            changed |= self.toggle(
+                                ui,
+                                &format!("{base}/on"),
+                                &format!("Osc {}", ["A", "B", "C", "D"][o]),
+                            );
+                            changed |= self.choice(
+                                ui,
+                                &format!("{base}/table"),
+                                &format!("tbl{o}"),
+                                &tables,
+                            );
+                            changed |= self.choice(
+                                ui,
+                                &format!("{base}/warp"),
+                                &format!("wrp{o}"),
+                                &warps,
+                            );
+                            changed |= self.choice(
+                                ui,
+                                &format!("{base}/route"),
+                                &format!("rte{o}"),
+                                &routes,
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/pos"),
+                                "WT pos",
+                                0.0..=1.0,
+                                false,
+                                &pct,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/warpAmt"),
+                                "Warp",
+                                0.0..=1.0,
+                                false,
+                                &pct,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/level"),
+                                "Level",
+                                0.0..=1.0,
+                                false,
+                                &pct,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/pan"),
+                                "Pan",
+                                -1.0..=1.0,
+                                false,
+                                &|v| format!("{v:+.2}"),
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/oct"),
+                                "Octave",
+                                -3.0..=3.0,
+                                false,
+                                &|v| format!("{:+.0}", v.round()),
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/semi"),
+                                "Semi",
+                                -12.0..=12.0,
+                                false,
+                                &|v| format!("{:+.0}", v.round()),
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/fine"),
+                                "Fine",
+                                -100.0..=100.0,
+                                false,
+                                &|v| format!("{v:+.0} ct"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/voices"),
+                                "Unison",
+                                1.0..=16.0,
+                                false,
+                                &|v| format!("{:.0}", v.round()),
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/detune"),
+                                "Detune",
+                                0.0..=1.0,
+                                false,
+                                &pct,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/blend"),
+                                "Blend",
+                                0.0..=1.0,
+                                false,
+                                &pct,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/spread"),
+                                "Spread",
+                                0.0..=1.0,
+                                false,
+                                &pct,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/phase"),
+                                "Phase",
+                                0.0..=1.0,
+                                false,
+                                &pct,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/randPhase"),
+                                "Rand ph.",
+                                0.0..=1.0,
+                                false,
+                                &pct,
+                            );
+                        });
+                    });
+                });
+                if o % 2 == 1 {
+                    ui.end_row();
+                }
+            }
+        });
+        ui.horizontal_top(|ui| {
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        changed |= self.toggle(ui, "/sub/on", "Sub");
+                        changed |= self.choice(
+                            ui,
+                            "/sub/wave",
+                            "subwave",
+                            &[
+                                ("sine", "Sine"),
+                                ("triangle", "Triangle"),
+                                ("square", "Square"),
+                                ("saw", "Saw"),
+                            ],
+                        );
+                        changed |= self.choice(ui, "/sub/route", "subroute", &routes);
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= self.knob(ui, "/sub/level", "Level", 0.0..=1.0, false, &pct);
+                        changed |= self.knob(ui, "/sub/oct", "Octave", -3.0..=0.0, false, &|v| {
+                            format!("{:+.0}", v.round())
+                        });
+                    });
+                });
+            });
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        changed |= self.toggle(ui, "/noise/on", "Noise");
+                        changed |= self.choice(
+                            ui,
+                            "/noise/color",
+                            "ncolor",
+                            &[("white", "White"), ("pink", "Pink")],
+                        );
+                        changed |= self.choice(ui, "/noise/route", "nroute", &routes);
+                    });
+                    changed |= self.knob(ui, "/noise/level", "Level", 0.0..=1.0, false, &pct);
+                });
+            });
+        });
+        changed
+    }
+
+    fn filters(&mut self, ui: &mut Ui) -> bool {
+        let mut changed = false;
+        let pct = |v: f64| format!("{:.0}%", v * 100.0);
+        let types = [
+            ("lp12", "LP 12"),
+            ("lp24", "LP 24"),
+            ("ladder", "Ladder"),
+            ("hp12", "HP 12"),
+            ("hp24", "HP 24"),
+            ("bp12", "BP 12"),
+            ("bp24", "BP 24"),
+            ("notch", "Notch"),
+            ("peak", "Peak"),
+            ("formant", "Formant"),
+            ("comb", "Comb"),
+        ];
+        ui.horizontal(|ui| {
+            ui.label("Routing");
+            changed |= self.choice(
+                ui,
+                "/filterRouting",
+                "frouting",
+                &[("serial", "Serial"), ("parallel", "Parallel (A and B)")],
+            );
+        });
+        for f in 0..2 {
+            let base = format!("/filters/{f}");
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        changed |=
+                            self.toggle(ui, &format!("{base}/on"), &format!("Filter {}", f + 1));
+                        changed |=
+                            self.choice(ui, &format!("{base}/type"), &format!("ftype{f}"), &types);
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= self.knob(
+                            ui,
+                            &format!("{base}/cutoff"),
+                            "Cutoff",
+                            16.0..=18000.0,
+                            true,
+                            &|v| {
+                                if v >= 1000.0 {
+                                    format!("{:.1} kHz", v / 1000.0)
+                                } else {
+                                    format!("{v:.0} Hz")
+                                }
+                            },
+                        );
+                        changed |= self.knob(
+                            ui,
+                            &format!("{base}/res"),
+                            "Resonance",
+                            0.0..=1.0,
+                            false,
+                            &pct,
+                        );
+                        changed |= self.knob(
+                            ui,
+                            &format!("{base}/drive"),
+                            "Drive",
+                            0.0..=1.0,
+                            false,
+                            &pct,
+                        );
+                        changed |= self.knob(
+                            ui,
+                            &format!("{base}/keytrack"),
+                            "Key track",
+                            -1.0..=1.0,
+                            false,
+                            &pct,
+                        );
+                        changed |= self.knob(
+                            ui,
+                            &format!("{base}/envAmt"),
+                            "Env 2 amt",
+                            -8.0..=8.0,
+                            false,
+                            &|v| format!("{v:+.1} oct"),
+                        );
+                        changed |= self.knob(
+                            ui,
+                            &format!("{base}/velAmt"),
+                            "Velocity",
+                            -8.0..=8.0,
+                            false,
+                            &|v| format!("{v:+.1} oct"),
+                        );
+                    });
+                });
+            });
+        }
+        changed
+    }
+
+    fn modulators(&mut self, ui: &mut Ui) -> bool {
+        let mut changed = false;
+        let secs = |v: f64| {
+            if v < 1.0 {
+                format!("{:.0} ms", v * 1000.0)
+            } else {
+                format!("{v:.2} s")
+            }
+        };
+        ui.label(RichText::new("Envelopes").strong());
+        ui.horizontal_top(|ui| {
+            for e in 0..4 {
+                let base = format!("/env/{e}");
+                ui.group(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(["Amp (env 1)", "Filter (env 2)", "Env 3", "Env 4"][e]);
+                        ui.horizontal(|ui| {
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/a"),
+                                "Attack",
+                                0.001..=10.0,
+                                true,
+                                &secs,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/h"),
+                                "Hold",
+                                0.0..=5.0,
+                                false,
+                                &secs,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/d"),
+                                "Decay",
+                                0.001..=10.0,
+                                true,
+                                &secs,
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/s"),
+                                "Sustain",
+                                0.0..=1.0,
+                                false,
+                                &|v| format!("{:.0}%", v * 100.0),
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/r"),
+                                "Release",
+                                0.001..=10.0,
+                                true,
+                                &secs,
+                            );
+                        });
+                    });
+                });
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(RichText::new("LFOs").strong());
+        let shapes = [
+            ("sine", "Sine"),
+            ("triangle", "Triangle"),
+            ("saw", "Saw"),
+            ("ramp", "Ramp"),
+            ("square", "Square"),
+            ("sh", "Sample & hold"),
+            ("smooth", "Smooth random"),
+        ];
+        ui.horizontal_top(|ui| {
+            for l in 0..4 {
+                let base = format!("/lfo/{l}");
+                ui.group(|ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("LFO {}", l + 1));
+                            changed |= self.choice(
+                                ui,
+                                &format!("{base}/shape"),
+                                &format!("lfoshape{l}"),
+                                &shapes,
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            changed |= self.toggle(ui, &format!("{base}/sync"), "Sync");
+                            changed |= self.toggle(ui, &format!("{base}/retrig"), "Retrigger");
+                        });
+                        ui.horizontal(|ui| {
+                            let synced = self.patches[index(self.inst)]
+                                .pointer(&format!("{base}/sync"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            if synced {
+                                changed |= self.knob(
+                                    ui,
+                                    &format!("{base}/div"),
+                                    "Beats",
+                                    0.0625..=16.0,
+                                    true,
+                                    &|v| format!("{v:.2}"),
+                                );
+                            } else {
+                                changed |= self.knob(
+                                    ui,
+                                    &format!("{base}/rate"),
+                                    "Rate",
+                                    0.02..=40.0,
+                                    true,
+                                    &|v| format!("{v:.2} Hz"),
+                                );
+                            }
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/phase"),
+                                "Phase",
+                                0.0..=1.0,
+                                false,
+                                &|v| format!("{:.0}%", v * 100.0),
+                            );
+                            changed |= self.knob(
+                                ui,
+                                &format!("{base}/delay"),
+                                "Fade in",
+                                0.0..=5.0,
+                                false,
+                                &secs,
+                            );
+                        });
+                    });
+                });
+            }
+        });
+        changed
+    }
+
+    fn matrix(&mut self, ui: &mut Ui) -> bool {
+        let k = index(self.inst);
+        let dests = mod_destinations();
+        let slots = self.patches[k]["mod"].as_array().map_or(0, Vec::len);
+        let mut changed = false;
+        let mut remove = None;
+        ui.label(
+            RichText::new("Each slot sends a source to a destination, scaled by its amount.")
+                .weak(),
+        );
+        for i in 0..slots {
+            let base = format!("/mod/{i}");
+            ui.horizontal(|ui| {
+                let src: Vec<(&str, &str)> = MOD_SOURCES.iter().map(|s| (*s, *s)).collect();
+                let dst: Vec<(&str, &str)> =
+                    dests.iter().map(|d| (d.0.as_str(), d.0.as_str())).collect();
+                changed |= self.choice(ui, &format!("{base}/src"), &format!("msrc{i}"), &src);
+                ui.label("to");
+                changed |= self.choice(ui, &format!("{base}/dest"), &format!("mdst{i}"), &dst);
+                let mut amt = self.num(&format!("{base}/amt"));
+                let r = ui.add(egui::Slider::new(&mut amt, -1.0..=1.0).fixed_decimals(2));
+                if r.changed() {
+                    self.set(&format!("{base}/amt"), json!(amt));
+                    changed = true;
+                }
+                if ui.button("Remove").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            if let Some(a) = self.patches[k]["mod"].as_array_mut() {
+                a.remove(i);
+            }
+            changed = true;
+        }
+        if slots < 32 && ui.button("Add a slot").clicked() {
+            if let Some(a) = self.patches[k]["mod"].as_array_mut() {
+                a.push(json!({ "src": "lfo1", "dest": "osc0.pos", "amt": 0.3 }));
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn globals(&mut self, ui: &mut Ui) -> bool {
+        let mut changed = false;
+        let pct = |v: f64| format!("{:.0}%", v * 100.0);
+        ui.horizontal_top(|ui| {
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        changed |= self.toggle(ui, "/voice/mono", "Mono");
+                        changed |= self.toggle(ui, "/voice/legato", "Legato");
+                    });
+                    ui.horizontal(|ui| {
+                        changed |=
+                            self.knob(ui, "/voice/poly", "Voices", 1.0..=32.0, false, &|v| {
+                                format!("{v:.0}")
+                            });
+                        changed |= self.knob(ui, "/voice/glide", "Glide", 0.0..=2.0, false, &|v| {
+                            format!("{:.0} ms", v * 1000.0)
+                        });
+                        changed |= self.knob(
+                            ui,
+                            "/voice/pbRange",
+                            "Bend range",
+                            0.0..=24.0,
+                            false,
+                            &|v| format!("{v:.0} st"),
+                        );
+                        changed |=
+                            self.knob(ui, "/voice/velSens", "Vel. sens.", 0.0..=1.0, false, &pct);
+                    });
+                });
+            });
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    changed |= self.knob(ui, "/level", "Level", 0.0..=1.0, false, &pct);
+                    changed |= self.knob(ui, "/tune", "Tune", -12.0..=12.0, false, &|v| {
+                        format!("{v:+.2} st")
+                    });
+                });
+            });
+        });
+        ui.add_space(6.0);
+        ui.label(RichText::new("Macros (use them as sources in the modulation page)").strong());
+        ui.horizontal(|ui| {
+            for m in 0..8 {
+                changed |= self.knob(
+                    ui,
+                    &format!("/macros/{m}"),
+                    &format!("Macro {}", m + 1),
+                    0.0..=1.0,
+                    false,
+                    &pct,
+                );
+            }
+        });
+        changed
+    }
+
     fn operator(&mut self, ui: &mut Ui, i: usize) -> bool {
         let base = format!("/ops/{i}");
         let mut changed = false;
@@ -740,6 +1349,12 @@ impl eframe::App for App {
                     ui.label(RichText::new("Granular synth").weak());
                     ui.add_space(6.0);
                     self.mist_panel(ui);
+                }
+                Instrument::Polaris => {
+                    ui.label(RichText::new("Polaris").size(20.0).strong());
+                    ui.label(RichText::new("Wavetable synth").weak());
+                    ui.add_space(6.0);
+                    self.polaris_panel(ui);
                 }
             });
         });
