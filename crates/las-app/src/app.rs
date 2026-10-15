@@ -2,6 +2,7 @@
 //! The main window: the instruments (Facet, Mist), a keyboard and the meters.
 
 use crate::audio::{Audio, Command, Instrument, Source};
+use crate::presets::{self, Entry};
 use crate::widgets::{knob, meter, note_name, piano, ACCENT};
 use eframe::egui::{self, Color32, RichText, Ui};
 use las_dsp::fm::{default_fm_json, ALGORITHMS};
@@ -14,34 +15,12 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Factory sounds, as differences from the defaults.
-const FACET_PRESETS: [(&str, &str); 3] = [
-    ("Init", "{}"),
-    ("Bell", include_str!("../../../examples/facet-bell.json")),
-    (
-        "Electric Piano",
-        include_str!("../../../examples/facet-electric-piano.json"),
-    ),
-];
-
-const MIST_PRESETS: [(&str, &str); 2] = [
-    ("Init", "{}"),
-    ("Pad", include_str!("../../../examples/mist-pad.json")),
-];
-
-const POLARIS_PRESETS: [(&str, &str); 2] = [
-    ("Init", "{}"),
-    (
-        "Supersaw",
-        include_str!("../../../examples/synth-supersaw.json"),
-    ),
-];
-
-fn presets(i: Instrument) -> &'static [(&'static str, &'static str)] {
+/// The preset bank of each instrument.
+fn bank_id(i: Instrument) -> &'static str {
     match i {
-        Instrument::Facet => &FACET_PRESETS,
-        Instrument::Mist => &MIST_PRESETS,
-        Instrument::Polaris => &POLARIS_PRESETS,
+        Instrument::Facet => "facet",
+        Instrument::Mist => "mist",
+        Instrument::Polaris => "polaris",
     }
 }
 
@@ -83,7 +62,12 @@ pub struct App {
     /// Defaults and the current patch of each instrument: Facet, Mist, Polaris.
     defaults: [Value; 3],
     patches: [Value; 3],
+    /// The preset lists (Init, factory, user) and the one each instrument is on.
+    entries: [Vec<Entry>; 3],
     presets: [usize; 3],
+    /// What is typed in the preset search box, and the name for a new preset.
+    search: String,
+    new_name: String,
     /// Which page of the Polaris panel is showing.
     tab: Tab,
     /// What Mist reads from: the built-in texture or a dropped file.
@@ -135,7 +119,14 @@ impl App {
             inst: Instrument::Polaris,
             defaults: full_defaults(),
             patches: full_defaults(),
+            entries: [
+                presets::entries(bank_id(Instrument::Facet), &full_defaults()[0]),
+                presets::entries(bank_id(Instrument::Mist), &full_defaults()[1]),
+                presets::entries(bank_id(Instrument::Polaris), &full_defaults()[2]),
+            ],
             presets: [0, 0, 0],
+            search: String::new(),
+            new_name: String::new(),
             tab: Tab::Oscillators,
             source_name: "built-in texture".into(),
             volume: 0.8,
@@ -144,9 +135,9 @@ impl App {
             clicked: None,
             error: None,
         };
-        app.load_preset(Instrument::Polaris, 1);
-        app.load_preset(Instrument::Mist, 1);
-        app.load_preset(Instrument::Facet, 1);
+        for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
+            app.load_preset(inst, 1);
+        }
         // `lumen --mist` or `--facet` start on that instrument (Polaris is the default)
         if std::env::args().any(|a| a == "--mist") {
             app.switch(Instrument::Mist);
@@ -159,11 +150,51 @@ impl App {
 
     fn load_preset(&mut self, inst: Instrument, i: usize) {
         let k = index(inst);
-        let case: Value = serde_json::from_str(presets(inst)[i].1).unwrap_or_else(|_| json!({}));
-        let over = case.get("patch").cloned().unwrap_or(case);
-        self.patches[k] = merge_patch(&self.defaults[k], &over);
+        let Some(e) = self.entries[k].get(i) else {
+            return;
+        };
+        self.patches[k] = e.patch.clone();
         self.presets[k] = i;
         self.push_patch(inst);
+    }
+
+    /// Save the current patch as a user preset (replacing one of the same name).
+    fn save_preset(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let k = index(self.inst);
+        let patch = self.patches[k].clone();
+        let list = &mut self.entries[k];
+        let at = match list.iter().position(|e| e.user && e.name == name) {
+            Some(i) => {
+                list[i].patch = patch;
+                i
+            }
+            None => {
+                list.push(Entry {
+                    name: name.to_string(),
+                    category: "User".into(),
+                    patch,
+                    user: true,
+                });
+                list.len() - 1
+            }
+        };
+        self.presets[k] = at;
+        self.error = presets::save_user(bank_id(self.inst), &self.entries[k]).err();
+    }
+
+    fn delete_preset(&mut self, i: usize) {
+        let k = index(self.inst);
+        if self.entries[k].get(i).is_some_and(|e| e.user) {
+            self.entries[k].remove(i);
+            if self.presets[k] >= i {
+                self.presets[k] = self.presets[k].saturating_sub(1);
+            }
+            self.error = presets::save_user(bank_id(self.inst), &self.entries[k]).err();
+        }
     }
 
     fn push_patch(&mut self, inst: Instrument) {
@@ -337,6 +368,70 @@ impl App {
         c
     }
 
+    /// Previous and next buttons and a searchable list of the presets.
+    fn preset_picker(&mut self, ui: &mut Ui) {
+        let inst = self.inst;
+        let k = index(inst);
+        let count = self.entries[k].len();
+        let current = self.presets[k].min(count - 1);
+        if ui.button("<").clicked() {
+            self.load_preset(inst, (current + count - 1) % count);
+        }
+        let title = self.entries[k][current].name.clone();
+        let mut pick = None;
+        let mut delete = None;
+        let mut save = None;
+        ui.menu_button(format!("{title}  v"), |ui| {
+            ui.set_min_width(300.0);
+            ui.horizontal(|ui| {
+                ui.label("Search");
+                ui.text_edit_singleline(&mut self.search);
+            });
+            egui::ScrollArea::vertical()
+                .max_height(420.0)
+                .show(ui, |ui| {
+                    let mut shown_category = "";
+                    for (i, e) in self.entries[k].iter().enumerate() {
+                        if !presets::matches(e, &self.search) {
+                            continue;
+                        }
+                        if e.category != shown_category {
+                            shown_category = &e.category;
+                            ui.label(RichText::new(shown_category).strong().color(ACCENT));
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(i == current, &e.name).clicked() {
+                                pick = Some(i);
+                                ui.close();
+                            }
+                            if e.user && ui.small_button("Delete").clicked() {
+                                delete = Some(i);
+                            }
+                        });
+                    }
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.new_name);
+                if ui.button("Save as").clicked() {
+                    save = Some(self.new_name.clone());
+                }
+            });
+        });
+        if ui.button(">").clicked() {
+            self.load_preset(inst, (current + 1) % count);
+        }
+        if let Some(i) = pick {
+            self.load_preset(inst, i);
+        }
+        if let Some(i) = delete {
+            self.delete_preset(i);
+        }
+        if let Some(name) = save {
+            self.save_preset(&name);
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Lumen Audio Studio").color(ACCENT));
@@ -351,21 +446,7 @@ impl App {
                 }
             }
             ui.separator();
-            ui.label("Preset");
-            let inst = self.inst;
-            let k = index(inst);
-            let before = self.presets[k];
-            let mut pick = before;
-            egui::ComboBox::from_id_salt(("preset", k))
-                .selected_text(presets(inst)[before].0)
-                .show_ui(ui, |ui| {
-                    for (i, (name, _)) in presets(inst).iter().enumerate() {
-                        ui.selectable_value(&mut pick, i, *name);
-                    }
-                });
-            if pick != before {
-                self.load_preset(inst, pick);
-            }
+            self.preset_picker(ui);
             ui.separator();
             let mut vol = self.volume;
             if knob(ui, &mut vol, 0.0..=1.0, 0.8, "Volume", false, &|v| {

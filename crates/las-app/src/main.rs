@@ -7,6 +7,7 @@
 mod app;
 mod audio;
 mod midi;
+mod presets;
 mod widgets;
 
 fn main() -> eframe::Result {
