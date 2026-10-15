@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.3 - 2026-10-15
+
+Mist, the granular synth, joins Facet.
+
+- Mist engine ported from the TypeScript version: grains from a source sample, position, scan, spray, size, density, transpose, random pitch, stereo spread, window shape, reverse, key tracking, the modulation matrix, filter, mono and voice stealing. Output and the built-in texture match the original sample for sample on five reference renders.
+- `las render-mist`, with an example patch (`examples/mist-pad.json`).
+- In the app: switch between Facet and Mist, Mist controls, a Pad preset, and drop a `.wav` file on the window to use it as Mist's source. Start on Mist with `lumen --mist`.
+- Engine: instruments now receive the shared random stream, so seeded renders repeat exactly.
+
 ## 0.2.0-alpha.2 - 2026-10-15
 
 The first native app: `lumen`. It plays the Facet FM synth live.

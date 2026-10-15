@@ -22,6 +22,7 @@ new version on `main` is published automatically (see [CHANGELOG.md](CHANGELOG.m
 ```sh
 ./lumen                                              # the app
 las render-facet examples/facet-bell.json -o bell.wav # offline render
+las render-mist examples/mist-pad.json -o pad.wav
 ```
 
 On Linux the app needs the ALSA library (`libasound2`), `libxkbcommon-x11` and

@@ -6,14 +6,34 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, StreamConfig};
 use las_dsp::engine::{prepare_patch, Cc, Event, PreparedPatch};
-use las_dsp::fm::{fm_engine, Fm};
+use las_dsp::fm::{fm_engine, Fm, FmEngine};
+use las_dsp::mist::{mist_engine, Mist, MistEngine};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc as Shared;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// A prepared Facet patch, boxed so it moves through the queue cheaply.
-pub type Patch = Box<PreparedPatch<Fm>>;
+/// A prepared patch, boxed so it moves through the queue cheaply.
+pub enum Patch {
+    Facet(Box<PreparedPatch<Fm>>),
+    Mist(Box<PreparedPatch<Mist>>),
+}
+
+/// The instruments the app can play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Instrument {
+    Facet,
+    Mist,
+}
+
+/// A source sample for Mist. The buffers are shared with the interface, so
+/// swapping one in or out never frees a large buffer on the audio thread.
+pub struct Source {
+    pub left: Shared<[f32]>,
+    pub right: Shared<[f32]>,
+    pub rate: f64,
+}
 
 /// What the interface and MIDI input can ask of the audio thread.
 pub enum Command {
@@ -22,6 +42,8 @@ pub enum Command {
     AllOff,
     Controller { cc: Cc, value: f64 },
     Patch(Patch),
+    Instrument(Instrument),
+    Source(Source),
     Volume(f32),
 }
 
@@ -131,9 +153,16 @@ impl Audio {
     }
 
     /// Parse a patch here and hand it over ready to use.
-    pub fn set_patch(&mut self, json: &serde_json::Value) -> Result<(), String> {
-        let p = prepare_patch::<Fm>(json).map_err(|e| e.to_string())?;
-        self.send(Command::Patch(Box::new(p)));
+    pub fn set_patch(&mut self, inst: Instrument, json: &serde_json::Value) -> Result<(), String> {
+        let p = match inst {
+            Instrument::Facet => Patch::Facet(Box::new(
+                prepare_patch::<Fm>(json).map_err(|e| e.to_string())?,
+            )),
+            Instrument::Mist => Patch::Mist(Box::new(
+                prepare_patch::<Mist>(json).map_err(|e| e.to_string())?,
+            )),
+        };
+        self.send(Command::Patch(p));
         Ok(())
     }
 
@@ -161,8 +190,38 @@ where
         .map_err(|e| format!("cannot open the output: {e}"))
 }
 
+/// Both instruments exist from the start, so switching never allocates.
+struct Engines {
+    facet: FmEngine,
+    mist: MistEngine,
+    active: Instrument,
+}
+
+impl Engines {
+    fn queue(&mut self, e: Event) {
+        match self.active {
+            Instrument::Facet => self.facet.queue(&[e]),
+            Instrument::Mist => self.mist.queue(&[e]),
+        }
+    }
+
+    fn process(&mut self, l: &mut [f32], r: &mut [f32], t0: f64) {
+        match self.active {
+            Instrument::Facet => self.facet.process(l, r, t0),
+            Instrument::Mist => self.mist.process(l, r, t0),
+        }
+    }
+
+    fn active_voices(&self) -> usize {
+        match self.active {
+            Instrument::Facet => self.facet.active_voices(),
+            Instrument::Mist => self.mist.active_voices(),
+        }
+    }
+}
+
 struct Renderer {
-    engine: las_dsp::fm::FmEngine,
+    engine: Engines,
     sr: f64,
     channels: usize,
     clock: u64,
@@ -186,7 +245,11 @@ impl Renderer {
         meters: Arc<Meters>,
     ) -> Self {
         Self {
-            engine: fm_engine(sr, 1),
+            engine: Engines {
+                facet: fm_engine(sr, 1),
+                mist: mist_engine(sr, 1),
+                active: Instrument::Facet,
+            },
             sr,
             channels,
             clock: 0,
@@ -203,27 +266,46 @@ impl Renderer {
 
     fn handle(&mut self, c: Command, now: f64) {
         match c {
-            Command::NoteOn { key, vel } => self.engine.queue(&[Event::On {
+            Command::NoteOn { key, vel } => self.engine.queue(Event::On {
                 time: now,
                 key: key as f64,
                 vel,
                 fine: 0.0,
                 pan: 0.0,
-            }]),
-            Command::NoteOff { key } => self.engine.queue(&[Event::Off {
+            }),
+            Command::NoteOff { key } => self.engine.queue(Event::Off {
                 time: now,
                 key: key as f64,
-            }]),
-            Command::AllOff => self.engine.queue(&[Event::AllOff { time: now }]),
-            Command::Controller { cc, value } => self.engine.queue(&[Event::Cc {
+            }),
+            Command::AllOff => self.engine.queue(Event::AllOff { time: now }),
+            Command::Controller { cc, value } => self.engine.queue(Event::Cc {
                 time: now,
                 cc,
                 value,
-            }]),
+            }),
             Command::Patch(p) => {
-                let old = self.engine.apply_patch(*p);
                 // hand the old patch back to be freed off this thread
-                let _ = self.garbage.push(Box::new(old));
+                let old = match p {
+                    Patch::Facet(p) => Patch::Facet(Box::new(self.engine.facet.apply_patch(*p))),
+                    Patch::Mist(p) => Patch::Mist(Box::new(self.engine.mist.apply_patch(*p))),
+                };
+                let _ = self.garbage.push(old);
+            }
+            Command::Instrument(i) => {
+                if i != self.engine.active {
+                    // let go of what the old instrument is playing
+                    match self.engine.active {
+                        Instrument::Facet => self.engine.facet.all_off(),
+                        Instrument::Mist => self.engine.mist.all_off(),
+                    }
+                    self.engine.active = i;
+                }
+            }
+            Command::Source(src) => {
+                self.engine
+                    .mist
+                    .sound
+                    .set_source(src.left, src.right, src.rate);
             }
             Command::Volume(v) => self.volume = v,
         }
@@ -349,13 +431,54 @@ mod tests {
     fn a_new_patch_is_applied_and_the_old_one_comes_back() {
         let (mut r, mut tx, mut garbage) = renderer();
         let p = prepare_patch::<Fm>(&serde_json::json!({ "algo": 7 })).unwrap();
-        tx.push(Command::Patch(Box::new(p))).ok().unwrap();
+        tx.push(Command::Patch(Patch::Facet(Box::new(p))))
+            .ok()
+            .unwrap();
         let mut buf = vec![0f32; 256 * 2];
         r.fill(&mut buf);
         assert!(
             garbage.pop().is_ok(),
             "the old patch is returned for freeing"
         );
+    }
+
+    #[test]
+    fn switching_to_mist_plays_mist_and_a_source_can_be_swapped() {
+        let (mut r, mut tx, mut garbage) = renderer();
+        let mut buf = vec![0f32; 1024 * 2];
+        tx.push(Command::Instrument(Instrument::Mist)).ok().unwrap();
+        tx.push(Command::NoteOn { key: 60, vel: 1.0 }).ok().unwrap();
+        for _ in 0..20 {
+            r.fill(&mut buf);
+        }
+        assert!(peak(&buf) > 0.005, "Mist plays its built-in texture");
+        // an empty source makes Mist silent
+        let empty: Shared<[f32]> = Shared::from(Vec::new());
+        tx.push(Command::Source(Source {
+            left: empty.clone(),
+            right: empty,
+            rate: 48000.0,
+        }))
+        .ok()
+        .unwrap();
+        let p = prepare_patch::<Mist>(&serde_json::json!({ "grain": { "density": 50 } })).unwrap();
+        tx.push(Command::Patch(Patch::Mist(Box::new(p))))
+            .ok()
+            .unwrap();
+        for _ in 0..40 {
+            r.fill(&mut buf);
+        }
+        assert!(peak(&buf) < 1e-6, "silent with no source");
+        assert!(garbage.pop().is_ok());
+        // back to Facet: the notes of the other instrument were released
+        tx.push(Command::Instrument(Instrument::Facet))
+            .ok()
+            .unwrap();
+        tx.push(Command::NoteOn { key: 69, vel: 1.0 }).ok().unwrap();
+        for _ in 0..8 {
+            r.fill(&mut buf);
+        }
+        assert!(peak(&buf) > 0.01);
     }
 
     #[test]

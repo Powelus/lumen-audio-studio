@@ -1,0 +1,17 @@
+{
+  "seed": 4,
+  "patch": {
+    "env": [{ "a": 0.4, "d": 0.5, "s": 1, "r": 2 }],
+    "voice": { "poly": 8 },
+    "grain": { "position": 0.25, "scan": 0.05, "spray": 0.12, "size": 140, "density": 40, "pitchRand": 0.2, "spread": 0.9, "shape": 0.1 },
+    "filter": { "on": true, "type": "lp", "cutoff": 5000, "res": 0.15 }
+  },
+  "events": [
+    { "t": "on", "time": 0, "key": 48, "vel": 0.8 },
+    { "t": "on", "time": 0, "key": 55, "vel": 0.7 },
+    { "t": "on", "time": 0, "key": 64, "vel": 0.7 },
+    { "t": "off", "time": 3, "key": 48 },
+    { "t": "off", "time": 3, "key": 55 },
+    { "t": "off", "time": 3, "key": 64 }
+  ]
+}

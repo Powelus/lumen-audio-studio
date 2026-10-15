@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `las`: command-line tools for Lumen Audio Studio.
 //!
-//! Today: `las render-facet`, which renders a Facet (FM) patch and notes to a
-//! WAV file, so the sound can be checked and shared without an interface.
+//! Today: `las render-facet` and `las render-mist`, which render a patch and
+//! notes to a WAV file, so the sound can be checked and shared without an
+//! interface.
 
-use las_dsp::engine::{Cc, Event};
+use las_dsp::engine::{Cc, Event, Sound, VoiceEngine};
 use las_dsp::fm::fm_engine;
+use las_dsp::mist::mist_engine;
 use serde_json::Value;
 use std::process::ExitCode;
 
@@ -13,10 +15,12 @@ const USAGE: &str = "las: command-line tools for Lumen Audio Studio
 
 USAGE
     las render-facet <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
+    las render-mist  <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
     las --version
 
 A case file is JSON with a \"patch\" (only what differs from the defaults), a list
-of \"events\" and an optional \"seed\". See examples/facet-bell.json.
+of \"events\" and an optional \"seed\". See examples/facet-bell.json and
+examples/mist-pad.json. Mist plays its built-in texture.
 
 Events: {\"t\":\"on\",\"time\":0,\"key\":60,\"vel\":0.8}   (also \"fine\" and \"pan\")
         {\"t\":\"off\",\"time\":0.5,\"key\":60}
@@ -98,7 +102,38 @@ fn parse(args: &[String]) -> Result<Options, String> {
     })
 }
 
-fn render_facet(opts: &Options) -> Result<(), String> {
+#[derive(Clone, Copy)]
+enum Kind {
+    Facet,
+    Mist,
+}
+
+/// Play the events through an engine in small blocks, as the live app does.
+fn run<S: Sound>(
+    mut engine: VoiceEngine<S>,
+    patch: Option<&Value>,
+    events: &[Event],
+    frames: usize,
+    opts: &Options,
+) -> Result<(Vec<f32>, Vec<f32>), String> {
+    if let Some(p) = patch {
+        engine
+            .set_patch(p)
+            .map_err(|e| format!("{}: {e}", opts.input))?;
+    }
+    engine.queue(events);
+    let sr = engine.sample_rate();
+    let (mut l, mut r) = (vec![0f32; frames], vec![0f32; frames]);
+    let mut i = 0;
+    while i < frames {
+        let end = (i + 128).min(frames);
+        engine.process(&mut l[i..end], &mut r[i..end], i as f64 / sr);
+        i = end;
+    }
+    Ok((l, r))
+}
+
+fn render(kind: Kind, opts: &Options) -> Result<(), String> {
     let text = std::fs::read_to_string(&opts.input).map_err(|e| format!("{}: {e}", opts.input))?;
     let case: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", opts.input))?;
     let events: Vec<Event> = case
@@ -117,21 +152,13 @@ fn render_facet(opts: &Options) -> Result<(), String> {
         return Err("--rate must be between 8000 and 384000".into());
     }
     let sr = f64::from(opts.rate);
-    let mut engine = fm_engine(sr, num(&case, "seed", 1.0) as u32);
-    if let Some(p) = case.get("patch") {
-        engine
-            .set_patch(p)
-            .map_err(|e| format!("{}: {e}", opts.input))?;
-    }
-    engine.queue(&events);
+    let seed = num(&case, "seed", 1.0) as u32;
     let frames = (seconds * sr) as usize;
-    let (mut l, mut r) = (vec![0f32; frames], vec![0f32; frames]);
-    let mut i = 0;
-    while i < frames {
-        let end = (i + 128).min(frames);
-        engine.process(&mut l[i..end], &mut r[i..end], i as f64 / sr);
-        i = end;
-    }
+    let patch = case.get("patch");
+    let (l, r) = match kind {
+        Kind::Facet => run(fm_engine(sr, seed), patch, &events, frames, opts)?,
+        Kind::Mist => run(mist_engine(sr, seed), patch, &events, frames, opts)?,
+    };
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: opts.rate,
@@ -160,7 +187,8 @@ fn main() -> ExitCode {
             println!("las {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Some("render-facet") => parse(&args[1..]).and_then(|o| render_facet(&o)),
+        Some("render-facet") => parse(&args[1..]).and_then(|o| render(Kind::Facet, &o)),
+        Some("render-mist") => parse(&args[1..]).and_then(|o| render(Kind::Mist, &o)),
         Some("--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())
