@@ -7,3 +7,6 @@
 //! TypeScript code produced (see `docs/PARITY.md`).
 
 pub mod biquad;
+pub mod engine;
+pub mod fm;
+pub mod patch;
