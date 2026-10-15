@@ -1,0 +1,13 @@
+[package]
+name = "las-dsp"
+description = "Audio DSP for Lumen Audio Studio: filters, oscillators, synth engines and effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
