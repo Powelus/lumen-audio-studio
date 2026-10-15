@@ -7,6 +7,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, StreamConfig};
 use las_dsp::engine::{prepare_patch, Cc, Event, PreparedPatch};
 use las_dsp::fm::{fm_engine, Fm, FmEngine};
+use las_dsp::fx::registry::{FxSlot, Params};
+use las_dsp::fx::stepfx::Position;
 use las_dsp::mist::{mist_engine, Mist, MistEngine};
 use las_dsp::synth::{prepare_synth_patch, synth_engine, PreparedSynthPatch, SynthEngine};
 use las_dsp::wavetable::TableLibrary;
@@ -21,6 +23,15 @@ pub enum Patch {
     Facet(Box<PreparedPatch<Fm>>),
     Mist(Box<PreparedPatch<Mist>>),
     Polaris(Box<PreparedSynthPatch>),
+}
+
+/// What the audio thread hands back to be freed elsewhere (it is only ever dropped).
+#[allow(dead_code)]
+pub enum Garbage {
+    Patch(Patch),
+    #[allow(clippy::box_collection)] // keeps the ring slot small
+    Chain(Box<Vec<FxSlot>>),
+    Params(Box<Params>),
 }
 
 /// The instruments the app can play.
@@ -41,14 +52,30 @@ pub struct Source {
 
 /// What the interface and MIDI input can ask of the audio thread.
 pub enum Command {
-    NoteOn { key: u8, vel: f64 },
-    NoteOff { key: u8 },
+    NoteOn {
+        key: u8,
+        vel: f64,
+    },
+    NoteOff {
+        key: u8,
+    },
     AllOff,
-    Controller { cc: Cc, value: f64 },
+    Controller {
+        cc: Cc,
+        value: f64,
+    },
     Patch(Patch),
     Instrument(Instrument),
     Source(Source),
     Volume(f32),
+    /// Replace an instrument's whole effects chain (the old chain comes back).
+    #[allow(clippy::box_collection)] // keeps the command small
+    Chain(Instrument, Box<Vec<FxSlot>>),
+    /// New parameters for one effect of an instrument's chain.
+    FxParams(Instrument, usize, Box<Params>),
+    /// Switch an effect on or off and set its dry/wet mix.
+    FxMix(Instrument, usize, bool, f64),
+    Tempo(f64),
 }
 
 /// Meters and counters the audio thread publishes.
@@ -88,7 +115,7 @@ impl Meters {
 pub struct Audio {
     _stream: cpal::Stream,
     commands: Producer<Command>,
-    garbage: Consumer<Patch>,
+    garbage: Consumer<Garbage>,
     pub meters: Arc<Meters>,
     pub sample_rate: u32,
     pub device: String,
@@ -120,7 +147,7 @@ impl Audio {
 
         let (ui_tx, ui_rx) = RingBuffer::<Command>::new(512);
         let (midi_tx, midi_rx) = RingBuffer::<Command>::new(512);
-        let (garbage_tx, garbage_rx) = RingBuffer::<Patch>::new(64);
+        let (garbage_tx, garbage_rx) = RingBuffer::<Garbage>::new(64);
         let meters = Arc::new(Meters::default());
         let state = Renderer::new(
             sample_rate as f64,
@@ -176,6 +203,16 @@ impl Audio {
         Ok(())
     }
 
+    /// Put a ready-made effects chain on an instrument.
+    pub fn set_chain(&mut self, inst: Instrument, slots: Vec<FxSlot>) {
+        self.send(Command::Chain(inst, Box::new(slots)));
+    }
+
+    /// New parameters for one effect (made with `parse_params`).
+    pub fn set_fx_params(&mut self, inst: Instrument, slot: usize, p: Params) {
+        self.send(Command::FxParams(inst, slot, Box::new(p)));
+    }
+
     /// Free what the audio thread has finished with.
     pub fn collect_garbage(&mut self) {
         while self.garbage.pop().is_ok() {}
@@ -198,6 +235,14 @@ where
             None,
         )
         .map_err(|e| format!("cannot open the output: {e}"))
+}
+
+fn chain_index(i: Instrument) -> usize {
+    match i {
+        Instrument::Facet => 0,
+        Instrument::Mist => 1,
+        Instrument::Polaris => 2,
+    }
 }
 
 /// Both instruments exist from the start, so switching never allocates.
@@ -242,7 +287,10 @@ struct Renderer {
     volume: f32,
     ui: Consumer<Command>,
     midi: Consumer<Command>,
-    garbage: Producer<Patch>,
+    garbage: Producer<Garbage>,
+    /// The effects chain of each instrument: Facet, Mist, Polaris.
+    chains: [Vec<FxSlot>; 3],
+    bpm: f64,
     l: Vec<f32>,
     r: Vec<f32>,
     meters: Arc<Meters>,
@@ -255,7 +303,7 @@ impl Renderer {
         channels: usize,
         ui: Consumer<Command>,
         midi: Consumer<Command>,
-        garbage: Producer<Patch>,
+        garbage: Producer<Garbage>,
         meters: Arc<Meters>,
     ) -> Self {
         Self {
@@ -272,6 +320,8 @@ impl Renderer {
             ui,
             midi,
             garbage,
+            chains: [Vec::new(), Vec::new(), Vec::new()],
+            bpm: 120.0,
             l: vec![0.0; 8192],
             r: vec![0.0; 8192],
             meters,
@@ -298,17 +348,34 @@ impl Renderer {
                 cc,
                 value,
             }),
-            Command::Patch(p) => {
-                // hand the old patch back to be freed off this thread
-                let old = match p {
-                    Patch::Facet(p) => Patch::Facet(Box::new(self.engine.facet.apply_patch(*p))),
-                    Patch::Mist(p) => Patch::Mist(Box::new(self.engine.mist.apply_patch(*p))),
-                    Patch::Polaris(p) => {
-                        Patch::Polaris(Box::new(self.engine.polaris.apply_patch(*p)))
-                    }
-                };
-                let _ = self.garbage.push(old);
+            Command::Patch(mut p) => {
+                // the patch trades places with the current one, which goes back in the
+                // same box to be freed off this thread
+                match &mut p {
+                    Patch::Facet(b) => self.engine.facet.apply_patch(b),
+                    Patch::Mist(b) => self.engine.mist.apply_patch(b),
+                    Patch::Polaris(b) => self.engine.polaris.apply_patch(b),
+                }
+                let _ = self.garbage.push(Garbage::Patch(p));
             }
+            Command::Chain(inst, mut new) => {
+                std::mem::swap(&mut self.chains[chain_index(inst)], &mut *new);
+                let _ = self.garbage.push(Garbage::Chain(new));
+            }
+            Command::FxParams(inst, slot, mut params) => {
+                if let Some(s) = self.chains[chain_index(inst)].get_mut(slot) {
+                    let p = std::mem::replace(&mut *params, Params::None);
+                    *params = s.unit.apply(p);
+                }
+                let _ = self.garbage.push(Garbage::Params(params));
+            }
+            Command::FxMix(inst, slot, on, mix) => {
+                if let Some(s) = self.chains[chain_index(inst)].get_mut(slot) {
+                    s.enabled = on;
+                    s.mix = mix;
+                }
+            }
+            Command::Tempo(bpm) => self.bpm = bpm,
             Command::Instrument(i) => {
                 if i != self.engine.active {
                     // let go of what the old instrument is playing
@@ -350,7 +417,20 @@ impl Renderer {
             let (l, r) = (&mut self.l[..n], &mut self.r[..n]);
             l.fill(0.0);
             r.fill(0.0);
-            self.engine.process(l, r, now + done as f64 / self.sr);
+            let t = now + done as f64 / self.sr;
+            self.engine.process(l, r, t);
+            // the active instrument's effects; the song position follows the clock
+            let chain = &mut self.chains[chain_index(self.engine.active)];
+            if !chain.is_empty() {
+                let pos = Position {
+                    beat: t * self.bpm / 60.0,
+                    bpm: self.bpm,
+                };
+                for slot in chain.iter_mut() {
+                    slot.unit.set_position(pos);
+                    slot.process(l, r, None);
+                }
+            }
             let (mut pl, mut pr) = (0f32, 0f32);
             for i in 0..n {
                 let (a, b) = (l[i] * self.volume, r[i] * self.volume);
@@ -393,10 +473,10 @@ impl Renderer {
 mod tests {
     use super::*;
 
-    fn renderer() -> (Renderer, Producer<Command>, Consumer<Patch>) {
+    fn renderer() -> (Renderer, Producer<Command>, Consumer<Garbage>) {
         let (ui_tx, ui_rx) = RingBuffer::<Command>::new(64);
         let (_midi_tx, midi_rx) = RingBuffer::<Command>::new(64);
-        let (garbage_tx, garbage_rx) = RingBuffer::<Patch>::new(8);
+        let (garbage_tx, garbage_rx) = RingBuffer::<Garbage>::new(8);
         let r = Renderer::new(
             48000.0,
             2,
@@ -444,6 +524,44 @@ mod tests {
         r.fill(&mut buf);
         let quiet = peak(&buf);
         assert!(loud > 0.0 && quiet < loud, "{quiet} should be below {loud}");
+    }
+
+    fn gain_slot(db: f64) -> FxSlot {
+        use las_dsp::fx::registry::{parse_params, EffectUnit};
+        let mut unit = EffectUnit::new("las-stereo", 48000.0).unwrap();
+        let state = serde_json::json!({ "gain": db });
+        unit.apply(parse_params("las-stereo", &state, 48000.0).unwrap());
+        FxSlot::new(unit, 48000.0)
+    }
+
+    #[test]
+    fn an_effects_chain_changes_the_sound_and_can_be_changed_live() {
+        let (mut r, mut tx, mut garbage) = renderer();
+        let mut buf = vec![0f32; 1024 * 2];
+        tx.push(Command::NoteOn { key: 60, vel: 1.0 }).ok().unwrap();
+        for _ in 0..4 {
+            r.fill(&mut buf);
+        }
+        let dry = peak(&buf);
+        // minus 12 dB on the active instrument
+        tx.push(Command::Chain(
+            Instrument::Polaris,
+            Box::new(vec![gain_slot(-12.0)]),
+        ))
+        .ok()
+        .unwrap();
+        r.fill(&mut buf);
+        assert!(garbage.pop().is_ok(), "the empty old chain comes back");
+        let wet = peak(&buf);
+        assert!(wet < dry * 0.4, "{wet} should be well below {dry}");
+        // turning the slot off lets the sound through again (after the old chain's tail)
+        tx.push(Command::FxMix(Instrument::Polaris, 0, false, 1.0))
+            .ok()
+            .unwrap();
+        for _ in 0..2 {
+            r.fill(&mut buf);
+        }
+        assert!(peak(&buf) > dry * 0.6, "bypassed slot passes the sound");
     }
 
     #[test]
@@ -528,7 +646,7 @@ mod tests {
     fn mono_and_odd_buffer_sizes_work() {
         let (ui_tx, ui_rx) = RingBuffer::<Command>::new(8);
         let (_m, midi_rx) = RingBuffer::<Command>::new(8);
-        let (garbage_tx, _g) = RingBuffer::<Patch>::new(8);
+        let (garbage_tx, _g) = RingBuffer::<Garbage>::new(8);
         let mut r = Renderer::new(
             44100.0,
             1,

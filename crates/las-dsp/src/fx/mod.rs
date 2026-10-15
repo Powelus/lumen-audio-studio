@@ -17,9 +17,12 @@ use serde::Serialize;
 use serde_json::Value;
 use std::f64::consts::PI;
 
+pub mod convolver;
 pub mod delay;
 pub mod dynamics;
 pub mod modulation;
+pub mod native;
+pub mod registry;
 pub mod reverb;
 pub mod stepfx;
 

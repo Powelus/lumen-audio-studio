@@ -16,6 +16,8 @@ pub struct Entry {
     pub patch: Value,
     /// Saved by the user (can be deleted).
     pub user: bool,
+    /// The effects rack the preset brings: `{type, on, state}` items.
+    pub fx: Vec<Value>,
 }
 
 /// The folder for the app's own files.
@@ -48,6 +50,7 @@ pub fn entries(bank_id: &str, defaults: &Value) -> Vec<Entry> {
         category: "Init".into(),
         patch: defaults.clone(),
         user: false,
+        fx: Vec::new(),
     }];
     if let Some(b) = bank(bank_id) {
         for (i, p) in b.presets.iter().enumerate() {
@@ -60,6 +63,12 @@ pub fn entries(bank_id: &str, defaults: &Value) -> Vec<Entry> {
                     category: p.category.clone(),
                     patch: merge_patch(defaults, &patch),
                     user: false,
+                    fx: p
+                        .state
+                        .get("fx")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -82,6 +91,11 @@ fn load_user(bank_id: &str, defaults: &Value) -> Vec<Entry> {
                 category: "User".into(),
                 patch: merge_patch(defaults, p.get("patch")?),
                 user: true,
+                fx: p
+                    .get("fx")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -96,7 +110,7 @@ pub fn save_user(bank_id: &str, entries: &[Entry]) -> Result<(), String> {
     let list: Vec<Value> = entries
         .iter()
         .filter(|e| e.user)
-        .map(|e| json!({ "name": e.name, "patch": e.patch }))
+        .map(|e| json!({ "name": e.name, "patch": e.patch, "fx": e.fx }))
         .collect();
     let text = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
     // write to a temporary file first, so a crash cannot leave half a file
@@ -134,6 +148,7 @@ mod tests {
             category: "Lead".into(),
             patch: json!({}),
             user: false,
+            fx: Vec::new(),
         };
         assert!(matches(&e, ""));
         assert!(matches(&e, "super"));
@@ -158,6 +173,7 @@ mod tests {
             category: "User".into(),
             patch: json!({ "level": 0.2 }),
             user: true,
+            fx: Vec::new(),
         });
         save_user("polaris", &list).unwrap();
         let again = entries("polaris", &defaults);

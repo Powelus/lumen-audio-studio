@@ -371,7 +371,10 @@ pub trait Sound {
     }
     fn new_voice(&self) -> Self::Voice;
     /// The patch changed (validated and merged with the defaults).
-    fn patch_changed(&mut self, patch: Self::Patch);
+    ///
+    /// Returns the previous instrument patch, so the caller can free it off the
+    /// audio thread.
+    fn patch_changed(&mut self, patch: Self::Patch) -> Option<Self::Patch>;
     /// A note starts (`legato`: it continues the sounding voice instead).
     fn start(&mut self, v: &mut Self::Voice, base: &BaseVoice, legato: bool);
     /// Control-rate update. `pitch` is the final note pitch in semitones.
@@ -553,16 +556,20 @@ impl<S: Sound> VoiceEngine<S> {
     /// Set the patch from JSON. Only the values that differ from the defaults
     /// need to be present.
     pub fn set_patch(&mut self, over: &Value) -> Result<(), PatchError> {
-        let prepared = prepare_patch::<S>(over)?;
-        self.apply_patch(prepared);
+        let mut prepared = prepare_patch::<S>(over)?;
+        self.apply_patch(&mut prepared);
         Ok(())
     }
 
     /// Switch to a patch made by [`prepare_patch`]. Does no parsing and, once
-    /// the engine exists, no allocation, so it is safe on the audio thread. The
-    /// previous patch comes back so the caller can drop it elsewhere.
-    pub fn apply_patch(&mut self, mut p: PreparedPatch<S>) -> PreparedPatch<S> {
-        let own = p.own.take().expect("a prepared patch is applied once");
+    /// the engine exists, no allocation and no freeing, so it is safe on the audio
+    /// thread: the patch trades places with the current one, which stays in `p`
+    /// for the caller to drop elsewhere (or to switch back to).
+    pub fn apply_patch(&mut self, p: &mut PreparedPatch<S>) {
+        let own = p
+            .own
+            .take()
+            .expect("a prepared patch always holds its patch");
         std::mem::swap(&mut self.patch, &mut p.common);
         std::mem::swap(&mut self.patch_json, &mut p.json);
         std::mem::swap(&mut self.mod_src, &mut p.mod_src);
@@ -575,8 +582,7 @@ impl<S: Sound> VoiceEngine<S> {
                 sound,
             });
         }
-        self.sound.patch_changed(own);
-        p
+        p.own = self.sound.patch_changed(own);
     }
 
     /// Tempo for synced LFOs.

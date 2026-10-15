@@ -35,6 +35,12 @@ wavetable synth (11 cases), the effects (19 cases) and the loudness meter match
 with zero difference (the meter to 1e-9). The 23 wavetables match to
 1e-17 (rounding to `f32`).
 
+The effects the web version builds from Web Audio nodes (EQ, overdrive, chorus,
+phaser, auto filter, stereo tool, maximizer, convolution reverb) have no sample
+exact reference, since Web Audio does not specify them. They are tested for
+their behaviour instead: filter responses against the biquad formulas, the wave
+shaper curve, the convolver's normalisation, and level and stability checks.
+
 The synth worklet needs browser globals; `tools/parity/synth.gen.test.ts` supplies
 them and fixes `Math.random`. The original is not seeded, so its cases leave out
 random phase, noise, sample and hold, and the `rand` source.

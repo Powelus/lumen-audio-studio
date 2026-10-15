@@ -705,7 +705,7 @@ pub fn synth_engine(sample_rate: f64, seed: u32) -> SynthEngine {
 impl SynthEngine {
     pub fn new(sample_rate: f64, seed: u32) -> Self {
         let mut lib = TableLibrary::new();
-        let first = prepare_synth_patch(&mut lib, &json!({})).expect("the defaults are valid");
+        let mut first = prepare_synth_patch(&mut lib, &json!({})).expect("the defaults are valid");
         let mut e = Self {
             patch: first.patch.clone(),
             tables: first.tables.clone(),
@@ -731,7 +731,7 @@ impl SynthEngine {
             rng: Rng::new(seed),
             now: 0.0,
         };
-        e.apply_patch(first);
+        e.apply_patch(&mut first);
         e
     }
 
@@ -749,22 +749,22 @@ impl SynthEngine {
     /// Set the patch from JSON. Only the values that differ from the defaults
     /// need to be present.
     pub fn set_patch(&mut self, over: &Value) -> Result<(), PatchError> {
-        let p = prepare_synth_patch(&mut self.lib, over)?;
-        self.apply_patch(p);
+        let mut p = prepare_synth_patch(&mut self.lib, over)?;
+        self.apply_patch(&mut p);
         Ok(())
     }
 
     /// Switch to a patch made by [`prepare_synth_patch`]. Does no parsing, no
-    /// table building and no allocation, so it is safe on the audio thread. The
-    /// previous patch comes back so the caller can drop it elsewhere.
-    pub fn apply_patch(&mut self, mut p: PreparedSynthPatch) -> PreparedSynthPatch {
+    /// table building, no allocation and no freeing, so it is safe on the audio
+    /// thread: the patch trades places with the current one, which stays in `p`
+    /// for the caller to drop elsewhere (or to switch back to).
+    pub fn apply_patch(&mut self, p: &mut PreparedSynthPatch) {
         std::mem::swap(&mut self.patch, &mut p.patch);
         std::mem::swap(&mut self.tables, &mut p.tables);
         std::mem::swap(&mut self.sub_table, &mut p.sub_table);
         std::mem::swap(&mut self.mod_src, &mut p.mod_src);
         std::mem::swap(&mut self.mod_dst, &mut p.mod_dst);
         std::mem::swap(&mut self.mod_amt, &mut p.mod_amt);
-        p
     }
 
     /// Tempo and the beat at a point in time, for synced LFOs.
@@ -1593,15 +1593,14 @@ mod tests {
         let (a, _) = render(&mut e, 0.1);
         assert!(peak(&a) > 0.01);
         let mut lib = TableLibrary::new();
-        let p = prepare_synth_patch(
+        let mut p = prepare_synth_patch(
             &mut lib,
             &json!({ "osc": [{ "table": "square", "randPhase": 0 }], "level": 0.2 }),
         )
         .unwrap();
-        let old = e.apply_patch(p);
-        // the previous patch comes back and can be applied again
-        let again = e.apply_patch(old);
-        drop(again);
+        e.apply_patch(&mut p);
+        // the previous patch stays in `p` and can be switched back to
+        e.apply_patch(&mut p);
         let (b, _) = render(&mut e, 0.1);
         assert!(peak(&b) > 0.01);
     }
