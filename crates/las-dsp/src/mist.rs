@@ -340,11 +340,11 @@ impl Sound for Mist {
         }
     }
 
-    fn patch_changed(&mut self, patch: MistPatch) {
+    fn patch_changed(&mut self, patch: MistPatch) -> Option<MistPatch> {
         let shape = patch.grain.shape.clamp(0.0, 1.0);
-        self.patch = Some(patch);
+        let old = self.patch.replace(patch);
         if (shape - self.win_shape).abs() < 1e-4 {
-            return;
+            return old;
         }
         self.win_shape = shape;
         // Tukey window: the taper fraction shrinks as shape goes from 0 (Hann) to 1
@@ -360,6 +360,7 @@ impl Sound for Mist {
             }
             self.win[i] = w as f32;
         }
+        old
     }
 
     fn start(&mut self, v: &mut MistVoice, _base: &BaseVoice, legato: bool) {

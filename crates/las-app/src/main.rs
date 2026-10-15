@@ -6,6 +6,7 @@
 
 mod app;
 mod audio;
+mod fxui;
 mod midi;
 mod presets;
 mod widgets;

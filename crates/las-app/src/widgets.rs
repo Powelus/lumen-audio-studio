@@ -42,6 +42,28 @@ pub fn knob(
     log: bool,
     show: &dyn Fn(f64) -> String,
 ) -> bool {
+    knob_mapped(
+        ui,
+        value,
+        &|v| to_unit(v, &range, log),
+        &|t| from_unit(t, &range, log),
+        default,
+        label,
+        show,
+    )
+}
+
+/// A knob whose travel is given by two functions: value to position (0 to 1)
+/// and back. For curves other than linear and logarithmic.
+pub fn knob_mapped(
+    ui: &mut Ui,
+    value: &mut f64,
+    to_norm: &dyn Fn(f64) -> f64,
+    from_norm: &dyn Fn(f64) -> f64,
+    default: f64,
+    label: &str,
+    show: &dyn Fn(f64) -> String,
+) -> bool {
     let size = vec2(54.0, 76.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut changed = false;
@@ -51,8 +73,8 @@ pub fn knob(
     } else if resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
         let step = if fine { 1.0 / 1200.0 } else { 1.0 / 180.0 };
-        let t = to_unit(*value, &range, log) - resp.drag_delta().y as f64 * step;
-        *value = from_unit(t, &range, log);
+        let t = to_norm(*value) - resp.drag_delta().y as f64 * step;
+        *value = from_norm(t.clamp(0.0, 1.0));
         changed = true;
     }
     let painter = ui.painter_at(rect);
@@ -70,7 +92,7 @@ pub fn knob(
             .collect()
     };
     painter.add(Shape::line(arc(0.0, 1.0, radius), Stroke::new(3.0, TRACK)));
-    let t = to_unit(*value, &range, log) as f32;
+    let t = to_norm(*value).clamp(0.0, 1.0) as f32;
     if t > 0.002 {
         let lit = if resp.hovered() || resp.dragged() {
             Color32::from_rgb(255, 170, 80)

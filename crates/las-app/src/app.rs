@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The preset bank of each instrument.
-fn bank_id(i: Instrument) -> &'static str {
+pub(crate) fn bank_id(i: Instrument) -> &'static str {
     match i {
         Instrument::Facet => "facet",
         Instrument::Mist => "mist",
@@ -24,7 +24,7 @@ fn bank_id(i: Instrument) -> &'static str {
     }
 }
 
-fn index(i: Instrument) -> usize {
+pub(crate) fn index(i: Instrument) -> usize {
     match i {
         Instrument::Facet => 0,
         Instrument::Mist => 1,
@@ -53,37 +53,59 @@ const KEY_MAP: [(egui::Key, u8); 17] = [
     (egui::Key::Semicolon, 16),
 ];
 
-pub struct App {
-    audio: Option<Audio>,
-    _midi: Option<midir::MidiInputConnection<()>>,
-    status: String,
-    midi_name: Option<String>,
-    inst: Instrument,
-    /// Defaults and the current patch of each instrument: Facet, Mist, Polaris.
-    defaults: [Value; 3],
-    patches: [Value; 3],
-    /// The preset lists (Init, factory, user) and the one each instrument is on.
-    entries: [Vec<Entry>; 3],
-    presets: [usize; 3],
-    /// What is typed in the preset search box, and the name for a new preset.
-    search: String,
-    new_name: String,
-    /// Which page of the Polaris panel is showing.
-    tab: Tab,
-    /// What Mist reads from: the built-in texture or a dropped file.
-    source_name: String,
-    volume: f64,
-    /// Octave of the computer keyboard (the base note is `12 * (octave + 1)`).
-    octave: i32,
-    /// Keys held by the computer keyboard, with the note each started.
-    typed: Vec<(egui::Key, u8)>,
-    /// Key held with the mouse on the piano.
-    clicked: Option<u8>,
-    error: Option<String>,
+/// One effect in an instrument's rack.
+#[derive(Clone)]
+pub struct FxItem {
+    pub id: String,
+    pub on: bool,
+    pub mix: f64,
+    /// The complete state (the defaults with what was saved on top).
+    pub state: Value,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
+pub enum View {
+    Sound,
+    Effects,
+}
+
+pub struct App {
+    pub(crate) audio: Option<Audio>,
+    pub(crate) _midi: Option<midir::MidiInputConnection<()>>,
+    pub(crate) status: String,
+    pub(crate) midi_name: Option<String>,
+    pub(crate) inst: Instrument,
+    /// Defaults and the current patch of each instrument: Facet, Mist, Polaris.
+    pub(crate) defaults: [Value; 3],
+    pub(crate) patches: [Value; 3],
+    /// The preset lists (Init, factory, user) and the one each instrument is on.
+    pub(crate) entries: [Vec<Entry>; 3],
+    pub(crate) presets: [usize; 3],
+    /// What is typed in the preset search box, and the name for a new preset.
+    pub(crate) search: String,
+    pub(crate) new_name: String,
+    /// Which page of the Polaris panel is showing.
+    pub(crate) tab: Tab,
+    /// What Mist reads from: the built-in texture or a dropped file.
+    pub(crate) source_name: String,
+    pub(crate) volume: f64,
+    /// Octave of the computer keyboard (the base note is `12 * (octave + 1)`).
+    pub(crate) octave: i32,
+    /// Keys held by the computer keyboard, with the note each started.
+    pub(crate) typed: Vec<(egui::Key, u8)>,
+    /// Key held with the mouse on the piano.
+    pub(crate) clicked: Option<u8>,
+    pub(crate) error: Option<String>,
+    /// The effects of each instrument (Facet, Mist, Polaris).
+    pub(crate) fx: [Vec<FxItem>; 3],
+    /// Sound (the instrument) or Effects.
+    pub(crate) view: View,
+    /// Tempo for the effects that follow the beat.
+    pub(crate) bpm: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tab {
     Oscillators,
     Filters,
     Modulators,
@@ -128,6 +150,9 @@ impl App {
             search: String::new(),
             new_name: String::new(),
             tab: Tab::Oscillators,
+            fx: [Vec::new(), Vec::new(), Vec::new()],
+            view: View::Sound,
+            bpm: 120.0,
             source_name: "built-in texture".into(),
             volume: 0.8,
             octave: 4,
@@ -145,6 +170,10 @@ impl App {
         if std::env::args().any(|a| a == "--facet") {
             app.switch(Instrument::Facet);
         }
+        // `--effects` opens the effects rack
+        if std::env::args().any(|a| a == "--effects") {
+            app.view = View::Effects;
+        }
         app
     }
 
@@ -154,8 +183,10 @@ impl App {
             return;
         };
         self.patches[k] = e.patch.clone();
+        let fx = e.fx.clone();
         self.presets[k] = i;
         self.push_patch(inst);
+        self.load_fx_list(inst, &fx);
     }
 
     /// Save the current patch as a user preset (replacing one of the same name).
@@ -166,10 +197,15 @@ impl App {
         }
         let k = index(self.inst);
         let patch = self.patches[k].clone();
+        let fx: Vec<Value> = self.fx[k]
+            .iter()
+            .map(|f| json!({ "type": f.id, "on": f.on, "state": f.state }))
+            .collect();
         let list = &mut self.entries[k];
         let at = match list.iter().position(|e| e.user && e.name == name) {
             Some(i) => {
                 list[i].patch = patch;
+                list[i].fx = fx;
                 i
             }
             None => {
@@ -178,6 +214,7 @@ impl App {
                     category: "User".into(),
                     patch,
                     user: true,
+                    fx,
                 });
                 list.len() - 1
             }
@@ -254,7 +291,7 @@ impl App {
         Ok(())
     }
 
-    fn send(&mut self, c: Command) {
+    pub(crate) fn send(&mut self, c: Command) {
         if let Some(a) = &mut self.audio {
             a.send(c);
         }
@@ -1418,6 +1455,21 @@ impl eframe::App for App {
             });
         });
         egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.view, View::Sound, "Sound");
+                let n = self.fx[index(self.inst)].len();
+                let label = if n == 0 {
+                    "Effects".to_string()
+                } else {
+                    format!("Effects ({n})")
+                };
+                ui.selectable_value(&mut self.view, View::Effects, label);
+            });
+            ui.separator();
+            if self.view == View::Effects {
+                egui::ScrollArea::both().show(ui, |ui| self.effects_view(ui));
+                return;
+            }
             egui::ScrollArea::both().show(ui, |ui| match self.inst {
                 Instrument::Facet => {
                     ui.label(RichText::new("Facet").size(20.0).strong());

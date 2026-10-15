@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "las-app"
-version = "0.2.0-alpha.6"
+version = "0.2.0-alpha.7"
 dependencies = [
  "cpal",
  "eframe",
@@ -1889,7 +1889,7 @@ dependencies = [
 
 [[package]]
 name = "las-cli"
-version = "0.2.0-alpha.6"
+version = "0.2.0-alpha.7"
 dependencies = [
  "hound",
  "las-dsp",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "las-dsp"
-version = "0.2.0-alpha.6"
+version = "0.2.0-alpha.7"
 dependencies = [
  "serde",
  "serde_json",

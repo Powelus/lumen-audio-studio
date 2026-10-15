@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.7 - 2026-10-15
+
+The effects rack.
+
+- Eight more effects, completing the catalogue: parametric EQ (seven bands), overdrive, chorus, phaser, auto filter, stereo tool, maximizer (three-band) and convolution reverb. The web version builds these from Web Audio's own filter, delay, wave shaper and convolver nodes, which are not specified to the sample, so they are written to behave like those nodes (biquad formulas, wave shaper curve, convolver normalisation) and read the same settings.
+- Every instrument has an effects rack in the app (Effects tab): add, remove and reorder effects, enable and mix each one, pick effect presets (80 from the web version), and tempo for the synced ones. Controls are drawn from a catalogue of the effects (ranges, curves, units, options), with an EQ response curve, trance gate steps, volume shaper curves and step FX lanes.
+- Factory presets bring their effects. Saving a preset saves the rack with it.
+- Effects and patches are swapped on the audio thread without allocating or freeing: the old ones are handed back to the interface thread to be dropped there.
+
 ## 0.2.0-alpha.6 - 2026-10-15
 
 The first effects, and the loudness meter.

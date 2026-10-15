@@ -244,7 +244,7 @@ impl Sound for Fm {
         FmVoice::default()
     }
 
-    fn patch_changed(&mut self, patch: FmPatch) {
+    fn patch_changed(&mut self, patch: FmPatch) -> Option<FmPatch> {
         self.algo = (patch.algo + 0.5)
             .floor()
             .clamp(0.0, (ALGORITHMS.len() - 1) as f64) as usize;
@@ -254,7 +254,7 @@ impl Sound for Fm {
             .filter(|c| patch.ops.get(**c).is_some_and(|o| o.on))
             .count();
         self.carrier_gain = 1.0 / (carriers.max(1) as f64);
-        self.patch = Some(patch);
+        self.patch.replace(patch)
     }
 
     fn start(&mut self, v: &mut FmVoice, _base: &BaseVoice, legato: bool) {
