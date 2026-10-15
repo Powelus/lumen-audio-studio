@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/las-dsp", "crates/las-cli"]
+members = ["crates/las-dsp", "crates/las-cli", "crates/las-app"]
 
 [workspace.package]
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Powelus/lumen-audio-studio"

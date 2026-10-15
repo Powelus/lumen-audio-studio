@@ -8,8 +8,10 @@ in [Powelus/pow-daw](https://github.com/Powelus/pow-daw) (last release 0.1.13).
 
 **Status:** early. The crate `las-dsp` holds the audio DSP and is being ported
 piece by piece from the TypeScript version, each piece checked against audio
-that the original produced. So far: the Facet FM synth. The `las` command line
-tool renders it to a WAV file. There is no interface or live audio yet.
+that the original produced. So far: the Facet FM synth, playable live in the
+native app `lumen` (on-screen piano, computer keyboard or MIDI keyboard), and
+the `las` command line tool, which renders it to a WAV file. Nothing else is
+ported yet.
 
 ## Download
 
@@ -18,8 +20,12 @@ Builds for Windows, macOS and Linux are on the
 new version on `main` is published automatically (see [CHANGELOG.md](CHANGELOG.md)).
 
 ```sh
-las render-facet examples/facet-bell.json -o bell.wav
+./lumen                                              # the app
+las render-facet examples/facet-bell.json -o bell.wav # offline render
 ```
+
+On Linux the app needs the ALSA library (`libasound2`), `libxkbcommon-x11` and
+OpenGL, which most desktops already have.
 
 ## Goals
 
@@ -41,7 +47,10 @@ You need a recent stable Rust toolchain.
 ```sh
 cargo test --workspace
 cargo run -p las-cli -- render-facet examples/facet-bell.json -o bell.wav
+cargo run --release -p las-app    # the app
 ```
+
+Linux build libraries: `sudo apt install libasound2-dev pkg-config`.
 
 To publish a release, raise `version` under `[workspace.package]` in
 `Cargo.toml`, add a `## <version> - <date>` entry to `CHANGELOG.md`, and merge to

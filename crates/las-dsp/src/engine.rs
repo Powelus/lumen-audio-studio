@@ -389,6 +389,59 @@ pub trait Sound {
 
 const CONTROL: usize = 32;
 
+/// A patch parsed and checked ahead of time, ready for [`VoiceEngine::apply_patch`].
+pub struct PreparedPatch<S: Sound> {
+    common: EnginePatch,
+    own: Option<S::Patch>,
+    json: Value,
+    mod_src: Vec<usize>,
+    mod_dst: Vec<usize>,
+    mod_amt: Vec<f64>,
+    want: usize,
+}
+
+/// Voices an engine keeps ready: 32 polyphony plus 4 for the release tails.
+pub const MAX_VOICES: usize = 36;
+
+/// Parse a patch (only the values that differ from the defaults need to be
+/// present). Do this off the audio thread, then hand the result to the engine.
+pub fn prepare_patch<S: Sound>(over: &Value) -> Result<PreparedPatch<S>, PatchError> {
+    let defaults = merge_patch(&default_engine_json(), &S::default_json());
+    let merged = merge_patch(&defaults, over);
+    // parse both parts first, so a bad patch changes nothing
+    let common: EnginePatch =
+        serde_json::from_value(merged.clone()).map_err(|e| PatchError(e.to_string()))?;
+    let own: S::Patch =
+        serde_json::from_value(merged.clone()).map_err(|e| PatchError(e.to_string()))?;
+    let mut dests: Vec<DestDef> = COMMON_DESTS.to_vec();
+    dests.extend_from_slice(S::extra_dests());
+    let mut mod_src = Vec::new();
+    let mut mod_dst = Vec::new();
+    let mut mod_amt = Vec::new();
+    for m in &common.mods {
+        let src = ENGINE_SOURCES.iter().position(|x| *x == m.src);
+        let dst = dests.iter().position(|d| d.id == m.dest);
+        if let (Some(src), Some(dst)) = (src, dst) {
+            if m.amt != 0.0 {
+                mod_src.push(src);
+                mod_dst.push(dst);
+                mod_amt.push(m.amt);
+            }
+        }
+    }
+    let voice = &common.voice;
+    let want = (if voice.mono { 1.0 } else { voice.poly }).clamp(1.0, 32.0) as usize + 4;
+    Ok(PreparedPatch {
+        common,
+        own: Some(own),
+        json: merged,
+        mod_src,
+        mod_dst,
+        mod_amt,
+        want,
+    })
+}
+
 /// A polyphonic engine around a [`Sound`].
 pub struct VoiceEngine<S: Sound> {
     pub sound: S,
@@ -448,41 +501,36 @@ impl<S: Sound> VoiceEngine<S> {
         };
         e.set_patch(&Value::Object(Default::default()))
             .expect("the defaults are a valid patch");
+        // all the voices up front, so later patch changes never allocate
+        while e.voices.len() < MAX_VOICES {
+            let sound = e.sound.new_voice();
+            e.voices.push(Voice {
+                base: BaseVoice::new(e.dests.len()),
+                sound,
+            });
+        }
         e
     }
 
     /// Set the patch from JSON. Only the values that differ from the defaults
     /// need to be present.
     pub fn set_patch(&mut self, over: &Value) -> Result<(), PatchError> {
-        let defaults = merge_patch(&default_engine_json(), &S::default_json());
-        let merged = merge_patch(&defaults, over);
-        // parse both parts first, so a bad patch changes nothing
-        let common: EnginePatch =
-            serde_json::from_value(merged.clone()).map_err(|e| PatchError(e.to_string()))?;
-        let own: S::Patch =
-            serde_json::from_value(merged.clone()).map_err(|e| PatchError(e.to_string()))?;
-        self.patch = common;
-        self.patch_json = merged;
-        let index = |id: &str| self.dests.iter().position(|d| d.id == id);
-        let mut src = Vec::new();
-        let mut dst = Vec::new();
-        let mut amt = Vec::new();
-        for m in &self.patch.mods {
-            let s = ENGINE_SOURCES.iter().position(|x| *x == m.src);
-            if let (Some(s), Some(d)) = (s, index(&m.dest)) {
-                if m.amt != 0.0 {
-                    src.push(s);
-                    dst.push(d);
-                    amt.push(m.amt);
-                }
-            }
-        }
-        self.mod_src = src;
-        self.mod_dst = dst;
-        self.mod_amt = amt;
-        let voice = &self.patch.voice;
-        let want = (if voice.mono { 1.0 } else { voice.poly }).clamp(1.0, 32.0) as usize + 4;
-        while self.voices.len() < want {
+        let prepared = prepare_patch::<S>(over)?;
+        self.apply_patch(prepared);
+        Ok(())
+    }
+
+    /// Switch to a patch made by [`prepare_patch`]. Does no parsing and, once
+    /// the engine exists, no allocation, so it is safe on the audio thread. The
+    /// previous patch comes back so the caller can drop it elsewhere.
+    pub fn apply_patch(&mut self, mut p: PreparedPatch<S>) -> PreparedPatch<S> {
+        let own = p.own.take().expect("a prepared patch is applied once");
+        std::mem::swap(&mut self.patch, &mut p.common);
+        std::mem::swap(&mut self.patch_json, &mut p.json);
+        std::mem::swap(&mut self.mod_src, &mut p.mod_src);
+        std::mem::swap(&mut self.mod_dst, &mut p.mod_dst);
+        std::mem::swap(&mut self.mod_amt, &mut p.mod_amt);
+        while self.voices.len() < p.want {
             let sound = self.sound.new_voice();
             self.voices.push(Voice {
                 base: BaseVoice::new(self.dests.len()),
@@ -490,7 +538,7 @@ impl<S: Sound> VoiceEngine<S> {
             });
         }
         self.sound.patch_changed(own);
-        Ok(())
+        p
     }
 
     /// Tempo for synced LFOs.

@@ -2,6 +2,18 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.2 - 2026-10-15
+
+The first native app: `lumen`. It plays the Facet FM synth live.
+
+- Native window drawn on the GPU with egui. No web view, no browser.
+- Live audio output on Windows, macOS and Linux, with a lock-free link between the interface and the audio thread. Patch changes are parsed off the audio thread.
+- Play with the on-screen piano, the computer keyboard (A to ; for notes, Z and X for octave) or a MIDI keyboard (notes, pitch bend, mod wheel, pressure).
+- Facet controls: algorithm, feedback, four operators, amp envelope, filter, mono, legato, glide. Three starting sounds.
+- Meters, DSP load, voice count and dropout counter in the window.
+- Engine: patches can be prepared ahead of time and swapped in without allocating.
+- Linux needs the ALSA library (`libasound2`), `libxkbcommon-x11` and OpenGL.
+
 ## 0.2.0-alpha.1 - 2026-10-15
 
 First release of the Rust rewrite. Early: the command line tool only, no interface and no live audio yet.
