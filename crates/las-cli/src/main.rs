@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `las`: command-line tools for Lumen Audio Studio.
 //!
-//! Today: `las render-facet`, `las render-mist` and `las render-synth`, which render a patch and
+//! `las info` and `las convert` read and write `.las` project files.
+//! Also: `las render-facet`, `las render-mist` and `las render-synth`, which render a patch and
 //! notes to a WAV file, so the sound can be checked and shared without an
 //! interface.
 
@@ -12,13 +13,20 @@ use las_dsp::synth::synth_engine;
 use serde_json::Value;
 use std::process::ExitCode;
 
+mod project;
+
 const USAGE: &str = "las: command-line tools for Lumen Audio Studio
 
 USAGE
     las render-facet <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
     las render-mist  <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
     las render-synth <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
+    las info <project.las>
+    las convert <in.las> <out.las> [--plain]
     las --version
+
+info lists what a project holds. convert reads a project (and repairs or updates
+it) and writes it again; --plain leaves the file unencrypted.
 
 A case file is JSON with a \"patch\" (only what differs from the defaults), a list
 of \"events\" and an optional \"seed\". See examples/facet-bell.json and
@@ -195,6 +203,8 @@ fn main() -> ExitCode {
         Some("render-facet") => parse(&args[1..]).and_then(|o| render(Kind::Facet, &o)),
         Some("render-mist") => parse(&args[1..]).and_then(|o| render(Kind::Mist, &o)),
         Some("render-synth") => parse(&args[1..]).and_then(|o| render(Kind::Synth, &o)),
+        Some("info") => project::info(&args[1..]),
+        Some("convert") => project::convert(&args[1..]),
         Some("--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())
