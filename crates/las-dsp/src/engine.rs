@@ -446,6 +446,40 @@ pub fn prepare_patch<S: Sound>(over: &Value) -> Result<PreparedPatch<S>, PatchEr
     })
 }
 
+/// What the app and the command line tool need from any playable instrument,
+/// whatever its engine.
+pub trait Playable {
+    fn sample_rate(&self) -> f64;
+    /// Set the patch from JSON (only what differs from the defaults).
+    fn set_patch(&mut self, over: &Value) -> Result<(), PatchError>;
+    fn queue(&mut self, evs: &[Event]);
+    /// Render a block, adding to `l` and `r`, starting at engine time `t0` seconds.
+    fn process(&mut self, l: &mut [f32], r: &mut [f32], t0: f64);
+    fn active_voices(&self) -> usize;
+    fn all_off(&mut self);
+}
+
+impl<S: Sound> Playable for VoiceEngine<S> {
+    fn sample_rate(&self) -> f64 {
+        VoiceEngine::sample_rate(self)
+    }
+    fn set_patch(&mut self, over: &Value) -> Result<(), PatchError> {
+        VoiceEngine::set_patch(self, over)
+    }
+    fn queue(&mut self, evs: &[Event]) {
+        VoiceEngine::queue(self, evs)
+    }
+    fn process(&mut self, l: &mut [f32], r: &mut [f32], t0: f64) {
+        VoiceEngine::process(self, l, r, t0)
+    }
+    fn active_voices(&self) -> usize {
+        VoiceEngine::active_voices(self)
+    }
+    fn all_off(&mut self) {
+        VoiceEngine::all_off(self)
+    }
+}
+
 /// A polyphonic engine around a [`Sound`].
 pub struct VoiceEngine<S: Sound> {
     pub sound: S,

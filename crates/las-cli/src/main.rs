@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `las`: command-line tools for Lumen Audio Studio.
 //!
-//! Today: `las render-facet` and `las render-mist`, which render a patch and
+//! Today: `las render-facet`, `las render-mist` and `las render-synth`, which render a patch and
 //! notes to a WAV file, so the sound can be checked and shared without an
 //! interface.
 
-use las_dsp::engine::{Cc, Event, Sound, VoiceEngine};
+use las_dsp::engine::{Cc, Event, Playable};
 use las_dsp::fm::fm_engine;
 use las_dsp::mist::mist_engine;
+use las_dsp::synth::synth_engine;
 use serde_json::Value;
 use std::process::ExitCode;
 
@@ -16,11 +17,13 @@ const USAGE: &str = "las: command-line tools for Lumen Audio Studio
 USAGE
     las render-facet <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
     las render-mist  <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
+    las render-synth <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
     las --version
 
 A case file is JSON with a \"patch\" (only what differs from the defaults), a list
 of \"events\" and an optional \"seed\". See examples/facet-bell.json and
-examples/mist-pad.json. Mist plays its built-in texture.
+examples/mist-pad.json and examples/synth-supersaw.json. Mist plays its built-in
+texture. render-synth is the wavetable synth (Polaris, Vortex and the others).
 
 Events: {\"t\":\"on\",\"time\":0,\"key\":60,\"vel\":0.8}   (also \"fine\" and \"pan\")
         {\"t\":\"off\",\"time\":0.5,\"key\":60}
@@ -106,11 +109,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
 enum Kind {
     Facet,
     Mist,
+    Synth,
 }
 
 /// Play the events through an engine in small blocks, as the live app does.
-fn run<S: Sound>(
-    mut engine: VoiceEngine<S>,
+fn run<E: Playable>(
+    mut engine: E,
     patch: Option<&Value>,
     events: &[Event],
     frames: usize,
@@ -158,6 +162,7 @@ fn render(kind: Kind, opts: &Options) -> Result<(), String> {
     let (l, r) = match kind {
         Kind::Facet => run(fm_engine(sr, seed), patch, &events, frames, opts)?,
         Kind::Mist => run(mist_engine(sr, seed), patch, &events, frames, opts)?,
+        Kind::Synth => run(synth_engine(sr, seed), patch, &events, frames, opts)?,
     };
     let spec = hound::WavSpec {
         channels: 2,
@@ -189,6 +194,7 @@ fn main() -> ExitCode {
         }
         Some("render-facet") => parse(&args[1..]).and_then(|o| render(Kind::Facet, &o)),
         Some("render-mist") => parse(&args[1..]).and_then(|o| render(Kind::Mist, &o)),
+        Some("render-synth") => parse(&args[1..]).and_then(|o| render(Kind::Synth, &o)),
         Some("--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())

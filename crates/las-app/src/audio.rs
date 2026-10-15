@@ -8,6 +8,8 @@ use cpal::{FromSample, Sample, SampleFormat, SizedSample, StreamConfig};
 use las_dsp::engine::{prepare_patch, Cc, Event, PreparedPatch};
 use las_dsp::fm::{fm_engine, Fm, FmEngine};
 use las_dsp::mist::{mist_engine, Mist, MistEngine};
+use las_dsp::synth::{prepare_synth_patch, synth_engine, PreparedSynthPatch, SynthEngine};
+use las_dsp::wavetable::TableLibrary;
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc as Shared;
@@ -18,6 +20,7 @@ use std::time::Instant;
 pub enum Patch {
     Facet(Box<PreparedPatch<Fm>>),
     Mist(Box<PreparedPatch<Mist>>),
+    Polaris(Box<PreparedSynthPatch>),
 }
 
 /// The instruments the app can play.
@@ -25,6 +28,7 @@ pub enum Patch {
 pub enum Instrument {
     Facet,
     Mist,
+    Polaris,
 }
 
 /// A source sample for Mist. The buffers are shared with the interface, so
@@ -88,6 +92,8 @@ pub struct Audio {
     pub meters: Arc<Meters>,
     pub sample_rate: u32,
     pub device: String,
+    /// Wavetables are built here, off the audio thread, and shared.
+    tables: TableLibrary,
 }
 
 /// Where MIDI input sends its messages.
@@ -142,6 +148,7 @@ impl Audio {
                 meters,
                 sample_rate,
                 device: name,
+                tables: TableLibrary::new(),
             },
             midi_tx,
         ))
@@ -160,6 +167,9 @@ impl Audio {
             )),
             Instrument::Mist => Patch::Mist(Box::new(
                 prepare_patch::<Mist>(json).map_err(|e| e.to_string())?,
+            )),
+            Instrument::Polaris => Patch::Polaris(Box::new(
+                prepare_synth_patch(&mut self.tables, json).map_err(|e| e.to_string())?,
             )),
         };
         self.send(Command::Patch(p));
@@ -194,6 +204,7 @@ where
 struct Engines {
     facet: FmEngine,
     mist: MistEngine,
+    polaris: SynthEngine,
     active: Instrument,
 }
 
@@ -202,6 +213,7 @@ impl Engines {
         match self.active {
             Instrument::Facet => self.facet.queue(&[e]),
             Instrument::Mist => self.mist.queue(&[e]),
+            Instrument::Polaris => self.polaris.queue(&[e]),
         }
     }
 
@@ -209,6 +221,7 @@ impl Engines {
         match self.active {
             Instrument::Facet => self.facet.process(l, r, t0),
             Instrument::Mist => self.mist.process(l, r, t0),
+            Instrument::Polaris => self.polaris.process(l, r, t0),
         }
     }
 
@@ -216,6 +229,7 @@ impl Engines {
         match self.active {
             Instrument::Facet => self.facet.active_voices(),
             Instrument::Mist => self.mist.active_voices(),
+            Instrument::Polaris => self.polaris.active_voices(),
         }
     }
 }
@@ -248,7 +262,8 @@ impl Renderer {
             engine: Engines {
                 facet: fm_engine(sr, 1),
                 mist: mist_engine(sr, 1),
-                active: Instrument::Facet,
+                polaris: synth_engine(sr, 1),
+                active: Instrument::Polaris,
             },
             sr,
             channels,
@@ -288,6 +303,9 @@ impl Renderer {
                 let old = match p {
                     Patch::Facet(p) => Patch::Facet(Box::new(self.engine.facet.apply_patch(*p))),
                     Patch::Mist(p) => Patch::Mist(Box::new(self.engine.mist.apply_patch(*p))),
+                    Patch::Polaris(p) => {
+                        Patch::Polaris(Box::new(self.engine.polaris.apply_patch(*p)))
+                    }
                 };
                 let _ = self.garbage.push(old);
             }
@@ -297,6 +315,7 @@ impl Renderer {
                     match self.engine.active {
                         Instrument::Facet => self.engine.facet.all_off(),
                         Instrument::Mist => self.engine.mist.all_off(),
+                        Instrument::Polaris => self.engine.polaris.all_off(),
                     }
                     self.engine.active = i;
                 }
@@ -479,6 +498,30 @@ mod tests {
             r.fill(&mut buf);
         }
         assert!(peak(&buf) > 0.01);
+    }
+
+    #[test]
+    fn polaris_takes_a_prepared_patch_with_its_own_wavetables() {
+        let (mut r, mut tx, mut garbage) = renderer();
+        let mut lib = TableLibrary::new();
+        let p = prepare_synth_patch(
+            &mut lib,
+            &serde_json::json!({ "osc": [{ "table": "formant", "randPhase": 0 }] }),
+        )
+        .unwrap();
+        tx.push(Command::Instrument(Instrument::Polaris))
+            .ok()
+            .unwrap();
+        tx.push(Command::Patch(Patch::Polaris(Box::new(p))))
+            .ok()
+            .unwrap();
+        tx.push(Command::NoteOn { key: 60, vel: 1.0 }).ok().unwrap();
+        let mut buf = vec![0f32; 1024 * 2];
+        for _ in 0..8 {
+            r.fill(&mut buf);
+        }
+        assert!(peak(&buf) > 0.005);
+        assert!(garbage.pop().is_ok(), "the old synth patch is handed back");
     }
 
     #[test]

@@ -30,8 +30,13 @@ generators in `tools/parity/*.gen.test.ts` (each file says how to run it from a
 checkout of the web repository). The reference audio is committed under
 `crates/las-dsp/tests/fixtures/`.
 
-Status: Facet (5 cases) and Mist (5 cases, plus the built-in texture) match with
-zero difference.
+Status: Facet (5 cases), Mist (5 cases, plus the built-in texture) and the
+wavetable synth (11 cases) match with zero difference. The 23 wavetables match to
+1e-17 (rounding to `f32`).
+
+The synth worklet needs browser globals; `tools/parity/synth.gen.test.ts` supplies
+them and fixes `Math.random`. The original is not seeded, so its cases leave out
+random phase, noise, sample and hold, and the `rand` source.
 
 ## Tolerances
 
