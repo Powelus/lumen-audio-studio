@@ -1,0 +1,21 @@
+[
+  { "name": "compressor", "processor": "las-dynamics", "params": { "threshold": -24, "ratio": 6, "attack": 3, "release": 80, "knee": 8, "makeup": 4, "mix": 1 } },
+  { "name": "compressor_sidechain", "processor": "las-dynamics", "sidechain": true, "params": { "threshold": -30, "ratio": 8, "attack": 1, "release": 150, "knee": 0, "makeup": 0, "mix": 0.9, "sidechain": true, "scHpf": 150 } },
+  { "name": "compressor_listen", "processor": "las-dynamics", "params": { "scHpf": 300, "listen": true } },
+  { "name": "limiter", "processor": "las-limiter", "params": { "gain": 12, "ceiling": -1, "release": 100, "lookahead": 5 } },
+  { "name": "crusher", "processor": "las-crusher", "params": { "bits": 5, "downsample": 3, "mix": 0.8 } },
+  { "name": "gate", "processor": "las-noisegate", "params": { "threshold": -26, "hysteresis": 6, "range": -50, "attack": 1, "hold": 20, "release": 90, "scHpf": 100 } },
+  { "name": "gate_sidechain", "processor": "las-noisegate", "sidechain": true, "params": { "threshold": -30, "sidechain": true, "range": -40 } },
+  { "name": "transient", "processor": "las-transient", "params": { "attack": 60, "sustain": -40, "speed": 25, "output": 1, "mix": 0.9 } },
+  { "name": "tape", "processor": "las-tape", "params": { "drive": 9, "bias": 0.5, "bump": 4, "tone": 9000, "wow": 0.5, "flutter": 0.4, "output": -2, "mix": 0.85 } },
+  { "name": "tape_default", "processor": "las-tape", "params": {} },
+  { "name": "freqshift", "processor": "las-freqshift", "params": { "shift": 120, "spread": 0.5, "feedback": 0.3, "mix": 0.7 } },
+  { "name": "pitch_up", "processor": "las-pitch", "params": { "semitones": 7, "cents": 10, "window": 60, "mix": 1 } },
+  { "name": "pitch_down_mix", "processor": "las-pitch", "params": { "semitones": -5, "window": 40, "mix": 0.6 } },
+  { "name": "hall", "processor": "las-hall", "params": { "decay": 3.5, "size": 0.9, "predelay": 25, "damp": 0.5, "diffusion": 0.8, "mod": 0.5, "lowcut": 150, "highcut": 9000, "width": 0.8, "wet": 0.4 } },
+  { "name": "hall_default", "processor": "las-hall", "params": {} },
+  { "name": "echo", "processor": "las-echo", "params": { "time": 0.75, "sync": true, "feedback": 0.5, "pingpong": true, "drive": 6, "modDepth": 3, "modRate": 0.7, "duck": 0.5, "wet": 0.5, "bpm": 120 } },
+  { "name": "echo_free", "processor": "las-echo", "params": { "sync": false, "ms": 220, "offset": 25, "pingpong": false, "feedback": 0.6, "lowcut": 300, "highcut": 5000, "bpm": 90 } },
+  { "name": "stepfx", "processor": "las-stepfx", "transport": { "bpm": 140, "anchorTime": 0, "anchorBeat": 0 }, "params": { "rate": 0.125, "levelOn": true, "panOn": true, "level": [1,0.5,1,0.2,1,0.7,0.3,1,1,0.5,1,0.2,1,0.7,0.3,1], "pan": [-1,1,-0.5,0.5,0,1,-1,0,-1,1,-0.5,0.5,0,1,-1,0], "res": 0.7, "glide": 8, "filter": "bp", "length": 12 } },
+  { "name": "shaper", "processor": "las-shaper", "transport": { "bpm": 128, "anchorTime": 0, "anchorBeat": 1.5 }, "params": { "points": [ { "x": 0, "y": 0 }, { "x": 0.1, "y": 1 }, { "x": 0.6, "y": 0.8 }, { "x": 1, "y": 0.3 } ], "div": 0.5, "depth": 0.9, "smooth": 3, "offset": 0.25 } }
+]

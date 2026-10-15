@@ -10,6 +10,8 @@ pub mod biquad;
 pub mod engine;
 pub mod fft;
 pub mod fm;
+pub mod fx;
+pub mod loudness;
 pub mod mist;
 pub mod patch;
 pub mod presets;

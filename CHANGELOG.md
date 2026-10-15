@@ -2,6 +2,14 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.6 - 2026-10-15
+
+The first effects, and the loudness meter.
+
+- Effects ported from the web version: compressor (with external sidechain), look-ahead limiter, bit crusher, noise gate, transient shaper, tape, frequency shifter, pitch shifter, hall reverb, echo, step FX and the tempo-synced volume shaper. Output matches the original sample for sample on 19 reference renders.
+- Loudness meter (BS.1770-4 and EBU R128): K-weighting, momentary, short-term and gated integrated loudness, loudness range, sample and true peak, stereo correlation. It reads the same numbers as the original.
+- Effect settings load from the JSON the web version saved: only the keys present change.
+
 ## 0.2.0-alpha.5 - 2026-10-15
 
 Factory presets and a preset browser.
