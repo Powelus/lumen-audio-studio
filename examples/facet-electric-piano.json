@@ -1,0 +1,25 @@
+{
+  "seed": 1,
+  "patch": {
+    "algo": 3,
+    "env": [{ "a": 0.002, "d": 2, "s": 1, "r": 0.6 }],
+    "ops": [
+      { "ratio": 1, "level": 0.85, "velSens": 0.4, "env": { "a": 0.002, "d": 2.2, "s": 0.15, "r": 0.6 } },
+      { "ratio": 14, "level": 0.1, "velSens": 0.9, "env": { "a": 0.002, "d": 0.18, "s": 0, "r": 0.1 } },
+      { "on": true, "ratio": 1, "detune": 4, "level": 0.55, "velSens": 0.4, "env": { "a": 0.002, "d": 1.6, "s": 0.1, "r": 0.5 } },
+      { "on": true, "ratio": 1, "level": 0.3, "velSens": 0.8, "env": { "a": 0.002, "d": 1.2, "s": 0.08, "r": 0.4 } }
+    ]
+  },
+  "events": [
+    { "t": "on", "time": 0, "key": 60, "vel": 0.9 },
+    { "t": "on", "time": 0, "key": 64, "vel": 0.7 },
+    { "t": "on", "time": 0, "key": 67, "vel": 0.7 },
+    { "t": "off", "time": 1.0, "key": 60 },
+    { "t": "off", "time": 1.0, "key": 64 },
+    { "t": "off", "time": 1.0, "key": 67 },
+    { "t": "on", "time": 1.25, "key": 62, "vel": 0.8 },
+    { "t": "on", "time": 1.25, "key": 65, "vel": 0.6 },
+    { "t": "on", "time": 1.25, "key": 69, "vel": 0.6 },
+    { "t": "allOff", "time": 2.4 }
+  ]
+}

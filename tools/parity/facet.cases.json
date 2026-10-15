@@ -1,0 +1,108 @@
+[
+  {
+    "name": "init",
+    "seed": 1,
+    "patch": {},
+    "events": [
+      { "t": "on", "time": 0, "key": 60, "vel": 0.8 },
+      { "t": "off", "time": 0.25, "key": 60 }
+    ]
+  },
+  {
+    "name": "algo4_feedback_lfo",
+    "seed": 3,
+    "patch": {
+      "algo": 4,
+      "feedback": 0.6,
+      "ops": [
+        { "ratio": 1, "level": 0.8 },
+        { "ratio": 2, "level": 0.5, "wave": "half" },
+        { "on": true, "ratio": 3.5, "level": 0.4, "wave": "abs", "velSens": 1 },
+        { "on": true, "ratio": 1.01, "level": 0.5, "wave": "square" }
+      ],
+      "lfo": [{ "shape": "triangle", "rate": 6 }],
+      "mod": [
+        { "src": "lfo1", "dest": "op3.level", "amt": 0.3 },
+        { "src": "env2", "dest": "fb", "amt": 0.4 },
+        { "src": "vel", "dest": "op1.pitch", "amt": 0.05 }
+      ]
+    },
+    "events": [
+      { "t": "on", "time": 0, "key": 48, "vel": 1, "pan": -0.5 },
+      { "t": "on", "time": 0.01, "key": 55, "vel": 0.5, "pan": 0.5 },
+      { "t": "on", "time": 0.02, "key": 64, "vel": 0.2, "fine": 12 },
+      { "t": "off", "time": 0.3, "key": 48 },
+      { "t": "off", "time": 0.31, "key": 55 },
+      { "t": "off", "time": 0.32, "key": 64 }
+    ]
+  },
+  {
+    "name": "mono_glide_filter",
+    "seed": 5,
+    "patch": {
+      "voice": { "mono": true, "legato": true, "glide": 0.1 },
+      "filter": { "on": true, "type": "lp", "cutoff": 1200, "res": 0.4, "envAmt": 2, "keytrack": 0.5, "velAmt": 1 },
+      "env": [{ "a": 0.01, "d": 0.4, "s": 0.8, "r": 0.2 }, { "a": 0.05, "d": 0.3, "s": 0.2, "r": 0.2 }],
+      "ops": [{ "level": 0.9 }, { "ratio": 3, "level": 0.5 }]
+    },
+    "events": [
+      { "t": "on", "time": 0, "key": 52, "vel": 0.9 },
+      { "t": "on", "time": 0.12, "key": 59, "vel": 0.6 },
+      { "t": "on", "time": 0.2, "key": 64, "vel": 1 },
+      { "t": "off", "time": 0.28, "key": 64 },
+      { "t": "off", "time": 0.33, "key": 59 },
+      { "t": "off", "time": 0.4, "key": 52 }
+    ]
+  },
+  {
+    "name": "voice_stealing",
+    "seed": 9,
+    "patch": {
+      "voice": { "poly": 2 },
+      "algo": 3,
+      "ops": [{ "level": 0.9 }, { "ratio": 1.5, "level": 0.5 }, { "on": true, "ratio": 2, "level": 0.8 }, { "on": true, "ratio": 7, "level": 0.2 }]
+    },
+    "events": [
+      { "t": "on", "time": 0, "key": 60, "vel": 1 },
+      { "t": "on", "time": 0.03, "key": 64, "vel": 1 },
+      { "t": "on", "time": 0.06, "key": 67, "vel": 1 },
+      { "t": "off", "time": 0.08, "key": 60 },
+      { "t": "on", "time": 0.1, "key": 72, "vel": 0.7 },
+      { "t": "on", "time": 0.11, "key": 76, "vel": 0.7 },
+      { "t": "allOff", "time": 0.3 }
+    ]
+  },
+  {
+    "name": "controllers_sync_lfo",
+    "seed": 11,
+    "patch": {
+      "algo": 7,
+      "tune": 3,
+      "voice": { "pbRange": 12, "velSens": 0.2 },
+      "ops": [
+        { "wave": "sine", "level": 0.5 },
+        { "fixed": true, "freq": 523, "level": 0.4, "wave": "half" },
+        { "on": true, "ratio": 0.5, "level": 0.3, "wave": "abs" },
+        { "on": true, "ratio": 4, "level": 0.2, "wave": "square" }
+      ],
+      "lfo": [{ "shape": "smooth", "sync": true, "div": 0.25 }, { "shape": "sh", "rate": 15, "delay": 0.1 }],
+      "mod": [
+        { "src": "lfo1", "dest": "pitch", "amt": 0.02 },
+        { "src": "lfo2", "dest": "pan", "amt": 0.8 },
+        { "src": "mw", "dest": "op1.level", "amt": 0.5 },
+        { "src": "pb", "dest": "cutoff", "amt": 0.2 },
+        { "src": "macro1", "dest": "amp", "amt": -0.2 },
+        { "src": "note", "dest": "op3.pitch", "amt": 0.1 }
+      ],
+      "macros": [0.5, 0, 0, 0]
+    },
+    "events": [
+      { "t": "cc", "time": 0, "cc": "mw", "value": 0.7 },
+      { "t": "on", "time": 0, "key": 57, "vel": 0.8 },
+      { "t": "cc", "time": 0.1, "cc": "pb", "value": 0.5 },
+      { "t": "on", "time": 0.15, "key": 69, "vel": 0.6 },
+      { "t": "cc", "time": 0.2, "cc": "pb", "value": -0.25 },
+      { "t": "off", "time": 0.3, "key": 57 }
+    ]
+  }
+]

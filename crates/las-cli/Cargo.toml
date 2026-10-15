@@ -1,0 +1,20 @@
+[package]
+name = "las-cli"
+description = "Command-line tools for Lumen Audio Studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "las"
+path = "src/main.rs"
+
+[dependencies]
+las-dsp = { path = "../las-dsp" }
+serde_json = "1"
+hound = "3"

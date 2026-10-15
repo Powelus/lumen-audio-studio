@@ -1,0 +1,128 @@
+# Builds the `las` command line tool on Windows, macOS and Linux, smoke-tests
+# the built binary, and publishes a GitHub Release when a new version lands on
+# main. Pull requests get the same build and test, with the packages attached
+# to the run (no release). A version with a "-" (for example 0.2.0-alpha.1) is
+# published as a pre-release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(awk '/^\[workspace.package\]/ { f = 1; next } f && /^version *=/ { gsub(/[" ]/, "", $3); print $3; exit }' Cargo.toml)
+          if [ -z "$version" ]; then echo "no workspace version in Cargo.toml" >&2; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$version" in *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
+          # publish once per version, from main
+          if [ "${{ github.event_name }}" != "pull_request" ] && [ "${{ github.ref }}" = "refs/heads/main" ] && ! gh release view "v$version" >/dev/null 2>&1; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest, target: x86_64-pc-windows-msvc, ext: .exe, archive: zip, smoke: true }
+          - { name: macos-arm64, os: macos-latest, target: aarch64-apple-darwin, ext: '', archive: tar.gz, smoke: true }
+          # cross-built on the arm64 runner, so it cannot be run here
+          - { name: macos-x64, os: macos-latest, target: x86_64-apple-darwin, ext: '', archive: tar.gz, smoke: false }
+          - { name: linux-x64, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, ext: '', archive: tar.gz, smoke: true }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p las-cli --target ${{ matrix.target }}
+      - name: Smoke test the built binary
+        if: matrix.smoke
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/las${{ matrix.ext }}"
+          "$bin" --version | grep -F "$VERSION"
+          "$bin" render-facet examples/facet-bell.json -o smoke.wav
+          # a 32-bit float stereo WAV with real audio in it (header is 44 bytes plus fact/data chunks)
+          test "$(wc -c < smoke.wav)" -gt 100000
+          python3 - <<'PY'
+          import struct
+          d = open("smoke.wav", "rb").read()
+          i = d.index(b"data") + 8
+          s = struct.unpack("<%df" % ((len(d) - i) // 4), d[i:i + ((len(d) - i) // 4) * 4])
+          peak = max(abs(x) for x in s)
+          assert 0.05 < peak < 1.0, peak
+          print("peak", peak)
+          PY
+      - name: Package
+        shell: bash
+        run: |
+          name="las-$VERSION-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/las${{ matrix.ext }}" LICENSE README.md CHANGELOG.md "dist/$name/"
+          cp -r examples "dist/$name/examples"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "$name.zip" "$name" >/dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -rf "$name"
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: las-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          awk -v v="## $VERSION " 'index($0, v) == 1 { f = 1; next } /^## / { if (f) exit } f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "CHANGELOG.md has no entry for $VERSION" >&2; exit 1; fi
+          (cd out && sha256sum * > SHA256SUMS.txt)
+          flags=(--latest)
+          if [ "$PRERELEASE" = "true" ]; then flags=(--prerelease); fi
+          gh release create "v$VERSION" out/* --title "Lumen Audio Studio $VERSION" --notes-file notes.md --target "${{ github.sha }}" "${flags[@]}"
