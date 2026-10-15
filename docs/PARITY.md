@@ -25,8 +25,13 @@ centre is numerically fragile).
 
 Engines (Facet, Mist and the wavetable engine) are checked by rendering the same
 patch and notes in both versions and comparing the audio sample by sample, within
-a small tolerance. The web version has the reference render helpers in
-`tests/engines.test.ts`.
+a small tolerance. The cases live in `tools/parity/*.cases.json` and the
+generators in `tools/parity/*.gen.test.ts` (each file says how to run it from a
+checkout of the web repository). The reference audio is committed under
+`crates/las-dsp/tests/fixtures/`.
+
+Status: Facet (5 cases) and Mist (5 cases, plus the built-in texture) match with
+zero difference.
 
 ## Tolerances
 

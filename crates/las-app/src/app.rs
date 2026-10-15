@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The main window: the Facet synth, a keyboard and the meters.
+//! The main window: the instruments (Facet, Mist), a keyboard and the meters.
 
-use crate::audio::{Audio, Command};
+use crate::audio::{Audio, Command, Instrument, Source};
 use crate::widgets::{knob, meter, note_name, piano, ACCENT};
 use eframe::egui::{self, Color32, RichText, Ui};
 use las_dsp::fm::{default_fm_json, ALGORITHMS};
+use las_dsp::mist::default_mist_json;
 use las_dsp::patch::{default_engine_json, merge_patch};
 use serde_json::{json, Value};
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Factory sounds, as differences from the defaults.
-const PRESETS: [(&str, &str); 3] = [
+const FACET_PRESETS: [(&str, &str); 3] = [
     ("Init", "{}"),
     ("Bell", include_str!("../../../examples/facet-bell.json")),
     (
@@ -19,6 +21,25 @@ const PRESETS: [(&str, &str); 3] = [
         include_str!("../../../examples/facet-electric-piano.json"),
     ),
 ];
+
+const MIST_PRESETS: [(&str, &str); 2] = [
+    ("Init", "{}"),
+    ("Pad", include_str!("../../../examples/mist-pad.json")),
+];
+
+fn presets(i: Instrument) -> &'static [(&'static str, &'static str)] {
+    match i {
+        Instrument::Facet => &FACET_PRESETS,
+        Instrument::Mist => &MIST_PRESETS,
+    }
+}
+
+fn index(i: Instrument) -> usize {
+    match i {
+        Instrument::Facet => 0,
+        Instrument::Mist => 1,
+    }
+}
 
 /// Computer keys that play notes, as semitones above the keyboard's base note.
 const KEY_MAP: [(egui::Key, u8); 17] = [
@@ -46,9 +67,13 @@ pub struct App {
     _midi: Option<midir::MidiInputConnection<()>>,
     status: String,
     midi_name: Option<String>,
-    defaults: Value,
-    patch: Value,
-    preset: usize,
+    inst: Instrument,
+    /// Defaults and the current patch of each instrument, Facet then Mist.
+    defaults: [Value; 2],
+    patches: [Value; 2],
+    presets: [usize; 2],
+    /// What Mist reads from: the built-in texture or a dropped file.
+    source_name: String,
     volume: f64,
     /// Octave of the computer keyboard (the base note is `12 * (octave + 1)`).
     octave: i32,
@@ -59,8 +84,11 @@ pub struct App {
     error: Option<String>,
 }
 
-fn full_defaults() -> Value {
-    merge_patch(&default_engine_json(), &default_fm_json())
+fn full_defaults() -> [Value; 2] {
+    [
+        merge_patch(&default_engine_json(), &default_fm_json()),
+        merge_patch(&default_engine_json(), &default_mist_json()),
+    ]
 }
 
 impl App {
@@ -80,31 +108,90 @@ impl App {
             _midi: midi,
             status,
             midi_name,
+            inst: Instrument::Facet,
             defaults: full_defaults(),
-            patch: full_defaults(),
-            preset: 0,
+            patches: full_defaults(),
+            presets: [0, 0],
+            source_name: "built-in texture".into(),
             volume: 0.8,
             octave: 4,
             typed: Vec::new(),
             clicked: None,
             error: None,
         };
-        app.load_preset(1);
+        app.load_preset(Instrument::Mist, 1);
+        app.load_preset(Instrument::Facet, 1);
+        // `lumen --mist` starts on Mist
+        if std::env::args().any(|a| a == "--mist") {
+            app.switch(Instrument::Mist);
+        }
         app
     }
 
-    fn load_preset(&mut self, i: usize) {
-        let case: Value = serde_json::from_str(PRESETS[i].1).unwrap_or_else(|_| json!({}));
+    fn load_preset(&mut self, inst: Instrument, i: usize) {
+        let k = index(inst);
+        let case: Value = serde_json::from_str(presets(inst)[i].1).unwrap_or_else(|_| json!({}));
         let over = case.get("patch").cloned().unwrap_or(case);
-        self.patch = merge_patch(&self.defaults, &over);
-        self.preset = i;
-        self.push_patch();
+        self.patches[k] = merge_patch(&self.defaults[k], &over);
+        self.presets[k] = i;
+        self.push_patch(inst);
     }
 
-    fn push_patch(&mut self) {
+    fn push_patch(&mut self, inst: Instrument) {
         if let Some(a) = &mut self.audio {
-            self.error = a.set_patch(&self.patch).err();
+            self.error = a.set_patch(inst, &self.patches[index(inst)]).err();
         }
+    }
+
+    fn switch(&mut self, inst: Instrument) {
+        if inst != self.inst {
+            self.inst = inst;
+            self.send(Command::Instrument(inst));
+            // held keys belong to the old instrument
+            self.typed.clear();
+            self.clicked = None;
+        }
+    }
+
+    /// A WAV file dropped on the window becomes Mist's source.
+    fn load_wav(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let mut reader = hound::WavReader::open(path).map_err(|e| e.to_string())?;
+        let spec = reader.spec();
+        let channels = spec.channels.max(1) as usize;
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Float => reader
+                .samples::<f32>()
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?,
+            hound::SampleFormat::Int => {
+                let scale = 1.0 / (1u64 << (spec.bits_per_sample - 1)) as f32;
+                reader
+                    .samples::<i32>()
+                    .map(|s| s.map(|v| v as f32 * scale))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| e.to_string())?
+            }
+        };
+        let frames = samples.len() / channels;
+        if frames < 4 {
+            return Err("the file is too short".into());
+        }
+        let ch =
+            |c: usize| -> Arc<[f32]> { (0..frames).map(|i| samples[i * channels + c]).collect() };
+        let left = ch(0);
+        let right = if channels > 1 { ch(1) } else { left.clone() };
+        self.send(Command::Source(Source {
+            left,
+            right,
+            rate: f64::from(spec.sample_rate),
+        }));
+        self.source_name = format!(
+            "{} ({:.1} s)",
+            path.file_name()
+                .map_or_else(|| "sample".into(), |n| n.to_string_lossy()),
+            frames as f64 / f64::from(spec.sample_rate)
+        );
+        Ok(())
     }
 
     fn send(&mut self, c: Command) {
@@ -114,14 +201,14 @@ impl App {
     }
 
     fn num(&self, path: &str) -> f64 {
-        self.patch
+        self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_f64)
             .unwrap_or(0.0)
     }
 
     fn set(&mut self, path: &str, v: Value) {
-        if let Some(t) = self.patch.pointer_mut(path) {
+        if let Some(t) = self.patches[index(self.inst)].pointer_mut(path) {
             *t = v;
         }
     }
@@ -137,8 +224,7 @@ impl App {
         show: &dyn Fn(f64) -> String,
     ) -> bool {
         let mut v = self.num(path);
-        let d = self
-            .defaults
+        let d = self.defaults[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_f64)
             .unwrap_or(v);
@@ -150,8 +236,7 @@ impl App {
     }
 
     fn toggle(&mut self, ui: &mut Ui, path: &str, label: &str) -> bool {
-        let mut on = self
-            .patch
+        let mut on = self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_bool)
             .unwrap_or(false);
@@ -163,8 +248,7 @@ impl App {
     }
 
     fn choice(&mut self, ui: &mut Ui, path: &str, id: &str, options: &[(&str, &str)]) -> bool {
-        let cur = self
-            .patch
+        let cur = self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_str)
             .unwrap_or("")
@@ -228,18 +312,26 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Lumen Audio Studio").color(ACCENT));
             ui.separator();
+            for (inst, name) in [(Instrument::Facet, "Facet"), (Instrument::Mist, "Mist")] {
+                if ui.selectable_label(self.inst == inst, name).clicked() {
+                    self.switch(inst);
+                }
+            }
+            ui.separator();
             ui.label("Preset");
-            let before = self.preset;
+            let inst = self.inst;
+            let k = index(inst);
+            let before = self.presets[k];
             let mut pick = before;
-            egui::ComboBox::from_id_salt("preset")
-                .selected_text(PRESETS[self.preset].0)
+            egui::ComboBox::from_id_salt(("preset", k))
+                .selected_text(presets(inst)[before].0)
                 .show_ui(ui, |ui| {
-                    for (i, (name, _)) in PRESETS.iter().enumerate() {
+                    for (i, (name, _)) in presets(inst).iter().enumerate() {
                         ui.selectable_value(&mut pick, i, *name);
                     }
                 });
             if pick != before {
-                self.load_preset(pick);
+                self.load_preset(inst, pick);
             }
             ui.separator();
             let mut vol = self.volume;
@@ -269,6 +361,67 @@ impl App {
         });
     }
 
+    /// The parts both instruments share: amp envelope, filter and voices.
+    fn common(&mut self, ui: &mut Ui) -> bool {
+        let mut changed = false;
+        ui.group(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Amp envelope").strong());
+                ui.horizontal(|ui| changed |= self.envelope(ui, "/env/0"));
+            });
+        });
+        ui.group(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    changed |= self.toggle(ui, "/filter/on", "Filter");
+                    changed |= self.choice(
+                        ui,
+                        "/filter/type",
+                        "ftype",
+                        &[("lp", "Low pass"), ("bp", "Band pass"), ("hp", "High pass")],
+                    );
+                });
+                ui.horizontal(|ui| {
+                    changed |=
+                        self.knob(ui, "/filter/cutoff", "Cutoff", 20.0..=18000.0, true, &|v| {
+                            if v >= 1000.0 {
+                                format!("{:.1} kHz", v / 1000.0)
+                            } else {
+                                format!("{v:.0} Hz")
+                            }
+                        });
+                    changed |= self.knob(ui, "/filter/res", "Resonance", 0.0..=1.0, false, &|v| {
+                        format!("{:.0}%", v * 100.0)
+                    });
+                    changed |=
+                        self.knob(ui, "/filter/envAmt", "Env amt", -1.0..=1.0, false, &|v| {
+                            format!("{:+.0}%", v * 100.0)
+                        });
+                });
+            });
+        });
+        ui.group(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    changed |= self.toggle(ui, "/voice/mono", "Mono");
+                    changed |= self.toggle(ui, "/voice/legato", "Legato");
+                });
+                ui.horizontal(|ui| {
+                    changed |= self.knob(ui, "/voice/poly", "Voices", 1.0..=32.0, false, &|v| {
+                        format!("{v:.0}")
+                    });
+                    changed |= self.knob(ui, "/voice/glide", "Glide", 0.0..=2.0, false, &|v| {
+                        format!("{:.0} ms", v * 1000.0)
+                    });
+                    changed |= self.knob(ui, "/level", "Level", 0.0..=1.0, false, &|v| {
+                        format!("{:.0}%", v * 100.0)
+                    });
+                });
+            });
+        });
+        changed
+    }
+
     fn synth(&mut self, ui: &mut Ui) {
         let mut changed = false;
         ui.horizontal_top(|ui| {
@@ -293,63 +446,7 @@ impl App {
                     });
                 });
             });
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Amp envelope").strong());
-                    ui.horizontal(|ui| changed |= self.envelope(ui, "/env/0"));
-                });
-            });
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        changed |= self.toggle(ui, "/filter/on", "Filter");
-                        changed |= self.choice(
-                            ui,
-                            "/filter/type",
-                            "ftype",
-                            &[("lp", "Low pass"), ("bp", "Band pass"), ("hp", "High pass")],
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        changed |=
-                            self.knob(ui, "/filter/cutoff", "Cutoff", 20.0..=18000.0, true, &|v| {
-                                if v >= 1000.0 {
-                                    format!("{:.1} kHz", v / 1000.0)
-                                } else {
-                                    format!("{v:.0} Hz")
-                                }
-                            });
-                        changed |=
-                            self.knob(ui, "/filter/res", "Resonance", 0.0..=1.0, false, &|v| {
-                                format!("{:.0}%", v * 100.0)
-                            });
-                        changed |=
-                            self.knob(ui, "/filter/envAmt", "Env amt", -1.0..=1.0, false, &|v| {
-                                format!("{:+.0}%", v * 100.0)
-                            });
-                    });
-                });
-            });
-            ui.group(|ui| {
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        changed |= self.toggle(ui, "/voice/mono", "Mono");
-                        changed |= self.toggle(ui, "/voice/legato", "Legato");
-                    });
-                    ui.horizontal(|ui| {
-                        changed |=
-                            self.knob(ui, "/voice/poly", "Voices", 1.0..=32.0, false, &|v| {
-                                format!("{v:.0}")
-                            });
-                        changed |= self.knob(ui, "/voice/glide", "Glide", 0.0..=2.0, false, &|v| {
-                            format!("{:.0} ms", v * 1000.0)
-                        });
-                        changed |= self.knob(ui, "/level", "Level", 0.0..=1.0, false, &|v| {
-                            format!("{:.0}%", v * 100.0)
-                        });
-                    });
-                });
-            });
+            changed |= self.common(ui);
         });
         ui.add_space(6.0);
         ui.horizontal_top(|ui| {
@@ -358,7 +455,83 @@ impl App {
             }
         });
         if changed {
-            self.push_patch();
+            self.push_patch(Instrument::Facet);
+        }
+    }
+
+    fn mist_panel(&mut self, ui: &mut Ui) {
+        let mut changed = false;
+        let pct = |v: f64| format!("{:.0}%", v * 100.0);
+        ui.horizontal_top(|ui| {
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Source").strong());
+                    ui.label(RichText::new(&self.source_name).weak());
+                    ui.label(RichText::new("Drop a .wav file on the window").weak());
+                    ui.horizontal(|ui| {
+                        changed |= self.toggle(ui, "/grain/keytrack", "Follow keys");
+                    });
+                    changed |=
+                        self.knob(ui, "/grain/rootKey", "Root key", 0.0..=127.0, false, &|v| {
+                            note_name(v.round().clamp(0.0, 127.0) as u8)
+                        });
+                });
+            });
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Where").strong());
+                    ui.horizontal(|ui| {
+                        changed |=
+                            self.knob(ui, "/grain/position", "Position", 0.0..=1.0, false, &pct);
+                        changed |= self.knob(ui, "/grain/scan", "Scan", -1.0..=1.0, false, &|v| {
+                            format!("{v:+.2}/s")
+                        });
+                        changed |= self.knob(ui, "/grain/spray", "Spray", 0.0..=0.5, false, &|v| {
+                            format!("{:.0} ms", v * 1000.0)
+                        });
+                    });
+                });
+            });
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Grains").strong());
+                    ui.horizontal(|ui| {
+                        changed |= self.knob(ui, "/grain/size", "Size", 5.0..=500.0, true, &|v| {
+                            format!("{v:.0} ms")
+                        });
+                        changed |=
+                            self.knob(ui, "/grain/density", "Density", 1.0..=100.0, true, &|v| {
+                                format!("{v:.0}/s")
+                            });
+                        changed |= self.knob(ui, "/grain/shape", "Shape", 0.0..=1.0, false, &pct);
+                        changed |=
+                            self.knob(ui, "/grain/reverse", "Reverse", 0.0..=1.0, false, &pct);
+                    });
+                });
+            });
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Pitch and stereo").strong());
+                    ui.horizontal(|ui| {
+                        changed |=
+                            self.knob(ui, "/grain/pitch", "Transpose", -24.0..=24.0, false, &|v| {
+                                format!("{v:+.1} st")
+                            });
+                        changed |=
+                            self.knob(ui, "/grain/pitchRand", "Random", 0.0..=12.0, false, &|v| {
+                                format!("{v:.1} st")
+                            });
+                        changed |= self.knob(ui, "/grain/spread", "Spread", 0.0..=1.0, false, &pct);
+                    });
+                });
+            });
+        });
+        ui.add_space(6.0);
+        ui.horizontal_top(|ui| {
+            changed |= self.common(ui);
+        });
+        if changed {
+            self.push_patch(Instrument::Mist);
         }
     }
 
@@ -384,8 +557,7 @@ impl App {
                     );
                 });
                 ui.horizontal(|ui| {
-                    let fixed = self
-                        .patch
+                    let fixed = self.patches[index(self.inst)]
                         .pointer(&format!("{base}/fixed"))
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
@@ -508,6 +680,22 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.keys(ctx);
+        let dropped: Vec<_> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        for path in dropped {
+            match self.load_wav(&path) {
+                Ok(()) => {
+                    self.error = None;
+                    self.switch(Instrument::Mist);
+                }
+                Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+            }
+        }
         if let Some(a) = &mut self.audio {
             a.collect_garbage();
         }
@@ -540,11 +728,19 @@ impl eframe::App for App {
             });
         });
         egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::both().show(ui, |ui| {
-                ui.label(RichText::new("Facet").size(20.0).strong());
-                ui.label(RichText::new("Four-operator FM synth").weak());
-                ui.add_space(6.0);
-                self.synth(ui);
+            egui::ScrollArea::both().show(ui, |ui| match self.inst {
+                Instrument::Facet => {
+                    ui.label(RichText::new("Facet").size(20.0).strong());
+                    ui.label(RichText::new("Four-operator FM synth").weak());
+                    ui.add_space(6.0);
+                    self.synth(ui);
+                }
+                Instrument::Mist => {
+                    ui.label(RichText::new("Mist").size(20.0).strong());
+                    ui.label(RichText::new("Granular synth").weak());
+                    ui.add_space(6.0);
+                    self.mist_panel(ui);
+                }
             });
         });
     }

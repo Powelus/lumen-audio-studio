@@ -1,0 +1,79 @@
+[
+  {
+    "name": "init",
+    "seed": 1,
+    "patch": {},
+    "events": [
+      { "t": "on", "time": 0, "key": 60, "vel": 0.8 },
+      { "t": "off", "time": 0.3, "key": 60 }
+    ]
+  },
+  {
+    "name": "dense_spray_reverse",
+    "seed": 3,
+    "patch": {
+      "env": [{ "a": 0.01, "d": 0.3, "s": 0.9, "r": 0.2 }],
+      "grain": { "density": 80, "size": 40, "spray": 0.2, "pitchRand": 4, "reverse": 0.4, "spread": 1, "shape": 0.8, "position": 0.6 }
+    },
+    "events": [
+      { "t": "on", "time": 0, "key": 48, "vel": 1, "pan": -0.5 },
+      { "t": "on", "time": 0.02, "key": 67, "vel": 0.6, "pan": 0.5 },
+      { "t": "off", "time": 0.3, "key": 48 },
+      { "t": "off", "time": 0.32, "key": 67 }
+    ]
+  },
+  {
+    "name": "scan_mono_glide",
+    "seed": 5,
+    "patch": {
+      "env": [{ "a": 0.01, "d": 0.3, "s": 0.8, "r": 0.2 }],
+      "voice": { "mono": true, "legato": true, "glide": 0.08 },
+      "grain": { "keytrack": false, "scan": 0.5, "position": 0.1, "pitch": 7, "density": 60, "size": 60, "rootKey": 55 }
+    },
+    "events": [
+      { "t": "on", "time": 0, "key": 48, "vel": 0.9 },
+      { "t": "on", "time": 0.12, "key": 55, "vel": 0.7 },
+      { "t": "off", "time": 0.25, "key": 55 },
+      { "t": "off", "time": 0.26, "key": 48 }
+    ]
+  },
+  {
+    "name": "modulation_filter",
+    "seed": 11,
+    "patch": {
+      "env": [{ "a": 0.02, "d": 0.4, "s": 0.8, "r": 0.2 }, { "a": 0.01, "d": 0.2, "s": 0.3, "r": 0.2 }],
+      "filter": { "on": true, "type": "bp", "cutoff": 1800, "res": 0.4, "envAmt": 1.5, "keytrack": 0.3, "velAmt": 1 },
+      "lfo": [{ "shape": "sh", "rate": 9 }, { "shape": "triangle", "rate": 3 }],
+      "grain": { "density": 50, "size": 70, "spray": 0.1, "spread": 0.8 },
+      "mod": [
+        { "src": "lfo1", "dest": "position", "amt": 0.25 },
+        { "src": "env2", "dest": "size", "amt": 0.4 },
+        { "src": "vel", "dest": "density", "amt": 0.3 },
+        { "src": "lfo2", "dest": "spray", "amt": 0.3 },
+        { "src": "lfo2", "dest": "spread", "amt": 0.3 },
+        { "src": "env2", "dest": "pitchRand", "amt": 0.2 }
+      ]
+    },
+    "events": [
+      { "t": "on", "time": 0, "key": 60, "vel": 0.7 },
+      { "t": "cc", "time": 0.1, "cc": "mw", "value": 0.6 },
+      { "t": "off", "time": 0.3, "key": 60 }
+    ]
+  },
+  {
+    "name": "voice_stealing",
+    "seed": 9,
+    "patch": {
+      "env": [{ "a": 0.005, "d": 0.3, "s": 1, "r": 0.4 }],
+      "voice": { "poly": 2 },
+      "grain": { "density": 70, "size": 30 }
+    },
+    "events": [
+      { "t": "on", "time": 0, "key": 60, "vel": 0.8 },
+      { "t": "on", "time": 0.05, "key": 64, "vel": 0.8 },
+      { "t": "on", "time": 0.1, "key": 67, "vel": 0.8 },
+      { "t": "on", "time": 0.15, "key": 72, "vel": 0.8 },
+      { "t": "off", "time": 0.3, "key": 72 }
+    ]
+  }
+]
