@@ -41,6 +41,14 @@ exact reference, since Web Audio does not specify them. They are tested for
 their behaviour instead: filter responses against the biquad formulas, the wave
 shaper curve, the convolver's normalisation, and level and stability checks.
 
+Projects: `tools/project/project.gen.test.ts` makes the demo song as JSON and as
+`.las` files (encrypted and plain, with a sample), and a damaged version 1
+project with the web version's repair of it. `las-project` reads the files to the
+same project, and repairs the damaged one with the same result and the same
+notes in the same order (ids that the repair makes up are random on both sides
+and are not compared). The generator can also read a file written by Rust to
+check the other direction.
+
 The synth worklet needs browser globals; `tools/parity/synth.gen.test.ts` supplies
 them and fixes `Math.random`. The original is not seeded, so its cases leave out
 random phase, noise, sample and hold, and the `rand` source.

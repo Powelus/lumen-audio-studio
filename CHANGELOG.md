@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.8 - 2026-10-15
+
+Projects: the model and the `.las` file format.
+
+- New crate `las-project`: the project model (channels, patterns, notes, playlist, automation, mixer with effect slots and sends, samples, markers, MIDI map) as the web version saves it. Fields the model does not know are kept, so a save and reopen loses nothing.
+- Open `.las` files from the web version, encrypted or plain, with their embedded samples. Files written here open in the web version. The file is checked three ways: the authentication tag, the CRC and the length, and each failure says what is wrong.
+- Migration and repair are ported: version 1 projects are updated, and bad tempo, time signature, routing loops, dangling sends, clips, automation and MIDI assignments, duplicate ids and out of range values are repaired, each reported as a note. Checked against the web version on the demo song and on a deliberately damaged project (same repairs, same notes, same order).
+- `las info project.las` lists what a project holds. `las convert in.las out.las [--plain]` reads and writes it again.
+
 ## 0.2.0-alpha.7 - 2026-10-15
 
 The effects rack.
