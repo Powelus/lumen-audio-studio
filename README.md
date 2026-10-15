@@ -6,9 +6,20 @@ Standalone only: no accounts, no licence keys, no cloud.
 This repository is the Rust rewrite. The earlier web and Electron version lives
 in [Powelus/pow-daw](https://github.com/Powelus/pow-daw) (last release 0.1.13).
 
-**Status:** just started. The first crate, `las-dsp`, holds the audio DSP and is
-being ported piece by piece from the TypeScript version, each piece checked
-against numbers that the original produced.
+**Status:** early. The crate `las-dsp` holds the audio DSP and is being ported
+piece by piece from the TypeScript version, each piece checked against audio
+that the original produced. So far: the Facet FM synth. The `las` command line
+tool renders it to a WAV file. There is no interface or live audio yet.
+
+## Download
+
+Builds for Windows, macOS and Linux are on the
+[releases page](https://github.com/Powelus/lumen-audio-studio/releases). Every
+new version on `main` is published automatically (see [CHANGELOG.md](CHANGELOG.md)).
+
+```sh
+las render-facet examples/facet-bell.json -o bell.wav
+```
 
 ## Goals
 
@@ -29,7 +40,12 @@ You need a recent stable Rust toolchain.
 
 ```sh
 cargo test --workspace
+cargo run -p las-cli -- render-facet examples/facet-bell.json -o bell.wav
 ```
+
+To publish a release, raise `version` under `[workspace.package]` in
+`Cargo.toml`, add a `## <version> - <date>` entry to `CHANGELOG.md`, and merge to
+`main`. Versions with a `-` are marked as pre-releases.
 
 ## Licence
 
