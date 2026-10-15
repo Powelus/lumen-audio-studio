@@ -2,6 +2,14 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.5 - 2026-10-15
+
+Factory presets and a preset browser.
+
+- All 444 factory presets of the web version (Polaris 44, Vortex 36, Monolith 30, Zenith 34, TriOsc 16, Facet 33, Mist 21, Nebula 230) are included as JSON banks. Every Polaris-family, Facet and Mist preset is tested to load and play. Nebula's banks are included but Nebula itself is not ported yet.
+- The app has a preset list per instrument: previous and next buttons, a search box and categories.
+- Save your own presets (Save as) and delete them again. They are kept in your configuration folder, one file per instrument.
+
 ## 0.2.0-alpha.4 - 2026-10-15
 
 Polaris, the wavetable synth, and the engine behind Vortex, Monolith, Zenith, Nebula and TriOsc.
