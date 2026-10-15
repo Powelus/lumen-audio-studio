@@ -9,4 +9,5 @@
 pub mod biquad;
 pub mod engine;
 pub mod fm;
+pub mod mist;
 pub mod patch;

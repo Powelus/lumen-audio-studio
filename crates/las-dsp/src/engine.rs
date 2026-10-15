@@ -145,7 +145,7 @@ fn flush(x: f64) -> f64 {
 }
 
 /// JavaScript's `Math.round`: halves round up.
-fn js_round(x: f64) -> f64 {
+pub(crate) fn js_round(x: f64) -> f64 {
     (x + 0.5).floor()
 }
 
@@ -377,10 +377,14 @@ pub trait Sound {
     /// Control-rate update. `pitch` is the final note pitch in semitones.
     fn control(&mut self, v: &mut Self::Voice, base: &BaseVoice, n: usize, pitch: f64, sr: f64);
     /// Render `n` samples of the voice's raw sound into `l` and `r` (already zeroed).
+    ///
+    /// `rng` is the engine's shared random stream (the same one the LFOs and
+    /// voices draw from), so renders repeat exactly.
     fn render(
         &mut self,
         v: &mut Self::Voice,
         base: &BaseVoice,
+        rng: &mut Rng,
         l: &mut [f32],
         r: &mut [f32],
         n: usize,
@@ -944,8 +948,14 @@ impl<S: Sound> VoiceEngine<S> {
         let pr = a.sin() * std::f64::consts::SQRT_2;
         self.buf_l[..n].fill(0.0);
         self.buf_r[..n].fill(0.0);
-        self.sound
-            .render(&mut v.sound, &v.base, &mut self.buf_l, &mut self.buf_r, n);
+        self.sound.render(
+            &mut v.sound,
+            &v.base,
+            &mut self.rng,
+            &mut self.buf_l,
+            &mut self.buf_r,
+            n,
+        );
         for i in 0..n {
             let k = (i as f64 + 1.0) / n as f64;
             let g = (g0 + (target - g0) * k) * (kill0 + (v.base.kill_gain - kill0) * k);

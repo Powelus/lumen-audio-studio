@@ -9,7 +9,7 @@
 //!
 //! Ported from `src/audio/synth/fm.ts` of the web version.
 
-use crate::engine::{BaseVoice, DestDef, Env, Sound, VoiceEngine, COMMON_DESTS};
+use crate::engine::{BaseVoice, DestDef, Env, Rng, Sound, VoiceEngine, COMMON_DESTS};
 use crate::patch::EnvPatch;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -302,6 +302,7 @@ impl Sound for Fm {
         &mut self,
         v: &mut FmVoice,
         base: &BaseVoice,
+        _rng: &mut Rng,
         l: &mut [f32],
         r: &mut [f32],
         n: usize,
