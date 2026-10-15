@@ -25,6 +25,7 @@ las render-facet examples/facet-bell.json -o bell.wav # offline render
 las render-mist examples/mist-pad.json -o pad.wav
 las render-synth examples/synth-supersaw.json -o saw.wav
 las info my-song.las                                  # what a project holds
+las render-project my-song.las -o my-song.wav         # play it offline
 ```
 
 On Linux the app needs the ALSA library (`libasound2`), `libxkbcommon-x11` and

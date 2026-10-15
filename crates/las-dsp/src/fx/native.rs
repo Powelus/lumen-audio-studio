@@ -11,7 +11,8 @@
 //! as the web version, so saved effect states load unchanged.
 
 use super::convolver::{Convolver, Impulse};
-use super::dynamics::{Compressor, Limiter};
+use super::dynamics::Limiter;
+use super::webcomp::WebCompressor;
 use super::{db_to_lin, flush, update_params, DelayLine, StereoEffect, TAU};
 use crate::biquad::{coeffs, Coeffs, Kind};
 use crate::engine::PatchError;
@@ -23,15 +24,45 @@ use std::sync::Arc;
 // A Web Audio style biquad
 // ---------------------------------------------------------------------------
 
-/// Coefficients as `BiquadFilterNode` computes them. `q` is in dB for low pass
-/// and high pass and linear for the rest, as in Web Audio.
+/// Coefficients as `BiquadFilterNode` computes them, including what Chromium
+/// does at the edges of the range (a cutoff at 0 or at the Nyquist frequency).
+/// `q` is in dB for low pass and high pass and linear for the rest, as in Web
+/// Audio.
 fn wa_coeffs(kind: Kind, f: f64, q: f64, gain_db: f64, sr: f64) -> Coeffs {
-    let f = f.clamp(1.0, sr * 0.499);
+    let n = (f / (sr * 0.5)).clamp(0.0, 1.0);
+    let pass = Coeffs {
+        b0: 1.0,
+        b1: 0.0,
+        b2: 0.0,
+        a1: 0.0,
+        a2: 0.0,
+    };
+    let silent = Coeffs { b0: 0.0, ..pass };
+    let gain = |g: f64| Coeffs { b0: g, ..pass };
+    let a2 = 10f64.powf(gain_db / 20.0);
+    let inside = n > 0.0 && n < 1.0;
+    match kind {
+        Kind::LowPass if n >= 1.0 => return pass,
+        Kind::LowPass if n <= 0.0 => return silent,
+        Kind::HighPass if n >= 1.0 => return silent,
+        Kind::HighPass if n <= 0.0 => return pass,
+        Kind::Peaking if !inside => return pass,
+        Kind::Peaking if q <= 0.0 => return gain(a2),
+        Kind::LowShelf if n >= 1.0 => return gain(a2),
+        Kind::LowShelf if n <= 0.0 => return pass,
+        Kind::HighShelf if n >= 1.0 => return pass,
+        Kind::HighShelf if n <= 0.0 => return gain(a2),
+        Kind::BandPass if !inside => return silent,
+        Kind::BandPass if q <= 0.0 => return pass,
+        Kind::Notch if !inside => return pass,
+        Kind::Notch if q <= 0.0 => return silent,
+        _ => {}
+    }
     let q = match kind {
-        Kind::LowPass | Kind::HighPass => 10f64.powf(q / 20.0),
+        Kind::LowPass | Kind::HighPass => 10f64.powf(q.max(0.0) / 20.0),
         _ => q,
     };
-    coeffs(kind, f, gain_db, q, sr)
+    coeffs(kind, n * sr * 0.5, gain_db, q, sr)
 }
 
 /// Gain in dB of the equaliser's bands together at `freq`, for drawing the
@@ -62,12 +93,16 @@ fn allpass_coeffs(f: f64, q: f64, sr: f64) -> Coeffs {
     }
 }
 
-/// Transposed direct form II.
+/// Direct form I, as Chromium's biquad runs, with `f32` samples and `f64`
+/// arithmetic. The coefficients may change from one sample to the next (a
+/// modulated cutoff), which is why the form matters.
 #[derive(Clone, Copy, Debug)]
 struct Bq {
     c: Coeffs,
-    z1: f64,
-    z2: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
 }
 
 impl Default for Bq {
@@ -80,17 +115,25 @@ impl Default for Bq {
                 a1: 0.0,
                 a2: 0.0,
             },
-            z1: 0.0,
-            z2: 0.0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
         }
     }
 }
 
 impl Bq {
     fn run(&mut self, x: f64) -> f64 {
-        let y = self.c.b0 * x + self.z1;
-        self.z1 = flush(self.c.b1 * x - self.c.a1 * y + self.z2);
-        self.z2 = flush(self.c.b2 * x - self.c.a2 * y);
+        // the node's input and output are `f32`
+        let x = f64::from(x as f32);
+        let c = &self.c;
+        let y = c.b0 * x + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
+        let y = f64::from(y as f32);
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = flush(y);
         y
     }
 }
@@ -291,90 +334,168 @@ fn shape(curve: &[f32], x: f64) -> f64 {
     f64::from(curve[k]) * (1.0 - f) + f64::from(curve[k + 1]) * f
 }
 
-const OS: usize = 4;
-const OS_TAPS: usize = 16;
+// ---------------------------------------------------------------------------
+// The wave shaper's 4x oversampling, as Chromium does it: two 2x up-samplers
+// (a 128 tap half-sample interpolator), the curve, then two 2x down-samplers
+// (a 256 tap half-band filter). Together they delay the signal 192 samples,
+// which the web version measures and compensates for.
+// ---------------------------------------------------------------------------
+const UP_TAPS: usize = 128;
+const DOWN_TAPS: usize = 256;
+/// Delay of the whole 4x chain, samples.
+pub const WAVESHAPER_4X_LATENCY: f64 = 192.0;
 
-/// Windowed-sinc low pass for the 4x oversampler (cutoff a quarter of the fast
-/// rate), `OS * OS_TAPS + 1` taps, normalised to unity gain at DC.
-fn os_filter() -> Vec<f64> {
-    let n = OS * OS_TAPS + 1;
-    let mid = (n - 1) as f64 / 2.0;
-    let mut h: Vec<f64> = (0..n)
-        .map(|i| {
-            let t = (i as f64 - mid) / OS as f64;
-            let sinc = if t == 0.0 {
-                1.0
-            } else {
-                (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t)
-            };
-            let w = 0.42 - 0.5 * (TAU * i as f64 / (n - 1) as f64).cos()
-                + 0.08 * (2.0 * TAU * i as f64 / (n - 1) as f64).cos();
-            sinc * w
-        })
-        .collect();
-    let sum: f64 = h.iter().sum();
-    for x in &mut h {
-        *x /= sum;
-    }
-    h
+fn blackman(x: f64, n: f64) -> f64 {
+    let alpha = 0.16;
+    let a0 = 0.5 * (1.0 - alpha);
+    let a1 = 0.5;
+    let a2 = 0.5 * alpha;
+    a0 - a1 * (TAU * x / n).cos() + a2 * (2.0 * TAU * x / n).cos()
 }
 
-/// 4x oversampled wave shaper for one channel.
+/// A history that gives the newest `n` samples as one slice, oldest first.
+struct History {
+    buf: Vec<f64>,
+    pos: usize,
+    n: usize,
+}
+
+impl History {
+    fn new(n: usize) -> Self {
+        Self {
+            buf: vec![0.0; 2 * n],
+            pos: 0,
+            n,
+        }
+    }
+
+    fn push(&mut self, x: f64) {
+        self.pos = (self.pos + 1) % self.n;
+        self.buf[self.pos] = x;
+        self.buf[self.pos + self.n] = x;
+    }
+
+    /// The last `n` pushed samples, oldest first.
+    fn window(&self) -> &[f64] {
+        &self.buf[self.pos + 1..self.pos + 1 + self.n]
+    }
+}
+
+/// 2x up-sampler: even outputs are the input delayed by half the kernel, odd
+/// outputs interpolate halfway between.
+struct Up2 {
+    /// The kernel, newest sample first reversed to match the history window.
+    kernel: Vec<f64>,
+    hist: History,
+}
+
+impl Up2 {
+    fn new() -> Self {
+        let n = UP_TAPS;
+        let half = (n / 2) as f64;
+        let kernel_forward: Vec<f64> = (0..n)
+            .map(|i| {
+                let s = std::f64::consts::PI * (i as f64 - half + 0.5);
+                let sinc = if s == 0.0 { 1.0 } else { s.sin() / s };
+                blackman(i as f64 + 0.5, n as f64) * sinc
+            })
+            .collect();
+        // window[n-1-j] is the sample j back, so the dot product wants k reversed
+        let kernel = kernel_forward.into_iter().rev().collect();
+        Self {
+            kernel,
+            hist: History::new(n),
+        }
+    }
+
+    fn run(&mut self, x: f64) -> (f64, f64) {
+        self.hist.push(x);
+        let w = self.hist.window();
+        let even = w[UP_TAPS - 1 - UP_TAPS / 2];
+        let odd: f64 = self.kernel.iter().zip(w).map(|(k, x)| k * x).sum();
+        (even, odd)
+    }
+}
+
+/// 2x down-sampler: a half-band low pass (only the odd taps and the centre are
+/// not zero), keeping every second output.
+struct Down2 {
+    centre: f64,
+    /// Odd taps, for the lags 1, 3, 5, ... 255 (reversed to match the window).
+    odd: Vec<f64>,
+    hist: History,
+}
+
+impl Down2 {
+    fn new() -> Self {
+        let n = DOWN_TAPS;
+        let half = n / 2;
+        let tap = |i: usize| {
+            let s = 0.5 * std::f64::consts::PI * (i as f64 - half as f64);
+            let sinc = if s == 0.0 { 1.0 } else { s.sin() / s };
+            0.5 * sinc * blackman(i as f64, n as f64)
+        };
+        // lag m back from the newest sample: tap h[m], odd m only
+        let odd: Vec<f64> = (0..n / 2).map(|k| tap(2 * k + 1)).collect();
+        Self {
+            centre: tap(half),
+            odd,
+            hist: History::new(n),
+        }
+    }
+
+    /// Take two input samples, give one output.
+    fn run(&mut self, first: f64, second: f64) -> f64 {
+        self.hist.push(first);
+        let w = self.hist.window();
+        let n = DOWN_TAPS;
+        // lag m is w[n-1-m]
+        let mut acc = self.centre * w[n - 1 - n / 2];
+        for (k, c) in self.odd.iter().enumerate() {
+            acc += c * w[n - 1 - (2 * k + 1)];
+        }
+        self.hist.push(second);
+        acc
+    }
+}
+
+/// The 4x oversampled wave shaper for one channel.
 struct Shaper4 {
-    h: Arc<Vec<f64>>,
-    up_hist: Vec<f64>,
-    up_pos: usize,
-    down_hist: Vec<f64>,
-    down_pos: usize,
+    up1: Up2,
+    up2: Up2,
+    down2: Down2,
+    down1: Down2,
 }
 
 impl Shaper4 {
-    fn new(h: Arc<Vec<f64>>) -> Self {
+    fn new() -> Self {
         Self {
-            up_hist: vec![0.0; OS_TAPS + 1],
-            up_pos: 0,
-            down_hist: vec![0.0; h.len()],
-            down_pos: 0,
-            h,
+            up1: Up2::new(),
+            up2: Up2::new(),
+            down2: Down2::new(),
+            down1: Down2::new(),
         }
     }
 
-    /// One input sample in, one shaped sample out (delayed by [`Self::latency`]).
+    /// One input sample in, one shaped sample out (delayed by [`WAVESHAPER_4X_LATENCY`]).
     fn run(&mut self, x: f64, curve: &[f32]) -> f64 {
-        self.up_hist[self.up_pos] = x;
-        let h = &self.h;
-        let n_up = self.up_hist.len();
-        let mut out = 0.0;
-        for phase in 0..OS {
-            // interpolate: the zero-stuffed input times the filter, phase by phase
-            let mut y = 0.0;
-            for k in 0..=OS_TAPS {
-                let idx = k * OS + phase;
-                if idx < h.len() {
-                    y += h[idx] * self.up_hist[(self.up_pos + n_up - k) % n_up];
-                }
-            }
-            let shaped = shape(curve, y * OS as f64);
-            // decimating filter, computed once per output sample
-            self.down_hist[self.down_pos] = shaped;
-            self.down_pos = (self.down_pos + 1) % self.down_hist.len();
-            if phase == OS - 1 {
-                let m = self.down_hist.len();
-                let mut acc = 0.0;
-                for (j, c) in h.iter().enumerate() {
-                    acc += c * self.down_hist[(self.down_pos + m - 1 - j) % m];
-                }
-                out = acc;
-            }
-        }
-        self.up_pos = (self.up_pos + 1) % n_up;
-        out
+        let (e1, o1) = self.up1.run(x);
+        let (a, b) = self.up2.run(e1);
+        let (c, d) = self.up2.run(o1);
+        let (qa, qb, qc, qd) = (
+            shape(curve, a),
+            shape(curve, b),
+            shape(curve, c),
+            shape(curve, d),
+        );
+        let da = self.down2.run(qa, qb);
+        let db = self.down2.run(qc, qd);
+        self.down1.run(da, db)
     }
 
-    /// Delay of the up and down filters together, in samples.
+    /// Delay of the whole chain, samples.
     fn latency() -> f64 {
-        // each filter delays (taps - 1) / 2 samples at the fast rate
-        2.0 * ((OS * OS_TAPS) as f64 / 2.0) / OS as f64
+        WAVESHAPER_4X_LATENCY
     }
 }
 
@@ -390,15 +511,14 @@ pub struct Distortion {
 
 impl Distortion {
     pub fn new(sr: f64) -> Self {
-        let h = Arc::new(os_filter());
         Self {
             p: DistParams::default(),
             sr,
             curve: dist_curve("soft"),
             mode: "soft".into(),
-            shapers: [Shaper4::new(h.clone()), Shaper4::new(h)],
+            shapers: [Shaper4::new(), Shaper4::new()],
             tone: [Bq::default(); 2],
-            dry_delay: [DelayLine::new(64), DelayLine::new(64)],
+            dry_delay: [DelayLine::new(256), DelayLine::new(256)],
         }
     }
 }
@@ -479,11 +599,17 @@ impl Default for ChorusParams {
     }
 }
 
+/// Frames a signal fed back through a delay takes to come round (a Web Audio
+/// graph processes a cycle one render quantum at a time).
+const CYCLE: usize = 128;
+
 pub struct Chorus {
     pub p: ChorusParams,
     sr: f64,
     lines: [DelayLine; 2],
-    fb: [f64; 2],
+    /// The delay output of the last `CYCLE` frames, per channel.
+    fb: [[f32; CYCLE]; 2],
+    n: usize,
     phase: f64,
 }
 
@@ -494,7 +620,8 @@ impl Chorus {
             p: ChorusParams::default(),
             sr,
             lines: [DelayLine::new(n), DelayLine::new(n)],
-            fb: [0.0; 2],
+            fb: [[0.0; CYCLE]; 2],
+            n: 0,
             phase: 0.0,
         }
     }
@@ -511,27 +638,33 @@ impl StereoEffect for Chorus {
     ) {
         let p = self.p;
         let sr = self.sr;
-        let depth = p.depth / 1000.0;
-        let delay = p.delay / 1000.0;
-        let depths = [depth, depth * (1.0 - 2.0 * p.spread)];
-        let dry = 1.0 - p.mix * 0.5;
-        let wet = p.mix;
+        // the web version's gains and delay times are `f32`
+        let depth = (p.depth / 1000.0) as f32;
+        let depth_r = ((p.depth / 1000.0) * (1.0 - 2.0 * p.spread)) as f32;
+        let depths = [depth, depth_r];
+        let delay = (p.delay / 1000.0) as f32;
+        let dry = (1.0 - p.mix * 0.5) as f32;
+        let wet = p.mix as f32;
+        let feedback = p.feedback as f32;
         for i in 0..out_l.len() {
-            let lfo = (TAU * self.phase).sin();
+            let lfo = (TAU * self.phase).sin() as f32;
             self.phase = (self.phase + p.rate / sr) % 1.0;
+            let slot = self.n % CYCLE;
             for ch in 0..2 {
-                let x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
-                let t = (delay + lfo * depths[ch]).clamp(0.0, 0.1) * sr;
-                self.lines[ch].write(flush(x + self.fb[ch] * p.feedback));
-                let y = self.lines[ch].read(t.max(1.0));
-                self.fb[ch] = y;
-                let v = (x * dry + y * wet) as f32;
+                let x = if ch == 0 { in_l[i] } else { in_r[i] };
+                let back = self.fb[ch][slot] * feedback;
+                self.lines[ch].write(f64::from(flush(f64::from(x + back)) as f32));
+                let t = (delay + lfo * depths[ch]).clamp(0.0, 0.1);
+                let y = self.lines[ch].read_linear(f64::from(t) * sr) as f32;
+                self.fb[ch][slot] = y;
+                let v = x * dry + y * wet;
                 if ch == 0 {
                     out_l[i] = v;
                 } else {
                     out_r[i] = v;
                 }
             }
+            self.n += 1;
         }
     }
 
@@ -617,7 +750,8 @@ impl StereoEffect for Phaser {
             let c = allpass_coeffs(f, 0.5, sr);
             for ch in 0..2 {
                 let x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
-                let head = x + self.fb[ch].read(FEEDBACK_DELAY as f64) * p.feedback;
+                // y[n - 128] is 127 behind the last sample written (y[n - 1])
+                let head = x + self.fb[ch].read((FEEDBACK_DELAY - 1) as f64) * p.feedback;
                 let mut y = head;
                 for s in 0..count {
                     self.stages[ch][s].c = c;
@@ -864,7 +998,8 @@ pub struct Maximizer {
     mid_hp: [Pair; 2],
     mid_lp: [Pair; 2],
     high_hp: [Pair; 2],
-    comps: [Compressor; 3],
+    comps: [WebCompressor; 3],
+    makeups: [f32; 3],
     limiter: Limiter,
     key: Option<MaximizerKey>,
     bufs: [Vec<f32>; 6],
@@ -888,10 +1023,11 @@ impl Maximizer {
             mid_lp: [Pair::default(); 2],
             high_hp: [Pair::default(); 2],
             comps: [
-                Compressor::new(sr),
-                Compressor::new(sr),
-                Compressor::new(sr),
+                WebCompressor::new(sr),
+                WebCompressor::new(sr),
+                WebCompressor::new(sr),
             ],
+            makeups: [1.0; 3],
             limiter,
             key: None,
             bufs: Default::default(),
@@ -931,12 +1067,12 @@ impl Maximizer {
         let gains = [p.low_gain, p.mid_gain, p.high_gain];
         for i in 0..3 {
             let c = &mut self.comps[i].p;
-            c.threshold = thr[i];
-            c.ratio = p.ratio;
+            c.threshold = thr[i] as f32;
+            c.ratio = p.ratio as f32;
             c.knee = 6.0;
-            c.attack = 6.0;
-            c.release = 120.0;
-            c.makeup = gains[i] + thr[i].abs() * 0.25;
+            c.attack = 0.006;
+            c.release = 0.12;
+            self.makeups[i] = db_to_lin(gains[i] + thr[i].abs() * 0.25) as f32;
         }
         self.limiter.p.gain = p.output;
     }
@@ -983,16 +1119,11 @@ impl StereoEffect for Maximizer {
         let mut tl = vec![0f32; n];
         let mut tr = vec![0f32; n];
         for k in 0..3 {
-            self.comps[k].process(
-                &self.bufs[2 * k],
-                &self.bufs[2 * k + 1],
-                &mut tl,
-                &mut tr,
-                None,
-            );
+            self.comps[k].process(&self.bufs[2 * k], &self.bufs[2 * k + 1], &mut tl, &mut tr);
+            let g = self.makeups[k];
             for i in 0..n {
-                self.mixl[i] += tl[i];
-                self.mixr[i] += tr[i];
+                self.mixl[i] += tl[i] * g;
+                self.mixr[i] += tr[i] * g;
             }
         }
         self.limiter
@@ -1003,8 +1134,9 @@ impl StereoEffect for Maximizer {
         update_params(&mut self.p, over)
     }
 
+    /// The band compressors' look-ahead plus the output limiter's.
     fn latency(&self) -> f64 {
-        self.limiter.latency()
+        self.comps[0].latency() + self.limiter.latency()
     }
 }
 

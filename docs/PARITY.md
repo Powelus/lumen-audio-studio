@@ -49,6 +49,15 @@ notes in the same order (ids that the repair makes up are random on both sides
 and are not compared). The generator can also read a file written by Rust to
 check the other direction.
 
+Mixing: `tools/project/mix.gen.test.ts` makes small projects (every synth, the
+arpeggiator, an effects rack, sends, sidechain, delay compensation, each effect
+Chromium builds from Web Audio nodes) and `tools/project/render-web.mjs` renders
+them with the web version in headless Chromium. The reference audio is committed
+under `crates/las-engine/tests/fixtures/` and `crates/las-engine/tests/web_parity.rs`
+compares. The instruments, mixer and scheduler agree to rounding; the Web Audio
+based effects agree to better than 85 dB below the signal (the browser is the
+reference for them, since Web Audio does not specify them).
+
 The synth worklet needs browser globals; `tools/parity/synth.gen.test.ts` supplies
 them and fixes `Math.random`. The original is not seeded, so its cases leave out
 random phase, noise, sample and hold, and the `rand` source.

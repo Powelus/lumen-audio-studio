@@ -2,6 +2,16 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.9 - 2026-10-15
+
+Play a project: the scheduler, the mixer and an offline render.
+
+- New crate `las-engine`. It schedules a project's notes (patterns, the playlist, swing, tempo automation, the arpeggiator), runs each channel's instrument (Polaris, Vortex, Monolith, Zenith, TriOsc, Nebula with its layers and macros, Facet, Mist) through its effects rack, and mixes the inserts: faders, pan, width, mute and solo, effect slots, sends, routing, sidechain (chosen source or an insert routed "sidechain only"), and plugin delay compensation.
+- `las render-project song.las -o song.wav` renders the whole song, or one pattern with `--pattern`, to a 32 bit float WAV.
+- Checked against the web version by rendering the same projects in headless Chromium and comparing: the instruments, the mixer, routing, sidechain and the arpeggiator match to rounding (more than 120 dB below the signal), and the effects Chromium builds from Web Audio nodes match to better than 85 dB.
+- To get there the Web Audio based effects were corrected against the browser: the overdrive uses Chromium's 4x oversampling filters and their 192 sample delay, the maximizer uses a port of Chromium's dynamics compressor (look-ahead, adaptive release), biquads run in direct form I with `f32` between nodes, the chorus reads its delay line with linear interpolation and feeds back one render quantum late, and the phaser's feedback delay is 128 samples (it was 129). Cutoffs at 0 or at the Nyquist frequency behave as in the browser.
+- Not yet in the render: the sampler and its factory samples, audio clips, LumaPad, and automation clips.
+
 ## 0.2.0-alpha.8 - 2026-10-15
 
 Projects: the model and the `.las` file format.
