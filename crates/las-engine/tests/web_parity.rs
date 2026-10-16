@@ -73,7 +73,8 @@ const EXACT: [&str; 6] = [
 /// With effects the web version builds from Web Audio's own nodes (equaliser,
 /// overdrive, chorus, phaser, auto filter, maximizer, convolution reverb): the
 /// error is more than 85 dB below the signal.
-const NATIVE: [&str; 12] = [
+const NATIVE: [&str; 13] = [
+    "sampler",
     "mixer",
     "engines",
     "nebula",
@@ -132,7 +133,10 @@ fn windows() {
     let want = floats(&fixture(&format!("{name}.f32")));
     let frames = want.len() / 2;
     let (wl, wr) = want.split_at(frames);
-    let w = 3000;
+    let w: usize = std::env::var("WIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000);
     for k in 0..frames / w {
         let (mut e, mut s, mut sg) = (0f64, 0f64, 0f64);
         for i in k * w..(k + 1) * w {
@@ -149,5 +153,70 @@ fn windows() {
             (sg / (2 * w) as f64).sqrt(),
             (e / (2 * w) as f64).sqrt()
         );
+    }
+}
+
+/// Sample by sample around a frame (`CASE=sampler_kick FROM=0 cargo test --release dump -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn dump() {
+    let name = std::env::var("CASE").unwrap_or("mixer".into());
+    let from: usize = std::env::var("FROM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let bundle = decode(&fixture(&format!("{name}.las"))).expect("a project");
+    let opts = RenderOptions {
+        sample_rate: 24000.0,
+        tail: 0.5,
+        mode: Mode::Song,
+    };
+    let got = render_mix(&bundle.project, &opts).expect("renders");
+    let want = floats(&fixture(&format!("{name}.f32")));
+    let frames = want.len() / 2;
+    let (got_side, want_side) = if std::env::var("RIGHT").is_ok() {
+        (&got.right[..], &want[frames..])
+    } else {
+        (&got.left[..], &want[..frames])
+    };
+    for (i, (g, w)) in got_side.iter().zip(want_side).enumerate().skip(from).take(
+        std::env::var("N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40),
+    ) {
+        println!("{i} rust {g:+.7} web {w:+.7}");
+    }
+}
+
+/// The frames where the two renders differ by more than `EPS` (default 1e-5).
+#[test]
+#[ignore]
+fn bad_frames() {
+    let name = std::env::var("CASE").unwrap_or("mixer".into());
+    let eps: f32 = std::env::var("EPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1e-5);
+    let bundle = decode(&fixture(&format!("{name}.las"))).expect("a project");
+    let opts = RenderOptions {
+        sample_rate: 24000.0,
+        tail: 0.5,
+        mode: Mode::Song,
+    };
+    let got = render_mix(&bundle.project, &opts).expect("renders");
+    let want = floats(&fixture(&format!("{name}.f32")));
+    let frames = want.len() / 2;
+    let mut shown = 0;
+    for i in 0..frames {
+        for (side, g, w) in [
+            ("L", got.left[i], want[i]),
+            ("R", got.right[i], want[frames + i]),
+        ] {
+            if (g - w).abs() > eps && shown < 12 {
+                println!("bad {i} {side} rust {g:+.6} web {w:+.6}");
+                shown += 1;
+            }
+        }
     }
 }

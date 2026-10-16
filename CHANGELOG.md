@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.10 - 2026-10-16
+
+The sampler and the factory sample kit.
+
+- The 29 factory samples (kicks, snares, claps, hats, cymbals, percussion, 808s, risers, impact, stabs) are synthesised in Rust and match the web version's to better than 2e-6.
+- The sampler instrument plays them in a project render: pitch from the key, tune and fine tune, start and end, loop, reverse, choke, velocity to volume, attack, decay, sustain and release, filter and boost, pan. Samples stored in a project file (WAV) play too; Mist uses a channel's own sample when it has one.
+- The Web Audio parts behave as Chromium runs them, found by measuring it: a buffer source starts between frames and reads with linear interpolation (carrying the last slope past the end of the buffer), a stop time falls on the frame the browser computes in `f32`, and an `AudioParam` timeline is evaluated per frame (ramps, `setTargetAtTime` that starts from the last frame before it, and the quantum at which a finished target snaps to its value).
+- Checked against the web render: the sampler project agrees to 113 dB below the signal; kick, reverse, loop and choke cases to rounding.
+
 ## 0.2.0-alpha.9 - 2026-10-15
 
 Play a project: the scheduler, the mixer and an offline render.

@@ -4,10 +4,12 @@
 
 use crate::arp::Transport;
 use crate::instrument::{stereo_pan, Instrument};
+use crate::library::Library;
 use crate::mixer::Mixer;
 use crate::timeline::*;
 use las_dsp::wavetable::TableLibrary;
-use las_project::Project;
+use las_project::{Project, Sample};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 /// Frames per block (the web version's render quantum).
@@ -138,6 +140,7 @@ impl Scheduler<'_> {
                 n.note.len * sec_per_tick,
                 fine,
                 n.note.pan,
+                n.note.step == Some(true),
             );
         }
     }
@@ -180,15 +183,26 @@ impl Scheduler<'_> {
     }
 }
 
-/// Render the project's mix offline.
+/// Render the project's mix offline (the factory samples only).
 pub fn render_mix(project: &Project, opts: &RenderOptions) -> Result<Rendered, String> {
+    render_mix_with(project, &BTreeMap::new(), opts)
+}
+
+/// Render the project's mix offline, with the samples stored in its file.
+pub fn render_mix_with(
+    project: &Project,
+    samples: &BTreeMap<String, Sample>,
+    opts: &RenderOptions,
+) -> Result<Rendered, String> {
     let sr = opts.sample_rate;
+    let mut library = Library::new(sr, samples);
     let mut tables = TableLibrary::new();
     let mut channels = Vec::new();
     let mut index = HashMap::new();
     let last_track = project.mixer.len().saturating_sub(1);
     for c in &project.channels {
-        let inst = Instrument::new(&c.plugin_id, &c.state, sr, &mut tables)
+        let sample = c.sample_id.as_deref().and_then(|id| library.get(id));
+        let inst = Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample)
             .map_err(|e| format!("{}: {}", c.name, e.0))?;
         index.insert(c.id.clone(), channels.len());
         channels.push(ChannelRt {
