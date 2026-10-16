@@ -114,7 +114,7 @@ pub fn render(args: &[String]) -> Result<(), String> {
     let b = load(&file)?;
     let out = out.unwrap_or_else(|| file.trim_end_matches(".las").to_string() + ".wav");
     let started = std::time::Instant::now();
-    let r = las_engine::render_mix(&b.project, &opts)?;
+    let r = las_engine::render_mix_with(&b.project, &b.samples, &opts)?;
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: r.sample_rate as u32,

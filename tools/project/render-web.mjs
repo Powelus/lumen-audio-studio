@@ -22,8 +22,10 @@ const result = await page.evaluate(
     const L = window.__las;
     const bin = Uint8Array.from(atob(bytes), (c) => c.charCodeAt(0));
     const bundle = await L.lasFormat.decodeLas(bin);
-    await Promise.all([...bundle.samples.entries()].map(([id, raw]) => L.audio.samples.addData(raw.data, raw.name, raw.mime, id)));
-    const r = await L.render.renderMix(bundle.project, L.audio.samples, { mode: 'song', sampleRate: Number(rate), tail: Number(tail) });
+    // a sample pool at the render's rate, so factory samples are made at that rate
+    const pool = new L.audio.samples.constructor(Number(rate));
+    await Promise.all([...bundle.samples.entries()].map(([id, raw]) => pool.addData(raw.data, raw.name, raw.mime, id)));
+    const r = await L.render.renderMix(bundle.project, pool, { mode: 'song', sampleRate: Number(rate), tail: Number(tail) });
     const enc = (a) => {
       let s = '';
       const u = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);

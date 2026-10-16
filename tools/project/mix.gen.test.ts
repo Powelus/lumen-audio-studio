@@ -123,6 +123,26 @@ const cases: Record<string, () => Project> = {
   },
 };
 
+// the sampler: factory drums as step (one-shot) and piano roll (gated) notes, with
+// pan, velocity, tuning, envelope, filter, boost, loop, reverse and choke
+cases.sampler = () => {
+  const p = base('sampler', 120);
+  const kick = createChannel('sampler', { name: 'Kick', mixerTrack: 1, sampleId: 'factory:kick-punch', volume: 0.9, state: { root: 60, tune: 0, fine: 0, attack: 0.001, decay: 0.3, sustain: 1, release: 0.08, reverse: false, loop: false, start: 0, end: 1, cut: false, filterType: 'lowpass', cutoff: 20000, res: 0.7, velToVol: 0.7, boost: 0 } });
+  const snare = createChannel('sampler', { name: 'Snare', mixerTrack: 2, sampleId: 'factory:snare-fat', pan: 0.3, state: { root: 60, tune: -2, fine: 15, attack: 0.002, decay: 0.2, sustain: 0.6, release: 0.1, reverse: false, loop: false, start: 0.05, end: 0.8, cut: false, filterType: 'lowpass', cutoff: 3000, res: 4, velToVol: 0.5, boost: 2 } });
+  const hat = createChannel('sampler', { name: 'Hat', mixerTrack: 3, sampleId: 'factory:hat-open', state: { root: 60, tune: 5, fine: 0, attack: 0.001, decay: 0.3, sustain: 1, release: 0.05, reverse: false, loop: false, start: 0, end: 1, cut: true, filterType: 'highpass', cutoff: 2000, res: 1, velToVol: 0.7, boost: 0 } });
+  const rev = createChannel('sampler', { name: 'Rev', mixerTrack: 4, sampleId: 'factory:clap-wide', state: { root: 60, tune: 0, fine: 0, attack: 0.01, decay: 0.3, sustain: 1, release: 0.1, reverse: true, loop: false, start: 0, end: 1, cut: false, filterType: 'lowpass', cutoff: 20000, res: 0.7, velToVol: 0.7, boost: 0 } });
+  const loop = createChannel('sampler', { name: 'Loop', mixerTrack: 5, sampleId: 'factory:808-c', state: { root: 36, tune: 0, fine: 0, attack: 0.005, decay: 0.3, sustain: 1, release: 0.2, reverse: false, loop: true, start: 0.1, end: 0.3, cut: false, filterType: 'lowpass', cutoff: 20000, res: 0.7, velToVol: 0.7, boost: 0 } });
+  p.channels.push(kick, snare, hat, rev, loop);
+  p.patterns[0].notes[kick.id] = [0, 4, 8, 12].map((s) => note(60, s / 4, 0.25, 1, { step: true }));
+  p.patterns[0].notes[snare.id] = [note(60, 1, 0.5, 0.8), note(64, 3, 0.25, 0.4, { pan: -0.5 })];
+  p.patterns[0].notes[hat.id] = [note(60, 0.5, 0.25, 0.9, { step: true }), note(60, 0.75, 0.25, 0.5, { step: true }), note(62, 1.5, 0.25, 0.7)];
+  p.patterns[0].notes[rev.id] = [note(60, 2, 1, 1, { step: true })];
+  p.patterns[0].notes[loop.id] = [note(36, 0, 1.5, 0.9), note(43, 2, 1.5, 0.7)];
+  p.swing = 0.4;
+  place(p, 4);
+  return p;
+};
+
 // the same projects without the effects that Web Audio builds from its own nodes,
 // so the instruments, mixer and scheduler are compared on their own
 cases.nebuladry = () => {

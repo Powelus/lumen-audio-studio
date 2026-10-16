@@ -138,6 +138,25 @@ impl Bq {
     }
 }
 
+/// A `BiquadFilterNode` for other crates: one channel, any filter type, with
+/// the coefficients free to change from sample to sample.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WebBiquad(Bq);
+
+impl WebBiquad {
+    /// Set the filter. `kind` is a Web Audio type name (`lowpass`, `highpass`,
+    /// `bandpass`, `notch`, `peaking`, `lowshelf`, `highshelf`); an unknown
+    /// name leaves a low pass. `q` is in dB for low and high pass.
+    pub fn set(&mut self, kind: &str, freq: f64, q: f64, gain_db: f64, sr: f64) {
+        let k = Kind::parse(kind).unwrap_or(Kind::LowPass);
+        self.0.c = wa_coeffs(k, freq, q, gain_db, sr);
+    }
+
+    pub fn run(&mut self, x: f64) -> f64 {
+        self.0.run(x)
+    }
+}
+
 fn clamp01(x: f64) -> f64 {
     x.clamp(0.0, 1.0)
 }

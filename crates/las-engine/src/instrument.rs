@@ -4,6 +4,8 @@
 //! `instruments/engineSynth.ts`.
 
 use crate::arp::{ArpState, Arpeggiator, Transport};
+use crate::factory::Audio;
+use crate::sampler::Sampler;
 use las_dsp::engine::{prepare_patch, Event, PatchError};
 use las_dsp::fm::{fm_engine, Fm, FmEngine};
 use las_dsp::fx::registry::{full_state, parse_params, EffectUnit, FxSlot};
@@ -12,6 +14,7 @@ use las_dsp::patch::merge_patch;
 use las_dsp::synth::{default_synth_json, prepare_synth_patch, synth_engine, SynthEngine};
 use las_dsp::wavetable::TableLibrary;
 use serde_json::Value;
+use std::sync::Arc;
 
 /// What a Web Audio `StereoPannerNode` does to a stereo signal.
 pub fn stereo_pan(l: &mut [f32], r: &mut [f32], pan: f64) {
@@ -47,6 +50,7 @@ enum Core {
     Layers(Vec<Layer>),
     Facet(Box<FmEngine>),
     Mist(Box<MistEngine>),
+    Sampler(Box<Sampler>),
     /// An instrument that makes no sound here (yet).
     Silent,
 }
@@ -138,6 +142,7 @@ impl Instrument {
         state: &Value,
         sr: f64,
         tables: &mut TableLibrary,
+        sample: Option<Arc<Audio>>,
     ) -> Result<Self, PatchError> {
         let core = match plugin_id {
             "facet" => {
@@ -148,6 +153,15 @@ impl Instrument {
             }
             "mist" => {
                 let mut e = mist_engine(sr, 1);
+                if let Some(a) = &sample {
+                    // the channel's own sample replaces the built-in texture
+                    let l: Arc<[f32]> = Arc::from(a.channels[0].clone());
+                    let r: Arc<[f32]> = a
+                        .channels
+                        .get(1)
+                        .map_or_else(|| l.clone(), |c| Arc::from(c.clone()));
+                    e.sound.set_source(l, r, a.sample_rate);
+                }
                 let mut p = prepare_patch::<Mist>(state.get("patch").unwrap_or(&Value::Null))?;
                 e.apply_patch(&mut p);
                 Core::Mist(Box::new(e))
@@ -167,6 +181,7 @@ impl Instrument {
                 }
                 Core::Layers(layers)
             }
+            "sampler" => Core::Sampler(Box::new(Sampler::new(state, sample, sr))),
             _ => Core::Silent,
         };
         let arp_state = ArpState::from_json(state.get("arp"));
@@ -236,7 +251,7 @@ impl Instrument {
             }
             Core::Facet(e) => e.set_bpm(bpm),
             Core::Mist(e) => e.set_bpm(bpm),
-            Core::Silent => {}
+            Core::Sampler(_) | Core::Silent => {}
         }
     }
 
@@ -276,12 +291,35 @@ impl Instrument {
             }
             Core::Facet(e) => e.queue(evs),
             Core::Mist(e) => e.queue(evs),
-            Core::Silent => {}
+            Core::Sampler(_) | Core::Silent => {}
         }
     }
 
     /// Play a note of known length (seconds on the engine clock).
-    pub fn play_note(&mut self, key: f64, vel: f64, time: f64, duration: f64, fine: f64, pan: f64) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn play_note(
+        &mut self,
+        key: f64,
+        vel: f64,
+        time: f64,
+        duration: f64,
+        fine: f64,
+        pan: f64,
+        one_shot: bool,
+    ) {
+        if let Core::Sampler(s) = &mut self.core {
+            // step notes ring out like FL; piano roll notes are gated by their length
+            let ring = one_shot && s.state_loop() != Some(true);
+            s.play_note(
+                key as i32,
+                vel,
+                time,
+                (!ring).then_some(duration),
+                fine,
+                pan,
+            );
+            return;
+        }
         if let Some(arp) = &mut self.arp {
             arp.play_note(key, vel, time, duration);
             return;
@@ -364,6 +402,7 @@ impl Instrument {
             }
             Core::Facet(e) => e.process(l, r, t0),
             Core::Mist(e) => e.process(l, r, t0),
+            Core::Sampler(s) => s.render((t0 * self.sr).round() as usize, l, r),
             Core::Silent => {}
         }
         for slot in &mut self.rack {
