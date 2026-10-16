@@ -23,6 +23,8 @@ USAGE
     las render-synth <case.json> [-o <out.wav>] [--seconds <n>] [--rate <hz>]
     las info <project.las>
     las convert <in.las> <out.las> [--plain]
+    las render-project <project.las> [-o <out.wav>] [--rate <hz>] [--tail <s>]
+                       [--pattern [<id>]] [--loops <n>]
     las --version
 
 info lists what a project holds. convert reads a project (and repairs or updates
@@ -205,6 +207,7 @@ fn main() -> ExitCode {
         Some("render-synth") => parse(&args[1..]).and_then(|o| render(Kind::Synth, &o)),
         Some("info") => project::info(&args[1..]),
         Some("convert") => project::convert(&args[1..]),
+        Some("render-project") => project::render(&args[1..]),
         Some("--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())

@@ -22,7 +22,9 @@ Each stage ships and keeps the tests green.
    scheduler, mixer, automation, offline render, export (WAV, FLAC, MP3, MIDI,
    stems). Command-line renderer first, so the sound can be checked without an
    interface. Done: project model, `.las` reader and writer, migration and repair
-   (`las-project`). Next: the scheduler and mixer, then offline render and export.
+   (`las-project`), scheduler, mixer and offline render of the synth channels
+   (`las-engine`). Next: the sampler and factory samples, audio clips,
+   automation, then export.
 3. **Audio output and MIDI.** Native audio output and MIDI input, with a live
    engine that follows the project.
 4. **Interface.** Native egui app. Started in 0.2.0-alpha.2 with a playable Facet synth, then grows to the channel rack, piano roll, playlist and mixer as the engine stages land.

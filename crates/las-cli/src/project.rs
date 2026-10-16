@@ -67,3 +67,74 @@ pub fn convert(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// `las render-project`: the mix of a project, offline, as a float WAV.
+pub fn render(args: &[String]) -> Result<(), String> {
+    let mut file = None;
+    let mut out = None;
+    let mut opts = las_engine::RenderOptions::default();
+    let mut pattern: Option<Option<String>> = None;
+    let mut loops = 1usize;
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        let mut value = |name: &str| -> Result<String, String> {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match a.as_str() {
+            "-o" | "--out" => out = Some(value("-o")?),
+            "--rate" => {
+                opts.sample_rate = value("--rate")?
+                    .parse()
+                    .map_err(|_| "--rate wants a number of hertz".to_string())?
+            }
+            "--tail" => {
+                opts.tail = value("--tail")?
+                    .parse()
+                    .map_err(|_| "--tail wants seconds".to_string())?
+            }
+            "--loops" => {
+                loops = value("--loops")?
+                    .parse()
+                    .map_err(|_| "--loops wants a whole number".to_string())?
+            }
+            "--pattern" => {
+                let id = it.next_if(|n| !n.starts_with('-')).cloned();
+                pattern = Some(id);
+            }
+            f if !f.starts_with('-') && file.is_none() => file = Some(f.to_string()),
+            other => return Err(format!("unexpected {other}")),
+        }
+    }
+    let file = file.ok_or("usage: las render-project <project.las> [-o out.wav]")?;
+    if let Some(id) = pattern {
+        opts.mode = las_engine::Mode::Pattern { id, loops };
+    }
+    let b = load(&file)?;
+    let out = out.unwrap_or_else(|| file.trim_end_matches(".las").to_string() + ".wav");
+    let started = std::time::Instant::now();
+    let r = las_engine::render_mix(&b.project, &opts)?;
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: r.sample_rate as u32,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut w = hound::WavWriter::create(&out, spec).map_err(|e| format!("{out}: {e}"))?;
+    for (l, rr) in r.left.iter().zip(&r.right) {
+        w.write_sample(*l).map_err(|e| e.to_string())?;
+        w.write_sample(*rr).map_err(|e| e.to_string())?;
+    }
+    w.finalize().map_err(|e| e.to_string())?;
+    let secs = r.seconds();
+    let took = started.elapsed().as_secs_f64();
+    println!(
+        "{out}: {secs:.1} s rendered in {took:.1} s ({:.0}x real time)",
+        secs / took.max(1e-9)
+    );
+    for n in &b.warnings {
+        eprintln!("note: {n}");
+    }
+    Ok(())
+}

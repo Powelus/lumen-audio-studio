@@ -1,0 +1,18 @@
+[package]
+name = "las-engine"
+description = "Plays and renders Lumen Audio Studio projects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+las-dsp = { path = "../las-dsp" }
+las-project = { path = "../las-project" }
+serde_json = "1"
+
+[dev-dependencies]

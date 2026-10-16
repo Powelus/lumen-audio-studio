@@ -25,6 +25,7 @@ pub mod native;
 pub mod registry;
 pub mod reverb;
 pub mod stepfx;
+pub mod webcomp;
 
 pub(crate) const TAU: f64 = PI * 2.0;
 
@@ -124,6 +125,21 @@ impl DelayLine {
         let c2 = xm1 - 2.5 * x0 + 2.0 * x1 - 0.5 * x2;
         let c3 = 0.5 * (x2 - xm1) + 1.5 * (x0 - x1);
         ((c3 * f + c2) * f + c1) * f + x0
+    }
+
+    /// Read `delay` samples behind the last written one with linear
+    /// interpolation, like a Web Audio `DelayNode` (zero delay is the sample
+    /// just written).
+    pub fn read_linear(&self, delay: f64) -> f64 {
+        let size = self.size as f64;
+        let d = delay.clamp(0.0, size - 2.0);
+        let p = self.pos as f64 - 1.0 - d;
+        let p = if p < 0.0 { p + size } else { p };
+        let i = p.floor();
+        let f = p - i;
+        let i1 = i as usize % self.size;
+        let i2 = (i1 + 1) % self.size;
+        (1.0 - f) * f64::from(self.buf[i1]) + f * f64::from(self.buf[i2])
     }
 
     pub fn clear(&mut self) {
