@@ -3,7 +3,8 @@
 //! routing, sidechain and plugin delay compensation. Port of the web version's
 //! `audio/mixer.ts`, which builds the same thing from Web Audio nodes.
 
-use crate::instrument::stereo_pan;
+use crate::instrument::stereo_pan_a;
+use crate::param::Param;
 use las_dsp::fx::registry::{descriptor, full_state, parse_params, EffectUnit, FxSlot};
 use las_project::{MixerTrack, MIXER_SLOTS};
 use serde_json::{json, Value};
@@ -79,8 +80,8 @@ struct Track {
     slots: Vec<Slot>,
     bypass: bool,
     width: EffectUnit,
-    pan: f64,
-    volume: f32,
+    pan: Param,
+    fader: Param,
     mute: f32,
     /// Instruments entering here, summed.
     input: [Vec<f32>; 2],
@@ -97,7 +98,9 @@ struct Track {
 pub struct Mixer {
     tracks: Vec<Track>,
     order: Vec<usize>,
-    master_volume: f32,
+    master: Param,
+    vals: [Vec<f32>; 2],
+    /// Delay from the timeline to each insert's output, for timing automation.
     sr: f64,
     sc: [Vec<f32>; 2],
     /// Arrival time of each insert and its effects latency, seconds.
@@ -200,8 +203,8 @@ impl Mixer {
                 slots,
                 bypass: t.fx_bypass,
                 width,
-                pan: t.pan,
-                volume: t.volume as f32,
+                pan: Param::new(t.pan),
+                fader: Param::new(t.volume),
                 mute: if t.mute || muted[i] { 0.0 } else { 1.0 },
                 input: [z(), z()],
                 sum: [z(), z()],
@@ -285,7 +288,8 @@ impl Mixer {
         Self {
             tracks,
             order,
-            master_volume: master_volume as f32,
+            master: Param::new(master_volume),
+            vals: [vec![0.0; block], vec![0.0; block]],
             sr,
             sc: [vec![0.0; block], vec![0.0; block]],
             arrival,
@@ -337,6 +341,28 @@ impl Mixer {
         self.tracks.is_empty()
     }
 
+    /// Automate an insert's `volume` or `pan` through `points` (time, value).
+    pub fn automate_track(
+        &mut self,
+        index: usize,
+        param: &str,
+        points: &[(f64, f64)],
+        first: bool,
+    ) {
+        let Some(t) = self.tracks.get_mut(index) else {
+            return;
+        };
+        match param {
+            "volume" => t.fader.ramp(points, first),
+            "pan" => t.pan.ramp(points, first),
+            _ => {}
+        }
+    }
+
+    pub fn automate_master(&mut self, points: &[(f64, f64)], first: bool) {
+        self.master.ramp(points, first);
+    }
+
     /// Delay from the timeline to insert `index`'s output, seconds.
     pub fn output_latency(&self, index: usize) -> f64 {
         self.arrival.get(index).copied().unwrap_or(0.0)
@@ -374,7 +400,7 @@ impl Mixer {
     }
 
     /// Run every insert and write the master's output (after the master volume).
-    pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
+    pub fn process(&mut self, frame: usize, out_l: &mut [f32], out_r: &mut [f32]) {
         let n = out_l.len();
         for k in 0..self.order.len() {
             let i = self.order[k];
@@ -433,10 +459,18 @@ impl Mixer {
                 ol.copy_from_slice(wl);
                 or.copy_from_slice(wr);
             }
+            for v in &mut self.vals {
+                v.resize(n, 0.0);
+            }
+            let [pan_v, fade_v] = &mut self.vals;
+            t.pan.fill(frame, pan_v, self.sr);
+            t.fader.fill(frame, fade_v, self.sr);
             let [ol, or] = &mut t.out;
-            stereo_pan(ol, or, t.pan);
-            let g = t.volume * t.mute;
+            if pan_v.iter().any(|&p| p != 0.0) {
+                stereo_pan_a(ol, or, pan_v);
+            }
             for j in 0..n {
+                let g = fade_v[j] * t.mute;
                 ol[j] *= g;
                 or[j] *= g;
             }
@@ -464,9 +498,12 @@ impl Mixer {
             }
         }
         let m = &self.tracks[0];
+        let gains = &mut self.vals[0];
+        gains.resize(n, 0.0);
+        self.master.fill(frame, gains, self.sr);
         for j in 0..n {
-            out_l[j] = m.out[0][j] * self.master_volume;
-            out_r[j] = m.out[1][j] * self.master_volume;
+            out_l[j] = m.out[0][j] * gains[j];
+            out_r[j] = m.out[1][j] * gains[j];
         }
     }
 }

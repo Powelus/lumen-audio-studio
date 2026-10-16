@@ -143,6 +143,42 @@ cases.sampler = () => {
   return p;
 };
 
+// automation clips: insert volume and pan, master volume, channel volume, pan and
+// pitch, partly covered and offset clips, an insert with plugin latency
+const auto = (p: Project, id: string, target: unknown, points: { t: number; v: number }[], start: number, length: number, offset = 0, track = 2) => {
+  p.automation.push({ id, name: id, color: '#fff', target: target as never, points, length: 4 * BEAT });
+  p.playlist.clips.push({ id: `c_${id}`, kind: 'automation', refId: id, track, start: start * BEAT, length: length * BEAT, offset });
+};
+cases.automation = () => {
+  const p = base('automation', 120);
+  const a = createChannel('polaris', { name: 'A', mixerTrack: 1, state: { patch: patch('saw', { env: [{ a: 0.005, h: 0, d: 0.2, s: 1, r: 0.15 }] }), fx: [], arp: { on: false } } });
+  const b = createChannel('polaris', { name: 'B', mixerTrack: 2, state: { patch: patch('sine'), fx: [], arp: { on: false } } });
+  p.channels.push(a, b);
+  p.patterns[0].notes[a.id] = [note(48, 0, 4, 0.9), note(55, 2, 2, 0.7)];
+  p.patterns[0].notes[b.id] = [note(72, 0, 1.5), note(76, 2, 1.5), note(79, 4, 1.5), note(72, 6, 2)];
+  p.mixer[1].slots[0] = createEffectSlot('las-limiter');
+  place(p, 8);
+  const ramp = (...v: number[]) => v.map((x, i) => ({ t: i * BEAT, v: x }));
+  auto(p, 'v1', { kind: 'mixer', track: 1, param: 'volume' }, ramp(1, 0.4, 0.9, 0.2), 0, 3);
+  auto(p, 'p2', { kind: 'mixer', track: 2, param: 'pan' }, ramp(0.5, 0, 1, 0.5), 1, 4, BEAT / 2);
+  auto(p, 'mv', { kind: 'master', param: 'volume' }, ramp(0.7, 0.9, 0.5), 0, 8);
+  auto(p, 'cv', { kind: 'channel', channelId: b.id, param: 'volume' }, ramp(1, 0.5, 0.8), 2, 4, 0, 3);
+  auto(p, 'cp', { kind: 'channel', channelId: a.id, param: 'pan' }, ramp(0.5, 1, 0), 4, 3, 0, 3);
+  auto(p, 'pitch', { kind: 'channel', channelId: b.id, param: 'pitch' }, ramp(0.5, 0.75, 0.5, 0.25), 4, 4, 0, 4);
+  return p;
+};
+// tempo automation (the song speeds up and slows down)
+cases.tempo = () => {
+  const p = base('tempo', 120);
+  const a = createChannel('polaris', { name: 'A', mixerTrack: 1, state: { patch: patch('saw'), fx: [], arp: { on: true, mode: 'up', div: 0.25, octaves: 1, gate: 0.6 } } });
+  p.channels.push(a);
+  p.patterns[0].notes[a.id] = [note(60, 0, 4), note(64, 0, 4), note(67, 0, 4), note(62, 4, 4), note(65, 4, 4)];
+  place(p, 8);
+  auto(p, 'tempo', { kind: 'master', param: 'tempo' }, [{ t: 0, v: 0.2 }, { t: 4 * BEAT, v: 0.9 }], 0, 4);
+  auto(p, 'tempo2', { kind: 'master', param: 'tempo' }, [{ t: 0, v: 0.9 }, { t: 4 * BEAT, v: 0.4 }], 4, 4);
+  return p;
+};
+
 // the same projects without the effects that Web Audio builds from its own nodes,
 // so the instruments, mixer and scheduler are compared on their own
 cases.nebuladry = () => {

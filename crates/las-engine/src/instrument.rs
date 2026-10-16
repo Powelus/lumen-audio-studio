@@ -38,6 +38,29 @@ pub fn stereo_pan(l: &mut [f32], r: &mut [f32], pan: f64) {
     }
 }
 
+/// The same with a pan that changes from frame to frame.
+pub fn stereo_pan_a(l: &mut [f32], r: &mut [f32], pans: &[f32]) {
+    let (mut last, mut gl, mut gr) = (f32::NAN, 0f32, 0f32);
+    for i in 0..l.len() {
+        let p = pans[i];
+        if p != last {
+            last = p;
+            let pan = f64::from(p).clamp(-1.0, 1.0);
+            let x = if pan <= 0.0 { pan + 1.0 } else { pan };
+            gl = (x * std::f64::consts::FRAC_PI_2).cos() as f32;
+            gr = (x * std::f64::consts::FRAC_PI_2).sin() as f32;
+        }
+        let (a, b) = (l[i], r[i]);
+        if p <= 0.0 {
+            l[i] = a + b * gl;
+            r[i] = b * gr;
+        } else {
+            l[i] = a * gl;
+            r[i] = b + a * gr;
+        }
+    }
+}
+
 /// One synth voice engine with its place in the instrument (Nebula stacks layers).
 struct Layer {
     engine: SynthEngine,

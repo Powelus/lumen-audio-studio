@@ -87,6 +87,23 @@ impl Param {
         self.events.retain(|e| e.time < time);
     }
 
+    /// Automate through `points` (time, value): a jump to the first when
+    /// `first`, a ramp to it otherwise, then ramps. This is what the web
+    /// version's `rampParam` does.
+    pub fn ramp(&mut self, points: &[(f64, f64)], first: bool) {
+        let Some(&(t0, v0)) = points.first() else {
+            return;
+        };
+        if first {
+            self.set_value_at_time(v0, t0);
+        } else {
+            self.linear_ramp_to_value_at_time(v0, t0);
+        }
+        for &(t, v) in &points[1..] {
+            self.linear_ramp_to_value_at_time(v, t);
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
@@ -115,6 +132,10 @@ impl Param {
     /// must follow each other without gaps (a param that is not asked for does
     /// not move).
     pub fn fill(&mut self, start: usize, out: &mut [f32], sample_rate: f64) {
+        if self.events.is_empty() {
+            out.fill(self.default as f32);
+            return;
+        }
         for (i, o) in out.iter_mut().enumerate() {
             let f = start + i;
             let t = f as f64 / sample_rate;
@@ -193,6 +214,69 @@ impl Param {
             self.running = v;
             *o = v as f32;
         }
+    }
+}
+
+/// Automation read when a note starts (the web version's `ParamTimeline`):
+/// piecewise linear points, merged as segments arrive.
+#[derive(Clone, Debug, Default)]
+pub struct Timeline {
+    points: Vec<(f64, f64)>,
+}
+
+impl Timeline {
+    pub fn set(&mut self, incoming: &[(f64, f64)], jump: bool) {
+        let (Some(first), Some(last)) = (incoming.first(), incoming.last()) else {
+            return;
+        };
+        let (t0, t1) = (first.0, last.0);
+        let mut out: Vec<(f64, f64)> = self
+            .points
+            .iter()
+            .copied()
+            .filter(|p| p.0 < t0 || p.0 > t1)
+            .collect();
+        if jump {
+            // hold the previous value right up to the start, then step
+            if let Some(before) = self.value_at(t0 - 1e-6) {
+                out.push((t0 - 1e-6, before));
+            }
+        }
+        out.extend_from_slice(incoming);
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.points = out;
+    }
+
+    /// The value at `time`: none before the first point, the last one held after.
+    pub fn value_at(&self, time: f64) -> Option<f64> {
+        let first = self.points.first()?;
+        if time < first.0 {
+            return None;
+        }
+        if time == first.0 {
+            return Some(first.1);
+        }
+        for w in self.points.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if time <= b.0 {
+                let span = b.0 - a.0;
+                return Some(if span <= 0.0 {
+                    b.1
+                } else {
+                    a.1 + ((b.1 - a.1) * (time - a.0)) / span
+                });
+            }
+        }
+        self.points.last().map(|p| p.1)
+    }
+
+    /// The automated value at `time`, or `fallback` when there is none.
+    pub fn get(&self, time: f64, fallback: f64) -> f64 {
+        self.value_at(time).unwrap_or(fallback)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
     }
 }
 

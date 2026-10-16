@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.11 - 2026-10-16
+
+Automation of the mixer and channels, and tempo changes.
+
+- Automation clips in the playlist drive insert volume and pan, master volume, channel volume, pan and pitch, with the web version's timing: segments are cut at the render's tempo cells, a clip that starts mid-way jumps to its value, points move later by the plugin delay of the insert they control, and clip offsets and partial overlaps work.
+- Tempo automation (the `master tempo` clips) changes the speed of the whole render, including the arpeggiator and the length of the file.
+- Checked against the web version: the automation and tempo projects match with no sample differing by more than 2e-6.
+- Not yet: automation of effect and instrument parameters.
+
 ## 0.2.0-alpha.10 - 2026-10-16
 
 The sampler and the factory sample kit.

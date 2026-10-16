@@ -3,14 +3,15 @@
 //! `audio/render.ts` and the offline half of `audio/scheduler.ts`.
 
 use crate::arp::Transport;
-use crate::instrument::{stereo_pan, Instrument};
+use crate::instrument::{stereo_pan_a, Instrument};
 use crate::library::Library;
 use crate::mixer::Mixer;
+use crate::param::{Param, Timeline};
 use crate::timeline::*;
 use las_dsp::wavetable::TableLibrary;
-use las_project::{Project, Sample};
-use std::collections::BTreeMap;
+use las_project::{AutomationClip, AutomationTarget, ClipKind, Project, Sample};
 use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Frames per block (the web version's render quantum).
 pub const BLOCK: usize = 128;
@@ -57,11 +58,13 @@ impl Rendered {
 
 struct ChannelRt {
     inst: Instrument,
-    volume: f32,
-    pan: f64,
+    volume: Param,
+    pan: Param,
     track: usize,
     mute: bool,
+    /// The channel's pitch offset, semitones, and its automation.
     pitch: f64,
+    pitch_line: Timeline,
 }
 
 /// Where the song is at a point in time (tempo changes make anchors).
@@ -84,9 +87,85 @@ struct Scheduler<'a> {
     last_bpm: f64,
     anchors: Vec<Anchor>,
     muted_tracks: Vec<bool>,
+    mixer: Mixer,
+    /// The first segment of a run: automation jumps rather than ramps.
+    fresh: bool,
+    automation_first: HashSet<String>,
+}
+
+/// The clip's value at `t`, its stored points ramped, between clip ticks `from` and `to`.
+fn automation_breakpoints(clip: &AutomationClip, from: f64, to: f64) -> Vec<(f64, f64)> {
+    let mut out = vec![(from, automation_value_at(clip, from))];
+    for p in &clip.points {
+        if p.t > from && p.t < to {
+            out.push((p.t, p.v));
+        }
+    }
+    if to > from {
+        out.push((to, automation_value_at(clip, to)));
+    }
+    out
+}
+
+/// The range a normalised automation value maps onto, for the targets handled here.
+fn target_range(target: &AutomationTarget) -> Option<(f64, f64)> {
+    Some(match target {
+        AutomationTarget::Mixer { param, .. } | AutomationTarget::Channel { param, .. } => {
+            match param.as_str() {
+                "volume" => (0.0, 1.25),
+                "pan" => (-1.0, 1.0),
+                "pitch" => (-12.0, 12.0),
+                _ => return None,
+            }
+        }
+        AutomationTarget::Master { param } if param == "volume" => (0.0, 1.25),
+        _ => return None,
+    })
 }
 
 impl Scheduler<'_> {
+    /// Apply automation points (time, 0 to 1) to their target, as the web
+    /// version's engine does.
+    fn automate(&mut self, target: &AutomationTarget, points: &[(f64, f64)], first: bool) {
+        let Some((lo, hi)) = target_range(target) else {
+            return;
+        };
+        // after latent effects the points move later, to stay with the audio
+        let shift = match target {
+            AutomationTarget::Mixer { track, .. } => self.mixer.output_latency(*track),
+            AutomationTarget::Master { .. } => self.mixer.output_latency(0),
+            _ => 0.0,
+        };
+        let pts: Vec<(f64, f64)> = points
+            .iter()
+            .map(|&(t, v)| {
+                (
+                    if shift > 0.0 { t + shift } else { t },
+                    lo + (hi - lo) * v.clamp(0.0, 1.0),
+                )
+            })
+            .collect();
+        match target {
+            AutomationTarget::Mixer { track, param } => {
+                self.mixer.automate_track(*track, param, &pts, first);
+            }
+            AutomationTarget::Master { .. } => self.mixer.automate_master(&pts, first),
+            AutomationTarget::Channel { channel_id, param } => {
+                let Some(&ci) = self.index.get(channel_id) else {
+                    return;
+                };
+                let ch = &mut self.channels[ci];
+                match param.as_str() {
+                    "volume" if !ch.mute => ch.volume.ramp(&pts, first),
+                    "pan" => ch.pan.ramp(&pts, first),
+                    "pitch" => ch.pitch_line.set(&pts, first),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn bpm(&self) -> f64 {
         tempo_at(self.project, self.cursor_tick, self.song)
     }
@@ -124,6 +203,40 @@ impl Scheduler<'_> {
         } else if let Some(pat) = self.pattern {
             pattern_notes_in_range(pat, 0.0, 0.0, f64::INFINITY, a, b, p.swing, &mut notes);
         }
+        if self.song {
+            let fresh = self.fresh;
+            for c in &p.playlist.clips {
+                if c.muted == Some(true)
+                    || self.muted_tracks.get(c.track).copied().unwrap_or(false)
+                    || c.kind != ClipKind::Automation
+                {
+                    continue;
+                }
+                let c_end = c.start + c.length;
+                if c.start >= b || c_end <= a {
+                    continue;
+                }
+                let Some(clip) = p.automation.iter().find(|x| x.id == c.ref_id) else {
+                    continue;
+                };
+                let Some(target) = clip.target() else {
+                    continue;
+                };
+                if matches!(&target, AutomationTarget::Master { param } if param == "tempo") {
+                    continue;
+                }
+                let s = a.max(c.start);
+                let e = b.min(c_end);
+                let pts: Vec<(f64, f64)> =
+                    automation_breakpoints(clip, s - c.start + c.offset, e - c.start + c.offset)
+                        .into_iter()
+                        .map(|(t, v)| (time_of(t + c.start - c.offset), v))
+                        .collect();
+                let first = fresh || !self.automation_first.contains(&c.id) || s == c.start;
+                self.automation_first.insert(c.id.clone());
+                self.automate(&target, &pts, first);
+            }
+        }
         for n in notes {
             let Some(&ci) = self.index.get(n.channel) else {
                 continue;
@@ -132,11 +245,13 @@ impl Scheduler<'_> {
             if ch.mute {
                 continue;
             }
-            let fine = n.note.fine.unwrap_or(0.0) + ch.pitch * 100.0;
+            let time = time_of(n.tick);
+            let pitch = ch.pitch_line.get(time, ch.pitch);
+            let fine = n.note.fine.unwrap_or(0.0) + pitch * 100.0;
             ch.inst.play_note(
                 f64::from(n.note.key),
                 n.note.vel,
-                time_of(n.tick),
+                time,
                 n.note.len * sec_per_tick,
                 fine,
                 n.note.pan,
@@ -152,6 +267,8 @@ impl Scheduler<'_> {
         self.cursor_time = at;
         self.abs_ticks = from;
         self.last_bpm = 0.0;
+        self.fresh = true;
+        self.automation_first.clear();
         let bpm0 = self.bpm();
         self.anchors.push(Anchor {
             time: at,
@@ -172,6 +289,7 @@ impl Scheduler<'_> {
             self.abs_ticks += seg_end - self.cursor_tick;
             self.cursor_time += (seg_end - self.cursor_tick) * sec_per_tick;
             self.cursor_tick = seg_end;
+            self.fresh = false;
             // time-based generators (the arpeggiator) follow the same segments
             let transport = self.transport();
             let end = self.cursor_time;
@@ -207,11 +325,12 @@ pub fn render_mix_with(
         index.insert(c.id.clone(), channels.len());
         channels.push(ChannelRt {
             inst,
-            volume: if c.mute { 0.0 } else { c.volume as f32 },
-            pan: c.pan,
+            volume: Param::new(if c.mute { 0.0 } else { c.volume }),
+            pan: Param::new(c.pan),
             track: c.mixer_track.min(last_track),
             mute: c.mute,
             pitch: c.pitch,
+            pitch_line: Timeline::default(),
         });
     }
     let song = matches!(opts.mode, Mode::Song);
@@ -248,6 +367,9 @@ pub fn render_mix_with(
         last_bpm: 0.0,
         anchors: Vec::new(),
         muted_tracks,
+        mixer: Mixer::new(&project.mixer, project.master_volume, sr, BLOCK),
+        fresh: true,
+        automation_first: HashSet::new(),
     };
     let bpm0 = tempo_at(project, 0.0, song);
     for ch in &mut sched.channels {
@@ -266,14 +388,15 @@ pub fn render_mix_with(
     let Scheduler {
         mut channels,
         anchors,
+        mut mixer,
         ..
     } = sched;
 
-    let mut mixer = Mixer::new(&project.mixer, project.master_volume, sr, BLOCK);
     let total = length + pad;
     let (mut out_l, mut out_r) = (Vec::with_capacity(total), Vec::with_capacity(total));
     let (mut bl, mut br) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
     let (mut ml, mut mr) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
+    let mut gains = [vec![0f32; BLOCK], vec![0f32; BLOCK]];
     let mut frame = 0usize;
     while frame < total {
         let n = BLOCK.min(total - frame);
@@ -299,16 +422,23 @@ pub fn render_mix_with(
             ch.inst.set_position(beat, a.bpm);
             let (l, r) = (&mut bl[..n], &mut br[..n]);
             ch.inst.render(t0, l, r);
-            if ch.volume != 1.0 {
+            let [vol, pan] = &mut gains;
+            vol.resize(n, 0.0);
+            pan.resize(n, 0.0);
+            ch.volume.fill(frame, vol, sr);
+            ch.pan.fill(frame, pan, sr);
+            if vol.iter().any(|&g| g != 1.0) {
                 for i in 0..n {
-                    l[i] *= ch.volume;
-                    r[i] *= ch.volume;
+                    l[i] *= vol[i];
+                    r[i] *= vol[i];
                 }
             }
-            stereo_pan(l, r, ch.pan);
+            if pan.iter().any(|&p| p != 0.0) {
+                stereo_pan_a(l, r, pan);
+            }
             mixer.add_input(ch.track, l, r);
         }
-        mixer.process(&mut ml[..n], &mut mr[..n]);
+        mixer.process(frame, &mut ml[..n], &mut mr[..n]);
         out_l.extend_from_slice(&ml[..n]);
         out_r.extend_from_slice(&mr[..n]);
         frame += n;

@@ -73,7 +73,9 @@ const EXACT: [&str; 6] = [
 /// With effects the web version builds from Web Audio's own nodes (equaliser,
 /// overdrive, chorus, phaser, auto filter, maximizer, convolution reverb): the
 /// error is more than 85 dB below the signal.
-const NATIVE: [&str; 13] = [
+const NATIVE: [&str; 15] = [
+    "automation",
+    "tempo",
     "sampler",
     "mixer",
     "engines",
