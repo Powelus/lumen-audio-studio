@@ -2,6 +2,7 @@
 pub mod arp;
 pub mod audioclip;
 pub mod factory;
+pub mod fxauto;
 pub mod instrument;
 pub mod library;
 pub mod mixer;

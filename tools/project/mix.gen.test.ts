@@ -199,6 +199,44 @@ cases.tempo = () => {
   return p;
 };
 
+// effect parameter automation: worklet ramps (comp threshold, hall wet), a slot's mix,
+// and state updates on a grid (chorus mix, distortion drive, filter cutoff)
+const fxAuto = (name: string, effects: [string, Record<string, unknown>][], autos: [string, string, { t: number; v: number }[], number, number, number?][]): Project => {
+  const p = base(name, 120);
+  const ch = createChannel('polaris', { name: 'Saw', mixerTrack: 1, state: { patch: patch('saw', { env: [{ a: 0.005, h: 0, d: 0.2, s: 1, r: 0.15 }], filters: [{ on: true, type: 'lp24', cutoff: 4000, res: 0 }] }), fx: [], arp: { on: false } } });
+  p.channels.push(ch);
+  p.patterns[0].notes[ch.id] = [note(48, 0, 2, 0.9), note(55, 2, 2, 0.8), note(60, 4, 3, 1)];
+  const slots = effects.map(([id, state]) => createEffectSlot(id, state));
+  slots.forEach((slot, i) => (p.mixer[1].slots[i] = slot));
+  place(p, 8);
+  autos.forEach(([id, param, points, start, length, slotIndex], i) =>
+    auto(p, `${id}${i}`, { kind: 'effect', track: 1, slotId: slots[slotIndex ?? 0].id, param }, points, start, length, 0, 2 + i),
+  );
+  return p;
+};
+const ramp3 = (a: number, b: number, c: number) => [{ t: 0, v: a }, { t: 2 * BEAT, v: b }, { t: 4 * BEAT, v: c }];
+cases.fxa_ramped = () =>
+  fxAuto('fxa_ramped', [['las-comp', { threshold: -30, ratio: 6, attack: 3, release: 80, makeup: 3 }], ['las-hall', { decay: 1.4, wet: 0.2, dry: 0.5 }]], [
+    ['thr', 'threshold', ramp3(0.9, 0.2, 0.7), 0, 4, 0],
+    ['mk', 'makeup', ramp3(0.2, 0.8, 0.4), 4, 4, 0],
+    ['wet', 'wet', ramp3(0.1, 0.9, 0.3), 0, 8, 1],
+  ]);
+cases.fxa_mix = () =>
+  fxAuto('fxa_mix', [['las-limiter', {}], ['las-hall', { decay: 1.2, wet: 1, dry: 0 }]], [
+    ['mixa', 'mix', ramp3(0.1, 1, 0.3), 0, 4, 1],
+    ['mixb', 'mix', ramp3(0.8, 0.2, 0.9), 4, 4, 1],
+  ]);
+cases.fxa_timed = () =>
+  fxAuto('fxa_timed', [['las-filter', { type: 'lowpass', cutoff: 1500, res: 0.5, lfoRate: 0, lfoDepth: 0 }]], [
+    ['cut', 'cutoff', ramp3(0.2, 0.9, 0.4), 0, 4, 0],
+    ['res', 'res', ramp3(0.1, 0.6, 0.2), 4, 4, 0],
+  ]);
+cases.fxa_timed2 = () =>
+  fxAuto('fxa_timed2', [['las-dist', { mode: 'tube', drive: 4, tone: 6000, output: -6, mix: 1 }], ['las-chorus', { rate: 0.8, depth: 0.5, mix: 0.3 }]], [
+    ['drive', 'drive', ramp3(0.1, 0.8, 0.3), 0, 4, 0],
+    ['cmix', 'mix', ramp3(0.2, 0.9, 0.5), 0, 8, 1],
+  ]);
+
 // the same projects without the effects that Web Audio builds from its own nodes,
 // so the instruments, mixer and scheduler are compared on their own
 cases.nebuladry = () => {

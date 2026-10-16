@@ -121,6 +121,20 @@ fn web_audio_effects_match_closely() {
     }
 }
 
+/// The error of each case (`CASES="a b" cargo test --release summary -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn summary() {
+    let names = std::env::var("CASES").unwrap_or_default();
+    for name in names.split_whitespace() {
+        let d = compare(name);
+        println!(
+            "{name}: {:.1} dB below the signal, largest error {:e}, peak {:.3}",
+            -d.rel_db, d.max_err, d.peak
+        );
+    }
+}
+
 /// Where the error is, window by window (`CASE=mixer cargo test --release windows -- --ignored --nocapture`).
 #[test]
 #[ignore]

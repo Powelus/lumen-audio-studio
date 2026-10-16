@@ -12,6 +12,7 @@ pub mod fft;
 pub mod fm;
 pub mod fx;
 pub mod loudness;
+pub mod param;
 pub mod mist;
 pub mod patch;
 pub mod presets;

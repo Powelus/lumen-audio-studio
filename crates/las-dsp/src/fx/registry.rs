@@ -608,27 +608,50 @@ impl FxSlot {
 
     /// Process a block in place.
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32], sidechain: Option<(&[f32], &[f32])>) {
+        let m = if self.enabled {
+            self.mix.clamp(0.0, 1.0)
+        } else {
+            0.0
+        } as f32;
+        self.run(l, r, sidechain, |_| (m, 1.0 - m));
+    }
+
+    /// Process a block in place with the wet and dry gains for each frame.
+    pub fn process_gains(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+        wet: &[f32],
+        dry: &[f32],
+    ) {
+        self.run(l, r, sidechain, |i| (wet[i], dry[i]));
+    }
+
+    fn run(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+        gains: impl Fn(usize) -> (f32, f32),
+    ) {
         let n = l.len();
         self.wet_l.resize(n, 0.0);
         self.wet_r.resize(n, 0.0);
         self.unit
             .process(l, r, &mut self.wet_l, &mut self.wet_r, sidechain);
-        let m = if self.enabled {
-            self.mix.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
         let delay = (self.latency() * self.sr).round();
         for i in 0..n {
             self.dry[0].write(f64::from(l[i]));
             self.dry[1].write(f64::from(r[i]));
             let (dl, dr) = if delay >= 1.0 {
-                (self.dry[0].read(delay), self.dry[1].read(delay))
+                (self.dry[0].read(delay) as f32, self.dry[1].read(delay) as f32)
             } else {
-                (f64::from(l[i]), f64::from(r[i]))
+                (l[i], r[i])
             };
-            l[i] = (dl * (1.0 - m) + f64::from(self.wet_l[i]) * m) as f32;
-            r[i] = (dr * (1.0 - m) + f64::from(self.wet_r[i]) * m) as f32;
+            let (wet, dry) = gains(i);
+            l[i] = dl * dry + self.wet_l[i] * wet;
+            r[i] = dr * dry + self.wet_r[i] * wet;
         }
     }
 }

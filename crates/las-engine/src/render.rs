@@ -184,6 +184,24 @@ impl Scheduler<'_> {
     /// Apply automation points (time, 0 to 1) to their target, as the web
     /// version's engine does.
     fn automate(&mut self, target: &AutomationTarget, points: &[(f64, f64)], first: bool) {
+        if let AutomationTarget::Effect {
+            track,
+            slot_id,
+            param,
+        } = target
+        {
+            if !self.mixer.has_slot(*track, slot_id) {
+                return;
+            }
+            let shift = self.mixer.path_latency(*track, slot_id);
+            let pts: Vec<(f64, f64)> = points
+                .iter()
+                .map(|&(t, v)| (if shift > 0.0 { t + shift } else { t }, v))
+                .collect();
+            self.mixer
+                .automate_effect(*track, slot_id, param, &pts, first);
+            return;
+        }
         let Some((lo, hi)) = target_range(target) else {
             return;
         };
@@ -460,6 +478,7 @@ pub fn render_mix_with(
         fresh: true,
         automation_first: HashSet::new(),
     };
+    sched.mixer.set_length(length + pad);
     let bpm0 = tempo_at(project, 0.0, song);
     for ch in &mut sched.channels {
         ch.inst.set_bpm(bpm0);
