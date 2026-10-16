@@ -4,7 +4,9 @@ Each version that lands on `main` is published as a GitHub Release. Versions wit
 
 ## 0.2.0-alpha.11 - 2026-10-16
 
-Automation of the mixer and channels, and tempo changes.
+Audio clips, automation of the mixer and channels, and tempo changes.
+
+- Audio clips in the playlist play: clip gain, fades of any shape, automatic crossfades where clips overlap, reverse, pitch shift, and tempo follow by time stretch or by resampling. The time stretch (WSOLA with transient locking) is a port of the web version's and matches it to rounding; a mono clip pans with the mono law, as in the browser. Checked against the web render of a project with seven clips.
 
 - Automation clips in the playlist drive insert volume and pan, master volume, channel volume, pan and pitch, with the web version's timing: segments are cut at the render's tempo cells, a clip that starts mid-way jumps to its value, points move later by the plugin delay of the insert they control, and clip offsets and partial overlaps work.
 - Tempo automation (the `master tempo` clips) changes the speed of the whole render, including the arpeggiator and the length of the file.

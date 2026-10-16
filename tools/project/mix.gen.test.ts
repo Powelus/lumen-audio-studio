@@ -167,6 +167,26 @@ cases.automation = () => {
   auto(p, 'pitch', { kind: 'channel', channelId: b.id, param: 'pitch' }, ramp(0.5, 0.75, 0.5, 0.25), 4, 4, 0, 4);
   return p;
 };
+// audio clips: gain, fades, reverse, pitch, tempo follow by stretch and by resample,
+// a crossfade between overlapping clips, a clip offset into its source
+cases.clips = () => {
+  const p = base('clips', 120);
+  const mono = createChannel('audioclip', { name: 'Mono', mixerTrack: 1, sampleId: 'factory:ride', state: { gain: -2 } });
+  const stereo = createChannel('audioclip', { name: 'Stereo', mixerTrack: 2, sampleId: 'factory:stab-minor', pan: 0.2, state: { gain: 0 } });
+  p.channels.push(mono, stereo);
+  p.samples.push({ id: 'factory:ride', name: 'Ride', factory: true }, { id: 'factory:stab-minor', name: 'Stab', factory: true });
+  const clip = (id: string, ch: string, track: number, start: number, length: number, offset = 0, audio?: Record<string, unknown>) =>
+    p.playlist.clips.push({ id, kind: 'audio', refId: ch, track, start: start * BEAT, length: length * BEAT, offset, ...(audio ? { audio } : {}) } as never);
+  clip('m1', mono.id, 0, 0, 2, 0, { gain: -4, fadeIn: BEAT / 4, fadeOut: BEAT / 2, fadeInCurve: 0.5, fadeOutCurve: -0.5 });
+  clip('m2', mono.id, 0, 1.5, 2, 20, { stretch: { bpm: 100, mode: 'stretch' } });
+  clip('m3', mono.id, 1, 5, 2, 0, { stretch: { bpm: 150, mode: 'resample' }, reverse: true });
+  clip('s1', stereo.id, 2, 0, 1, 0, { pitch: 3 });
+  clip('s2', stereo.id, 2, 2, 1, 12, { reverse: true, gain: 2 });
+  clip('s3', stereo.id, 2, 4, 2, 0, { pitch: -5, stretch: { bpm: 90, mode: 'stretch' } });
+  clip('s4', stereo.id, 3, 7, 1);
+  place(p, 8);
+  return p;
+};
 // tempo automation (the song speeds up and slows down)
 cases.tempo = () => {
   const p = base('tempo', 120);

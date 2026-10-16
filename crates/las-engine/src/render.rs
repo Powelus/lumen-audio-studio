@@ -3,7 +3,8 @@
 //! `audio/render.ts` and the offline half of `audio/scheduler.ts`.
 
 use crate::arp::Transport;
-use crate::instrument::{stereo_pan_a, Instrument};
+use crate::audioclip::{clip_fades, clip_plan, ClipPlayback};
+use crate::instrument::{mono_pan_a, stereo_pan_a, Instrument};
 use crate::library::Library;
 use crate::mixer::Mixer;
 use crate::param::{Param, Timeline};
@@ -88,6 +89,7 @@ struct Scheduler<'a> {
     anchors: Vec<Anchor>,
     muted_tracks: Vec<bool>,
     mixer: Mixer,
+    library: Library,
     /// The first segment of a run: automation jumps rather than ramps.
     fresh: bool,
     automation_first: HashSet<String>,
@@ -123,7 +125,62 @@ fn target_range(target: &AutomationTarget) -> Option<(f64, f64)> {
     })
 }
 
+/// A clip's timing in seconds.
+struct ClipInfoSecs {
+    clip_pos: f64,
+    clip_len: f64,
+    fade_in: f64,
+    fade_out: f64,
+    x_in: bool,
+    x_out: bool,
+}
+
 impl Scheduler<'_> {
+    /// Play an audio clip on its channel, as the web engine's `playClip`.
+    fn play_clip(
+        &mut self,
+        channel_id: &str,
+        time: f64,
+        offset: f64,
+        duration: f64,
+        clip: &las_project::Clip,
+        info: ClipInfoSecs,
+    ) {
+        let Some(&ci) = self.index.get(channel_id) else {
+            return;
+        };
+        if self.channels[ci].mute {
+            return;
+        }
+        let Some(sample_id) = self.project.channels[ci].sample_id.clone() else {
+            return;
+        };
+        let plan = clip_plan(clip.audio.as_ref(), self.project.bpm);
+        let Some(buffer) = self
+            .library
+            .processed(&sample_id, plan.reverse, plan.factor)
+        else {
+            return;
+        };
+        let edit = clip.audio.as_ref();
+        let playback = ClipPlayback {
+            buffer,
+            rate: plan.rate,
+            gain: plan.gain,
+            clip_pos: info.clip_pos,
+            clip_len: info.clip_len,
+            fade_in: info.fade_in,
+            fade_out: info.fade_out,
+            fade_in_curve: edit.and_then(|e| e.fade_in_curve).unwrap_or(0.0),
+            fade_out_curve: edit.and_then(|e| e.fade_out_curve).unwrap_or(0.0),
+            x_in: info.x_in,
+            x_out: info.x_out,
+        };
+        self.channels[ci]
+            .inst
+            .play_clip(time, offset, duration, Some(&playback));
+    }
+
     /// Apply automation points (time, 0 to 1) to their target, as the web
     /// version's engine does.
     fn automate(&mut self, target: &AutomationTarget, points: &[(f64, f64)], first: bool) {
@@ -205,14 +262,45 @@ impl Scheduler<'_> {
         }
         if self.song {
             let fresh = self.fresh;
+            let mut fades = None;
             for c in &p.playlist.clips {
-                if c.muted == Some(true)
-                    || self.muted_tracks.get(c.track).copied().unwrap_or(false)
-                    || c.kind != ClipKind::Automation
+                if c.muted == Some(true) || self.muted_tracks.get(c.track).copied().unwrap_or(false)
                 {
                     continue;
                 }
                 let c_end = c.start + c.length;
+                if c.kind == ClipKind::Audio {
+                    let (into, at, off, len) = if c.start >= a && c.start < b {
+                        (0.0, time_of(c.start), c.offset, c.length)
+                    } else if fresh && c.start < a && c_end > a {
+                        let into = a - c.start;
+                        (into, time_a, c.offset + into, c.length - into)
+                    } else {
+                        continue;
+                    };
+                    let fades = fades
+                        .get_or_insert_with(|| clip_fades(&p.playlist.clips, &self.muted_tracks));
+                    let f = fades.get(&c.id).copied().unwrap_or_default();
+                    self.play_clip(
+                        &c.ref_id,
+                        at,
+                        off * sec_per_tick,
+                        len * sec_per_tick,
+                        c,
+                        ClipInfoSecs {
+                            clip_pos: into * sec_per_tick,
+                            clip_len: c.length * sec_per_tick,
+                            fade_in: f.fade_in * sec_per_tick,
+                            fade_out: f.fade_out * sec_per_tick,
+                            x_in: f.x_in,
+                            x_out: f.x_out,
+                        },
+                    );
+                    continue;
+                }
+                if c.kind != ClipKind::Automation {
+                    continue;
+                }
                 if c.start >= b || c_end <= a {
                     continue;
                 }
@@ -368,6 +456,7 @@ pub fn render_mix_with(
         anchors: Vec::new(),
         muted_tracks,
         mixer: Mixer::new(&project.mixer, project.master_volume, sr, BLOCK),
+        library,
         fresh: true,
         automation_first: HashSet::new(),
     };
@@ -422,6 +511,7 @@ pub fn render_mix_with(
             ch.inst.set_position(beat, a.bpm);
             let (l, r) = (&mut bl[..n], &mut br[..n]);
             ch.inst.render(t0, l, r);
+            let mono = ch.inst.is_mono();
             let [vol, pan] = &mut gains;
             vol.resize(n, 0.0);
             pan.resize(n, 0.0);
@@ -433,7 +523,11 @@ pub fn render_mix_with(
                     r[i] *= vol[i];
                 }
             }
-            if pan.iter().any(|&p| p != 0.0) {
+            if mono {
+                // a mono signal pans with the mono law, even in the middle
+                let src = l.to_vec();
+                mono_pan_a(&src, pan, l, r);
+            } else if pan.iter().any(|&p| p != 0.0) {
                 stereo_pan_a(l, r, pan);
             }
             mixer.add_input(ch.track, l, r);

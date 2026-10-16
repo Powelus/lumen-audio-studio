@@ -10,6 +10,7 @@ use std::sync::Arc;
 pub struct Library {
     raw: BTreeMap<String, Sample>,
     cache: HashMap<String, Option<Arc<Audio>>>,
+    processed: HashMap<(String, bool, String), Arc<Audio>>,
     sample_rate: f64,
 }
 
@@ -18,6 +19,7 @@ impl Library {
         Self {
             raw: samples.clone(),
             cache: HashMap::new(),
+            processed: HashMap::new(),
             sample_rate,
         }
     }
@@ -44,6 +46,39 @@ impl Library {
         let audio = audio.map(Arc::new);
         self.cache.insert(id.to_string(), audio.clone());
         audio
+    }
+}
+
+impl Library {
+    /// A clip's source reversed and/or time stretched (`factor` 1 is no stretch).
+    pub fn processed(&mut self, id: &str, reverse: bool, factor: f64) -> Option<Arc<Audio>> {
+        let src = self.get(id)?;
+        if factor == 1.0 && !reverse {
+            return Some(src);
+        }
+        let key = (id.to_string(), reverse, format!("{factor:.6}"));
+        if let Some(hit) = self.processed.get(&key) {
+            return Some(hit.clone());
+        }
+        let base: Vec<Vec<f32>> = if reverse {
+            src.channels
+                .iter()
+                .map(|c| c.iter().rev().copied().collect())
+                .collect()
+        } else {
+            src.channels.clone()
+        };
+        let channels = if factor == 1.0 {
+            base
+        } else {
+            las_dsp::stretch::time_stretch(&base, src.sample_rate, factor)
+        };
+        let out = Arc::new(Audio {
+            channels,
+            sample_rate: src.sample_rate,
+        });
+        self.processed.insert(key, out.clone());
+        Some(out)
     }
 }
 
