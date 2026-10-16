@@ -16,6 +16,7 @@ use super::webcomp::WebCompressor;
 use super::{db_to_lin, flush, update_params, DelayLine, StereoEffect, TAU};
 use crate::biquad::{coeffs, Coeffs, Kind};
 use crate::engine::PatchError;
+use crate::param::Glides;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -125,16 +126,20 @@ impl Default for Bq {
 
 impl Bq {
     fn run(&mut self, x: f64) -> f64 {
+        let v: u32 = std::env::var("BQV").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
         // the node's input and output are `f32`
         let x = f64::from(x as f32);
-        let c = &self.c;
+        let mut c = self.c;
+        if v & 1 != 0 {
+            c = Coeffs { b0: f64::from(c.b0 as f32), b1: f64::from(c.b1 as f32), b2: f64::from(c.b2 as f32), a1: f64::from(c.a1 as f32), a2: f64::from(c.a2 as f32) };
+        }
         let y = c.b0 * x + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
-        let y = f64::from(y as f32);
+        let yr = if v & 2 != 0 { f64::from(y as f32) } else { y };
         self.x2 = self.x1;
         self.x1 = x;
         self.y2 = self.y1;
-        self.y1 = flush(y);
-        y
+        self.y1 = flush(yr);
+        f64::from(y as f32)
     }
 }
 
@@ -828,16 +833,41 @@ pub struct AutoFilter {
     sr: f64,
     f: [Bq; 2],
     phase: f64,
+    /// Where the block being processed starts, in frames.
+    pub frame: usize,
+    /// Cutoff, Q, LFO rate, LFO depth (cents), wet and dry gains.
+    g: Glides,
 }
 
 impl AutoFilter {
     pub fn new(sr: f64) -> Self {
+        let p = AutoFilterParams::default();
+        // the filter reads its cutoff and Q once for each channel
+        let g = Glides::with_channels(&Self::targets(&p), &[2, 2, 1, 1, 1, 1]);
         Self {
-            p: AutoFilterParams::default(),
+            p,
             sr,
             f: [Bq::default(); 2],
             phase: 0.0,
+            frame: 0,
+            g,
         }
+    }
+
+    fn targets(p: &AutoFilterParams) -> [f64; 6] {
+        [
+            p.cutoff,
+            p.res,
+            p.lfo_rate,
+            p.lfo_depth * 1200.0,
+            1.0 - p.mix,
+            p.mix,
+        ]
+    }
+
+    /// Follow the parameters `p` now holds.
+    pub fn retarget(&mut self) {
+        self.g.retarget(&Self::targets(&self.p), self.frame, self.sr);
     }
 }
 
@@ -851,18 +881,21 @@ impl StereoEffect for AutoFilter {
         _sc: Option<(&[f32], &[f32])>,
     ) {
         let kind = Kind::parse(&self.p.kind).unwrap_or(Kind::LowPass);
-        let mix = clamp01(self.p.mix);
-        for i in 0..out_l.len() {
+        let n = out_l.len();
+        self.g.fill(self.frame, n, self.sr);
+        for i in 0..n {
             let lfo = (TAU * self.phase).sin();
-            self.phase = (self.phase + self.p.lfo_rate / self.sr) % 1.0;
+            self.phase = (self.phase + f64::from(self.g.buf(2)[i]) / self.sr) % 1.0;
             // the LFO moves the cutoff through `detune`, in cents
-            let f = self.p.cutoff * 2f64.powf(lfo * self.p.lfo_depth);
-            let c = wa_coeffs(kind, f, self.p.res, 0.0, self.sr);
+            let detune = f64::from(lfo as f32 * self.g.buf(3)[i]);
+            let (wet, dry) = (self.g.buf(5)[i], self.g.buf(4)[i]);
             for ch in 0..2 {
+                let f = f64::from(self.g.chan(0, ch)[i]) * 2f64.powf(detune / 1200.0);
+                let c = wa_coeffs(kind, f, f64::from(self.g.chan(1, ch)[i]), 0.0, self.sr);
                 self.f[ch].c = c;
-                let x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
-                let y = self.f[ch].run(x);
-                let v = (x * (1.0 - mix) + y * mix) as f32;
+                let x = if ch == 0 { in_l[i] } else { in_r[i] };
+                let y = self.f[ch].run(f64::from(x)) as f32;
+                let v = x * dry + y * wet;
                 if ch == 0 {
                     out_l[i] = v;
                 } else {
@@ -870,10 +903,13 @@ impl StereoEffect for AutoFilter {
                 }
             }
         }
+        self.frame += n;
     }
 
     fn set_params(&mut self, over: &Value) -> Result<(), PatchError> {
-        update_params(&mut self.p, over)
+        update_params(&mut self.p, over)?;
+        self.retarget();
+        Ok(())
     }
 }
 

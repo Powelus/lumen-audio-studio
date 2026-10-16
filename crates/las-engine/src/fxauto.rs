@@ -258,7 +258,9 @@ impl SlotAuto {
             if frame >= length as f64 {
                 continue;
             }
-            let frame = frame.max(0.0) as usize;
+            let off: f64 = std::env::var("FOFF").ok().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+            let frame = (frame + off).max(0.0) as usize;
+            if std::env::var("DBGEV").is_ok() { eprintln!("EV {} {} {}", frame, path, v); }
             let at = self.timed.partition_point(|e| e.frame <= frame);
             self.timed.insert(
                 at,
@@ -278,6 +280,7 @@ impl SlotAuto {
 
     /// Bring the effect's parameters to what they are at the block starting at `frame`.
     pub fn begin_block(&mut self, frame: usize, unit: &mut EffectUnit) {
+        unit.set_time(frame);
         if !self.moving() {
             return;
         }
@@ -294,6 +297,7 @@ impl SlotAuto {
             }
         }
         if state != self.applied {
+            if std::env::var("DBGEV").is_ok() { eprintln!("APPLY frame {} cutoff {:?}", frame, state.get("cutoff")); }
             if let Ok(p) = parse_params(&self.plugin_id, &state, self.sr) {
                 unit.apply(p);
             }

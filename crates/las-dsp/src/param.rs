@@ -7,9 +7,14 @@
 //! curve starts from the value of the last frame before it begins (not from
 //! the ramp's end value), and it is declared finished (the value snaps to the
 //! target) at the start of the first render quantum that finds it within 1.5
-//! sixteen-bit steps.
+//! sixteen-bit steps (of the target, if that is above one).
 
 const QUANTUM: usize = 128;
+/// Frames. A target curve that begins in the request of one channel starts the next
+/// channel's request from the value the curve reached, which in Chromium is this
+/// far short of where an exact iteration would stand (measured, at 24 kHz and a
+/// 15 ms time constant).
+const CARRY_SLIP: f64 = 1.39;
 const SET_TARGET_THRESHOLD: f64 = 1.5 / 32768.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +29,9 @@ struct Event {
     time: f64,
     value: f64,
     kind: Kind,
+    /// For a target curve: the value it first started from. A node that asks
+    /// for the same frames again (one more channel) starts from it too.
+    entered: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +43,13 @@ pub struct Param {
     cur: Option<usize>,
     /// Where the current target curve started from.
     init: f64,
+    /// Frames the current target curve has run, carried from one call to the next.
+    pos: f64,
+    /// The curve's value at the frame after the last one filled.
+    next_value: f64,
+    /// Set for a call that carries on from an earlier request for the same frames:
+    /// what the curve stood at.
+    carried: Option<f64>,
     finished: bool,
 }
 
@@ -46,6 +61,9 @@ impl Param {
             running: default,
             cur: None,
             init: default,
+            pos: 0.0,
+            next_value: default,
+            carried: None,
             finished: false,
         }
     }
@@ -61,6 +79,7 @@ impl Param {
             time,
             value,
             kind: Kind::Set,
+            entered: None,
         });
     }
 
@@ -69,6 +88,7 @@ impl Param {
             time,
             value,
             kind: Kind::Ramp,
+            entered: None,
         });
     }
 
@@ -79,6 +99,7 @@ impl Param {
             kind: Kind::Target {
                 tc: time_constant.max(0.0),
             },
+            entered: None,
         });
     }
 
@@ -113,8 +134,9 @@ impl Param {
         self.events.last().map(|e| e.time)
     }
 
-    /// The value event `c` gives at time `t` once nothing else has begun.
-    fn hold(&self, c: usize, t: f64) -> f64 {
+    /// The value event `c` gives at the frame about to be filled, once nothing
+    /// else has begun.
+    fn hold(&self, c: usize, sr: f64) -> f64 {
         let p = self.events[c];
         match p.kind {
             Kind::Set | Kind::Ramp => p.value,
@@ -122,9 +144,29 @@ impl Param {
                 if self.finished || tc <= 0.0 {
                     p.value
                 } else {
-                    p.value + (self.init - p.value) * (-(t - p.time) / tc).exp()
+                    p.value + (self.init - p.value) * (-self.pos / (tc * sr)).exp()
                 }
             }
+        }
+    }
+
+    /// Fill one buffer per channel of a node with per-channel processing: the
+    /// node asks for the parameter's values once for each channel, one after the
+    /// other. Chromium carries a target curve on from one request to the next,
+    /// so every channel after the first runs a render quantum ahead of the one
+    /// before (except in the quantum where the curve begins).
+    pub fn fill_channels(&mut self, start: usize, outs: &mut [&mut [f32]], sample_rate: f64) {
+        let (cur, init, finished) = (self.cur, self.init, self.finished);
+        for (k, out) in outs.iter_mut().enumerate() {
+            if k > 0 {
+                // the events start over; the curve's position and value carry on
+                self.cur = cur;
+                self.init = init;
+                self.finished = finished;
+                self.carried = Some(self.next_value);
+            }
+            self.fill(start, out, sample_rate);
+            self.carried = None;
         }
     }
 
@@ -136,6 +178,7 @@ impl Param {
             out.fill(self.default as f32);
             return;
         }
+        let n = out.len();
         for (i, o) in out.iter_mut().enumerate() {
             let f = start + i;
             let t = f as f64 / sample_rate;
@@ -146,7 +189,9 @@ impl Param {
                     ..
                 }) = self.cur.map(|c| self.events[c])
                 {
-                    if (self.running - value).abs() < SET_TARGET_THRESHOLD {
+                    // close to the target: in absolute terms near zero, relative
+                    // to it for large values (a filter cutoff in Hz)
+                    if (self.running - value).abs() < SET_TARGET_THRESHOLD * value.abs().max(1.0) {
                         self.finished = true;
                     }
                 }
@@ -156,17 +201,28 @@ impl Param {
                 let next = self.cur.map_or(0, |c| c + 1);
                 match self.events.get(next) {
                     // a ramp belongs to the stretch before its time
-                    Some(e) if e.time <= t && !matches!(e.kind, Kind::Ramp) => {
+                    Some(&e) if e.time <= t && !matches!(e.kind, Kind::Ramp) => {
                         let prev = self.cur;
                         self.cur = Some(next);
                         if matches!(e.kind, Kind::Target { .. }) {
                             // the curve starts from the last frame at or before its time:
                             // the one before, unless its time is exactly this frame
-                            self.init = if e.time == t {
-                                prev.map_or(self.running, |c| self.hold(c, t))
+                            let init = if e.time == t {
+                                match (prev, self.carried.take()) {
+                                    // a request that carries on from another: the value it left
+                                    (Some(c), Some(v)) if matches!(self.events[c].kind, Kind::Target { .. }) => v,
+                                    (Some(c), _) => self.hold(c, sample_rate),
+                                    (None, _) => self.default,
+                                }
                             } else {
-                                self.running
+                                match e.entered {
+                                    Some(v) => v,
+                                    None => self.running,
+                                }
                             };
+                            self.events[next].entered = Some(init);
+                            self.init = init;
+                            self.pos = (t - e.time) * sample_rate;
                             self.finished = false;
                         } else {
                             // a target that starts at the same time begins from this
@@ -206,14 +262,90 @@ impl Param {
                         if self.finished || tc <= 0.0 {
                             p.value
                         } else {
-                            p.value + (self.init - p.value) * (-(t - p.time) / tc).exp()
+                            p.value + (self.init - p.value) * (-self.pos / (tc * sample_rate)).exp()
                         }
                     }
                 },
             };
+            self.pos += 1.0;
             self.running = v;
             *o = v as f32;
+            if i + 1 == n {
+                // where the curve stands for the next frame
+                self.next_value = match self.cur.map(|c| self.events[c]) {
+                    Some(Event { kind: Kind::Target { tc }, value, .. })
+                        if !self.finished && tc > 0.0 && self.events.get(self.cur.map_or(0, |c| c + 1)).is_none_or(|n| !matches!(n.kind, Kind::Ramp)) =>
+                    {
+                        value + (self.init - value) * (-(self.pos - CARRY_SLIP) / (tc * sample_rate)).exp()
+                    }
+                    _ => v,
+                };
+            }
         }
+    }
+}
+
+/// Parameters that follow the saved values of an effect the way the web version
+/// sets them: a 15 ms time constant from the time of the change, or at once
+/// while the clock still reads zero.
+#[derive(Clone, Debug, Default)]
+pub struct Glides {
+    params: Vec<Param>,
+    /// Per parameter, a buffer for each channel the node processes with it.
+    bufs: Vec<Vec<Vec<f32>>>,
+}
+
+/// Time constant of the web version's `setParam`.
+const GLIDE_TC: f64 = 0.015;
+
+impl Glides {
+    /// One value for each parameter, each read once per block.
+    pub fn new(values: &[f64]) -> Self {
+        Self::with_channels(values, &vec![1; values.len()])
+    }
+
+    /// As [`Glides::new`], with a parameter read once for each of `channels[i]`
+    /// channels (a biquad filter reads its frequency for each channel).
+    pub fn with_channels(values: &[f64], channels: &[usize]) -> Self {
+        Self {
+            params: values.iter().map(|&v| Param::new(v)).collect(),
+            bufs: channels.iter().map(|&c| vec![Vec::new(); c.max(1)]).collect(),
+        }
+    }
+
+    /// Move to new values, as of `frame`. Values that are not finite are left.
+    pub fn retarget(&mut self, values: &[f64], frame: usize, sr: f64) {
+        for (p, &v) in self.params.iter_mut().zip(values) {
+            if !v.is_finite() {
+                continue;
+            }
+            if frame == 0 {
+                *p = Param::new(v);
+            } else {
+                p.set_target_at_time(v, frame as f64 / sr, GLIDE_TC);
+            }
+        }
+    }
+
+    /// The values of frames `frame..frame + n`.
+    pub fn fill(&mut self, frame: usize, n: usize, sr: f64) {
+        for (p, chans) in self.params.iter_mut().zip(&mut self.bufs) {
+            for b in chans.iter_mut() {
+                b.resize(n, 0.0);
+            }
+            let mut outs: Vec<&mut [f32]> = chans.iter_mut().map(|b| &mut b[..]).collect();
+            p.fill_channels(frame, &mut outs, sr);
+        }
+    }
+
+    /// Parameter `i`'s values for the first channel from the last [`Glides::fill`].
+    pub fn buf(&self, i: usize) -> &[f32] {
+        &self.bufs[i][0]
+    }
+
+    /// Parameter `i`'s values for channel `c`.
+    pub fn chan(&self, i: usize, c: usize) -> &[f32] {
+        &self.bufs[i][c.min(self.bufs[i].len() - 1)]
     }
 }
 

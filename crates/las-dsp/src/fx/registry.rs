@@ -535,7 +535,11 @@ impl EffectUnit {
             (EffectUnit::Crusher(fx), Params::Crusher(p)) => swap!(fx, Crusher, p),
             (EffectUnit::Chorus(fx), Params::Chorus(p)) => swap!(fx, Chorus, p),
             (EffectUnit::Phaser(fx), Params::Phaser(p)) => swap!(fx, Phaser, p),
-            (EffectUnit::Filter(fx), Params::Filter(p)) => swap!(fx, Filter, p),
+            (EffectUnit::Filter(fx), Params::Filter(p)) => {
+                let old = swap!(fx, Filter, p);
+                fx.retarget();
+                old
+            }
             (EffectUnit::Stereo(fx), Params::Stereo(p)) => swap!(fx, Stereo, p),
             (EffectUnit::Shaper(fx), Params::Shaper(p)) => swap!(fx, Shaper, p),
             (EffectUnit::NoiseGate(fx), Params::NoiseGate(p)) => swap!(fx, NoiseGate, p),
@@ -547,6 +551,13 @@ impl EffectUnit {
             (EffectUnit::StepFx(fx), Params::StepFx(p)) => swap!(fx, StepFx, p),
             // parameters for another kind of effect, or none: nothing to change
             (_, p) => p,
+        }
+    }
+
+    /// Tell the effects that glide to new settings where the next block starts, in frames.
+    pub fn set_time(&mut self, frame: usize) {
+        if let EffectUnit::Filter(f) = self {
+            f.frame = frame;
         }
     }
 
