@@ -4,6 +4,7 @@
 //! `instruments/engineSynth.ts`.
 
 use crate::arp::{ArpState, Arpeggiator, Transport};
+use crate::audioclip::{AudioClipper, ClipPlayback};
 use crate::factory::Audio;
 use crate::sampler::Sampler;
 use las_dsp::engine::{prepare_patch, Event, PatchError};
@@ -38,6 +39,39 @@ pub fn stereo_pan(l: &mut [f32], r: &mut [f32], pan: f64) {
     }
 }
 
+/// A mono signal through a `StereoPannerNode`: equal power, so a centred signal
+/// is 3 dB down in each side.
+pub fn mono_pan_a(src: &[f32], pans: &[f32], l: &mut [f32], r: &mut [f32]) {
+    for i in 0..src.len() {
+        let x = ((f64::from(pans[i]).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32;
+        l[i] = src[i] * (x * std::f32::consts::FRAC_PI_2).cos();
+        r[i] = src[i] * (x * std::f32::consts::FRAC_PI_2).sin();
+    }
+}
+
+/// The same with a pan that changes from frame to frame.
+pub fn stereo_pan_a(l: &mut [f32], r: &mut [f32], pans: &[f32]) {
+    let (mut last, mut gl, mut gr) = (f32::NAN, 0f32, 0f32);
+    for i in 0..l.len() {
+        let p = pans[i];
+        if p != last {
+            last = p;
+            let pan = f64::from(p).clamp(-1.0, 1.0);
+            let x = if pan <= 0.0 { pan + 1.0 } else { pan };
+            gl = (x * std::f64::consts::FRAC_PI_2).cos() as f32;
+            gr = (x * std::f64::consts::FRAC_PI_2).sin() as f32;
+        }
+        let (a, b) = (l[i], r[i]);
+        if p <= 0.0 {
+            l[i] = a + b * gl;
+            r[i] = b * gr;
+        } else {
+            l[i] = a * gl;
+            r[i] = b + a * gr;
+        }
+    }
+}
+
 /// One synth voice engine with its place in the instrument (Nebula stacks layers).
 struct Layer {
     engine: SynthEngine,
@@ -51,6 +85,7 @@ enum Core {
     Facet(Box<FmEngine>),
     Mist(Box<MistEngine>),
     Sampler(Box<Sampler>),
+    AudioClip(Box<AudioClipper>),
     /// An instrument that makes no sound here (yet).
     Silent,
 }
@@ -182,6 +217,7 @@ impl Instrument {
                 Core::Layers(layers)
             }
             "sampler" => Core::Sampler(Box::new(Sampler::new(state, sample, sr))),
+            "audioclip" => Core::AudioClip(Box::new(AudioClipper::new(state, sample, sr))),
             _ => Core::Silent,
         };
         let arp_state = ArpState::from_json(state.get("arp"));
@@ -251,7 +287,7 @@ impl Instrument {
             }
             Core::Facet(e) => e.set_bpm(bpm),
             Core::Mist(e) => e.set_bpm(bpm),
-            Core::Sampler(_) | Core::Silent => {}
+            Core::Sampler(_) | Core::AudioClip(_) | Core::Silent => {}
         }
     }
 
@@ -291,7 +327,7 @@ impl Instrument {
             }
             Core::Facet(e) => e.queue(evs),
             Core::Mist(e) => e.queue(evs),
-            Core::Sampler(_) | Core::Silent => {}
+            Core::Sampler(_) | Core::AudioClip(_) | Core::Silent => {}
         }
     }
 
@@ -320,6 +356,10 @@ impl Instrument {
             );
             return;
         }
+        if let Core::AudioClip(c) = &mut self.core {
+            c.play_note(time);
+            return;
+        }
         if let Some(arp) = &mut self.arp {
             arp.play_note(key, vel, time, duration);
             return;
@@ -342,6 +382,25 @@ impl Instrument {
             },
         ];
         self.queue_all(&evs, true);
+    }
+
+    /// Play an audio clip (audio clip channels only).
+    pub fn play_clip(
+        &mut self,
+        time: f64,
+        offset: f64,
+        duration: f64,
+        clip: Option<&ClipPlayback>,
+    ) {
+        if let Core::AudioClip(c) = &mut self.core {
+            c.play_clip(time, offset, duration, clip);
+        }
+    }
+
+    /// Whether the output is a mono signal (a channel then pans it with the
+    /// mono law, which is 3 dB down in the middle).
+    pub fn is_mono(&self) -> bool {
+        matches!(&self.core, Core::AudioClip(c) if c.is_mono())
     }
 
     /// Let the arpeggiator make its steps for `[from, to)` seconds.
@@ -403,6 +462,7 @@ impl Instrument {
             Core::Facet(e) => e.process(l, r, t0),
             Core::Mist(e) => e.process(l, r, t0),
             Core::Sampler(s) => s.render((t0 * self.sr).round() as usize, l, r),
+            Core::AudioClip(c) => c.render((t0 * self.sr).round() as usize, l, r),
             Core::Silent => {}
         }
         for slot in &mut self.rack {

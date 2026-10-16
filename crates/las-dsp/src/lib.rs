@@ -15,5 +15,6 @@ pub mod loudness;
 pub mod mist;
 pub mod patch;
 pub mod presets;
+pub mod stretch;
 pub mod synth;
 pub mod wavetable;

@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "las-app"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.11"
 dependencies = [
  "cpal",
  "eframe",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "las-cli"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.11"
 dependencies = [
  "hound",
  "las-dsp",
@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "las-dsp"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "las-engine"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.11"
 dependencies = [
  "hound",
  "las-dsp",
@@ -2051,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "las-project"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.11"
 dependencies = [
  "aes-gcm",
  "crc32fast",
