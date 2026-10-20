@@ -2,6 +2,26 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.26
+
+Selecting, moving and copying in the editors.
+
+- Piano roll and playlist: with the Select tool, drag a rectangle to select notes or clips (Shift adds), click to select one, drag any selected one to move them all together in time and pitch (or between tracks); a group never leaves the grid. With the pointer over the editor: Delete removes the selection, Ctrl+A selects all, Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste (notes at the last place clicked, clips at the start marker), Ctrl+D duplicates the selection right after itself, and in the roll the arrows nudge in time and transpose (Shift for an octave). All of it joins undo.
+
+## 0.2.0-alpha.28
+
+Looking after the project the way FL Studio does.
+
+- Right click a channel's name in the rack: piano roll, instrument, Rename, Clone (with its notes), Colour, Send to insert (route it to any mixer insert), Delete (with its notes in every pattern). Patterns > Rename pattern. Right click a playlist track's name to rename or mute it, and a light on each track mutes it (the engine already honours that). All of it joins undo.
+- Includes everything of 0.2.0-alpha.26 and 0.2.0-alpha.27 below (selection and copy and paste, the sampler window, the new default look).
+
+## 0.2.0-alpha.27
+
+A sampler window, and a new default look.
+
+- Double click a sampler channel (the drums of the starter project, anything imported) to open its window: the sample as a waveform with start and end markers to drag, knobs for coarse and fine tuning, attack, decay, sustain and release, velocity, filter cutoff, resonance and boost, root key, loop, reverse and "cut itself", and the filter type. A test checks that the settings it writes are the ones the engine reads.
+- The app starts in the FL Studio style look (gunmetal grey with orange, the "Orange Steel" theme) instead of the violet one. The violet that projects of the web version are saved with (patterns, the master) follows whichever theme is chosen. The other seven themes are in the menu under Options.
+
 ## 0.2.0-alpha.25
 
 More of an FL Studio workflow.

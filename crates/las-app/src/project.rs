@@ -43,6 +43,14 @@ enum Start {
     Resume,
 }
 
+/// What a rename dialog renames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenameTarget {
+    Channel(usize),
+    Pattern(usize),
+    Track(usize),
+}
+
 #[derive(Default)]
 pub struct ProjectState {
     pub path: String,
@@ -70,6 +78,8 @@ pub struct ProjectState {
     redo: Vec<Arc<Project>>,
     /// Changed since it was opened or saved.
     pub dirty: bool,
+    /// A name being asked for, and what it is for.
+    pub rename: Option<(RenameTarget, String)>,
     /// The mixer effect whose window is open: (insert, slot).
     pub open_effect: Option<(usize, usize)>,
     /// The kind and time of the last coalesced edit.
@@ -170,6 +180,15 @@ impl ProjectState {
                 }
                 PlEdit::Seek(t) => self.start_tick = *t,
                 PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
+                PlEdit::AskRenameTrack(t) => {
+                    let name = l
+                        .project
+                        .playlist
+                        .tracks
+                        .get(*t)
+                        .map_or_else(|| format!("Track {}", t + 1), |x| x.name.clone());
+                    self.rename = Some((RenameTarget::Track(*t), name));
+                }
                 _ => {
                     playlist::apply(Arc::make_mut(&mut l.project), e);
                     self.dirty = true;
@@ -253,6 +272,11 @@ impl ProjectState {
         for e in edits {
             if let ChanEdit::Automate(req) = e {
                 pending.push(req.clone());
+            } else if let ChanEdit::AskRename(i) = e {
+                let name = l.project.channels.get(*i).map(|c| c.name.clone());
+                if let Some(name) = name {
+                    self.rename = Some((RenameTarget::Channel(*i), name));
+                }
             } else if *e == ChanEdit::Begin {
                 self.undo.push(l.project.clone());
                 if self.undo.len() > 200 {

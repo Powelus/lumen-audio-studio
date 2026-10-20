@@ -8,6 +8,7 @@ use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui};
 use las_engine::timeline::{pattern_length, ticks_per_bar};
 use las_project::create::uid;
 use las_project::{Note, Pattern, Project, PPQ, TICKS_PER_STEP};
+use std::collections::HashSet;
 
 const KEYS: i32 = 128;
 const GUTTER: f32 = 56.0;
@@ -31,6 +32,19 @@ pub enum Edit {
     },
     Delete {
         id: String,
+    },
+    /// Move several notes by the same amount in time and key.
+    MoveMany {
+        ids: Vec<String>,
+        dpos: f64,
+        dkey: i32,
+    },
+    DeleteMany {
+        ids: Vec<String>,
+    },
+    /// Add notes that already have their places and new ids.
+    Paste {
+        notes: Vec<Note>,
     },
     /// Set a note's velocity (0 to 1).
     Velocity {
@@ -72,6 +86,10 @@ enum Drag {
     Resize {
         id: String,
     },
+    /// The selected notes together.
+    Group,
+    /// A rectangle that selects what it touches.
+    Marquee,
 }
 
 /// How the roll looks and what it is doing; kept between frames.
@@ -86,6 +104,15 @@ pub struct RollState {
     pub tool: Tool,
     /// Show the other channels' notes faintly behind this one's.
     pub ghost: bool,
+    /// The notes selected (by id) and the ones copied.
+    pub selected: HashSet<String>,
+    pub clipboard: Vec<Note>,
+    /// Where a paste lands: the last place that was clicked, in ticks.
+    paste_at: f64,
+    /// A rectangle being dragged to select notes (pixel corners).
+    marquee: Option<(egui::Pos2, egui::Pos2)>,
+    /// The place a group of notes was last dragged to (tick and key).
+    group_last: Option<(f64, i32)>,
     /// How far the grid is scrolled to the right, for the velocity lane under it.
     scroll_x: f32,
     drag: Option<Drag>,
@@ -102,6 +129,11 @@ impl Default for RollState {
             len: f64::from(TICKS_PER_STEP) * 4.0,
             tool: Tool::Draw,
             ghost: true,
+            selected: HashSet::new(),
+            clipboard: Vec::new(),
+            paste_at: 0.0,
+            marquee: None,
+            group_last: None,
             scroll_x: 0.0,
             drag: None,
             centred: None,
@@ -153,6 +185,25 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
             }
         }
         Edit::Delete { id } => notes.retain(|n| &n.id != id),
+        Edit::MoveMany { ids, dpos, dkey } => {
+            // never move a group so that one of its notes would leave the grid
+            let first = notes
+                .iter()
+                .filter(|n| ids.contains(&n.id))
+                .map(|n| n.pos)
+                .fold(f64::MAX, f64::min);
+            let dpos = if first == f64::MAX {
+                0.0
+            } else {
+                dpos.max(-first)
+            };
+            for n in notes.iter_mut().filter(|n| ids.contains(&n.id)) {
+                n.pos += dpos;
+                n.key = (n.key + dkey).clamp(0, KEYS - 1);
+            }
+        }
+        Edit::DeleteMany { ids } => notes.retain(|n| !ids.contains(&n.id)),
+        Edit::Paste { notes: add } => notes.extend(add.iter().cloned()),
         Edit::Velocity { id, vel } => {
             if let Some(n) = notes.iter_mut().find(|n| &n.id == id) {
                 n.vel = vel.clamp(0.0, 1.0);
@@ -180,6 +231,101 @@ pub fn new_note(key: i32, pos: f64, len: f64) -> Note {
         len,
         vel: 0.78,
         ..Default::default()
+    }
+}
+
+/// Keys that edit the selection while the pointer is over the roll: Delete, Ctrl+A, copy,
+/// cut, paste, Ctrl+D (duplicate) and the arrows (nudge and transpose).
+fn keyboard(ui: &mut Ui, area: Rect, notes: &[Note], state: &mut RollState, edits: &mut Vec<Edit>) {
+    if !ui.rect_contains_pointer(area) || ui.memory(|m| m.focused().is_some()) {
+        return;
+    }
+    let (del, all, copy, cut, paste, dup, up, down, left, right, shift) = ui.input(|i| {
+        let c = i.modifiers.command;
+        let k = |key| i.key_pressed(key);
+        (
+            k(egui::Key::Delete) || k(egui::Key::Backspace),
+            c && k(egui::Key::A),
+            i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+            i.events.iter().any(|e| matches!(e, egui::Event::Cut)),
+            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+            c && k(egui::Key::D),
+            k(egui::Key::ArrowUp),
+            k(egui::Key::ArrowDown),
+            k(egui::Key::ArrowLeft),
+            k(egui::Key::ArrowRight),
+            i.modifiers.shift,
+        )
+    });
+    let ids: Vec<String> = notes
+        .iter()
+        .filter(|n| state.selected.contains(&n.id))
+        .map(|n| n.id.clone())
+        .collect();
+    if all {
+        state.selected = notes.iter().map(|n| n.id.clone()).collect();
+    }
+    if copy || cut {
+        let first = notes
+            .iter()
+            .filter(|n| state.selected.contains(&n.id))
+            .map(|n| n.pos)
+            .fold(f64::MAX, f64::min);
+        state.clipboard = notes
+            .iter()
+            .filter(|n| state.selected.contains(&n.id))
+            .map(|n| Note {
+                pos: n.pos - first,
+                ..n.clone()
+            })
+            .collect();
+    }
+    if (del || cut) && !ids.is_empty() {
+        edits.push(Edit::Begin);
+        edits.push(Edit::DeleteMany { ids: ids.clone() });
+        state.selected.clear();
+    }
+    if paste && !state.clipboard.is_empty() {
+        let fresh: Vec<Note> = state
+            .clipboard
+            .iter()
+            .map(|n| Note {
+                id: uid("n"),
+                pos: n.pos + state.paste_at,
+                ..n.clone()
+            })
+            .collect();
+        state.selected = fresh.iter().map(|n| n.id.clone()).collect();
+        edits.push(Edit::Begin);
+        edits.push(Edit::Paste { notes: fresh });
+    }
+    if dup && !ids.is_empty() {
+        let sel: Vec<&Note> = notes
+            .iter()
+            .filter(|n| state.selected.contains(&n.id))
+            .collect();
+        let start = sel.iter().map(|n| n.pos).fold(f64::MAX, f64::min);
+        let end = sel.iter().map(|n| n.pos + n.len).fold(0.0, f64::max);
+        let g = state.snap.max(1.0);
+        let shift_by = ((end - start) / g).ceil().max(1.0) * g;
+        let fresh: Vec<Note> = sel
+            .iter()
+            .map(|n| Note {
+                id: uid("n"),
+                pos: n.pos + shift_by,
+                ..(*n).clone()
+            })
+            .collect();
+        state.selected = fresh.iter().map(|n| n.id.clone()).collect();
+        edits.push(Edit::Begin);
+        edits.push(Edit::Paste { notes: fresh });
+    }
+    if !ids.is_empty() && (up || down || left || right) {
+        let dkey = i32::from(up) * if shift { 12 } else { 1 }
+            - i32::from(down) * if shift { 12 } else { 1 };
+        let dpos = (f64::from(i32::from(right)) - f64::from(i32::from(left))) * state.snap.max(1.0);
+        edits.push(Edit::Begin);
+        edits.push(Edit::MoveMany { ids, dpos, dkey });
     }
 }
 
@@ -322,10 +468,25 @@ pub fn draw(
             }
             let a = (0.5 + 0.5 * n.vel.clamp(0.0, 1.0)) as f32;
             painter.rect_filled(r, 2.0, crate::theme::accent().gamma_multiply(a));
+            let sel = state.selected.contains(&n.id);
             painter.rect_stroke(
                 r,
                 2.0,
-                Stroke::new(1.0, Color32::from_black_alpha(140)),
+                if sel {
+                    Stroke::new(2.0, Color32::WHITE)
+                } else {
+                    Stroke::new(1.0, Color32::from_black_alpha(140))
+                },
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some((a, b)) = state.marquee {
+            let m = Rect::from_two_pos(a, b);
+            painter.rect_filled(m, 0.0, pl.accent.gamma_multiply(0.18));
+            painter.rect_stroke(
+                m,
+                0.0,
+                Stroke::new(1.0, pl.accent),
                 egui::StrokeKind::Inside,
             );
         }
@@ -369,7 +530,32 @@ pub fn draw(
                 if origin_pos.x > grid_left {
                     let (t, k) = ptr(origin_pos);
                     edits.push(Edit::Begin);
+                    let shift = ui.input(|i| i.modifiers.shift);
                     match hit(notes, t, k, edge) {
+                        Some((i, false)) if state.tool == Tool::Select => {
+                            let id = notes[i].id.clone();
+                            if !state.selected.contains(&id) {
+                                if !shift {
+                                    state.selected.clear();
+                                }
+                                state.selected.insert(id);
+                            }
+                            state.drag = Some(Drag::Group);
+                            state.group_last = Some((snapped(t, state.snap), k));
+                            edits.push(Edit::Audition {
+                                key: notes[i].key,
+                                on: true,
+                            });
+                        }
+                        None if state.tool == Tool::Select => {
+                            if !shift {
+                                state.selected.clear();
+                            }
+                            state.drag = Some(Drag::Marquee);
+                            state.marquee = Some((origin_pos, origin_pos));
+                            // nothing to undo in a selection
+                            edits.pop();
+                        }
                         Some((i, _)) if state.tool == Tool::Delete => {
                             edits.push(Edit::Delete {
                                 id: notes[i].id.clone(),
@@ -382,6 +568,8 @@ pub fn draw(
                         }
                         Some((i, false)) => {
                             let n = &notes[i];
+                            state.selected.clear();
+                            state.selected.insert(n.id.clone());
                             state.drag = Some(Drag::Move {
                                 id: n.id.clone(),
                                 grab: t - n.pos,
@@ -418,6 +606,35 @@ pub fn draw(
                             // the note was only just added; follow it through its first length
                         }
                     }
+                    Drag::Group => {
+                        let cur = (snapped(t, state.snap), k);
+                        if let Some(last) = state.group_last {
+                            let (dpos, dkey) = (cur.0 - last.0, cur.1 - last.1);
+                            if dpos != 0.0 || dkey != 0 {
+                                edits.push(Edit::MoveMany {
+                                    ids: state.selected.iter().cloned().collect(),
+                                    dpos,
+                                    dkey,
+                                });
+                                if dkey != 0 {
+                                    edits.push(Edit::Audition {
+                                        key: last.1,
+                                        on: false,
+                                    });
+                                    edits.push(Edit::Audition {
+                                        key: cur.1,
+                                        on: true,
+                                    });
+                                }
+                                state.group_last = Some(cur);
+                            }
+                        }
+                    }
+                    Drag::Marquee => {
+                        if let Some((a, _)) = state.marquee {
+                            state.marquee = Some((a, p));
+                        }
+                    }
                     Drag::Move { id, grab, key } => {
                         let at = snapped(t - grab, state.snap).max(0.0);
                         if k != key {
@@ -441,6 +658,25 @@ pub fn draw(
             if let Some(p) = resp.interact_pointer_pos() {
                 if p.x > grid_left {
                     let (t, k) = ptr(p);
+                    state.paste_at = snapped(t, state.snap).max(0.0);
+                    if state.tool == Tool::Select {
+                        let shift = ui.input(|i| i.modifiers.shift);
+                        match hit(notes, t, k, edge) {
+                            Some((i, _)) => {
+                                let id = notes[i].id.clone();
+                                if shift && state.selected.contains(&id) {
+                                    state.selected.remove(&id);
+                                } else {
+                                    if !shift {
+                                        state.selected.clear();
+                                    }
+                                    state.selected.insert(id);
+                                }
+                            }
+                            None if !shift => state.selected.clear(),
+                            None => {}
+                        }
+                    }
                     if state.tool == Tool::Draw && hit(notes, t, k, edge).is_none() {
                         edits.push(Edit::Begin);
                         let at = snapped(t, state.snap).max(0.0);
@@ -453,6 +689,25 @@ pub fn draw(
         }
         if resp.drag_stopped() {
             match state.drag.take() {
+                Some(Drag::Group) => {
+                    if let Some((_, key)) = state.group_last.take() {
+                        edits.push(Edit::Audition { key, on: false });
+                    }
+                }
+                Some(Drag::Marquee) => {
+                    if let Some((a, b)) = state.marquee.take() {
+                        let area = Rect::from_two_pos(a, b);
+                        for n in notes {
+                            let r = Rect::from_min_max(
+                                egui::pos2(x_of(n.pos), y_of(n.key)),
+                                egui::pos2(x_of(n.pos + n.len), y_of(n.key) + state.row),
+                            );
+                            if r.intersects(area) {
+                                state.selected.insert(n.id.clone());
+                            }
+                        }
+                    }
+                }
                 Some(Drag::Move { key, .. }) => edits.push(Edit::Audition { key, on: false }),
                 Some(Drag::Resize { id }) => {
                     if let Some(n) = notes.iter().find(|n| n.id == id) {
@@ -479,6 +734,7 @@ pub fn draw(
         }
     });
     state.scroll_x = out.state.clamped_offset().x;
+    keyboard(ui, out.inner_rect, notes, state, &mut edits);
     // the velocity lane under the grid
     let (lane, lresp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), LANE),
@@ -605,6 +861,69 @@ mod tests {
         assert!(!p.patterns[0].notes.contains_key("nobody"));
         // a pattern that does not exist is ignored
         apply(&mut p, 999, "nobody", &Edit::Add(new_note(60, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn groups_move_together_and_stay_on_the_grid() {
+        let mut p = project();
+        let ch = p.channels[0].id.clone();
+        p.patterns[0].notes.remove(&ch);
+        let (a, b) = (new_note(60, 24.0, 24.0), new_note(64, 96.0, 24.0));
+        let ids = vec![a.id.clone(), b.id.clone()];
+        apply(&mut p, 0, &ch, &Edit::Add(a));
+        apply(&mut p, 0, &ch, &Edit::Add(b));
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::MoveMany {
+                ids: ids.clone(),
+                dpos: 48.0,
+                dkey: 2,
+            },
+        );
+        let n = &p.patterns[0].notes[&ch];
+        assert_eq!(
+            (n[0].pos, n[0].key, n[1].pos, n[1].key),
+            (72.0, 62.0 as i32, 144.0, 66)
+        );
+        // pulled left past the start, the whole group stops with its first note at 0
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::MoveMany {
+                ids: ids.clone(),
+                dpos: -1000.0,
+                dkey: 0,
+            },
+        );
+        let n = &p.patterns[0].notes[&ch];
+        assert_eq!((n[0].pos, n[1].pos), (0.0, 72.0));
+        // keys stay within 0 to 127
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::MoveMany {
+                ids: ids.clone(),
+                dpos: 0.0,
+                dkey: 500,
+            },
+        );
+        assert!(p.patterns[0].notes[&ch].iter().all(|n| n.key == 127));
+        // delete many, and paste adds notes as they are
+        apply(&mut p, 0, &ch, &Edit::DeleteMany { ids: ids.clone() });
+        assert!(!p.patterns[0].notes.contains_key(&ch));
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Paste {
+                notes: vec![new_note(60, 5.0, 10.0)],
+            },
+        );
+        assert_eq!(p.patterns[0].notes[&ch].len(), 1);
     }
 
     #[test]

@@ -8,6 +8,7 @@ use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui};
 use las_engine::timeline::{pattern_length, song_length, ticks_per_bar};
 use las_project::create::uid;
 use las_project::{Clip, ClipKind, Project, PPQ};
+use std::collections::HashSet;
 
 const RULER: f32 = 24.0;
 const HEAD: f32 = 110.0;
@@ -42,8 +43,25 @@ pub enum PlEdit {
         id: String,
         at: f64,
     },
+    /// Switch a track's mute on or off.
+    TrackMute(usize),
+    /// Ask for a new name for a track.
+    AskRenameTrack(usize),
     /// Open the editor of an automation clip (by the clip's own id).
     OpenAuto(String),
+    /// Move several clips together in time and between tracks.
+    MoveMany {
+        ids: Vec<String>,
+        dstart: f64,
+        dtrack: i32,
+    },
+    DeleteMany {
+        ids: Vec<String>,
+    },
+    /// Add clips that already have their places and new ids.
+    Paste {
+        clips: Vec<Clip>,
+    },
     /// Start playing from here.
     Seek(f64),
 }
@@ -66,9 +84,18 @@ pub enum Tool {
 
 #[derive(Clone, Debug)]
 enum Drag {
-    Move { id: String, grab: f64 },
-    Resize { id: String },
+    Move {
+        id: String,
+        grab: f64,
+    },
+    Resize {
+        id: String,
+    },
     Seek,
+    /// The selected clips together.
+    Group,
+    /// A rectangle that selects what it touches.
+    Marquee,
 }
 
 pub struct PlaylistState {
@@ -78,6 +105,11 @@ pub struct PlaylistState {
     /// Snap in ticks.
     pub snap: f64,
     pub tool: Tool,
+    /// The clips selected (by id) and the ones copied (starts relative to the first).
+    pub selected: HashSet<String>,
+    pub clipboard: Vec<Clip>,
+    marquee: Option<(egui::Pos2, egui::Pos2)>,
+    group_last: Option<(f64, usize)>,
     drag: Option<Drag>,
 }
 
@@ -88,6 +120,10 @@ impl Default for PlaylistState {
             row: 44.0,
             snap: f64::from(PPQ) * 4.0,
             tool: Tool::Draw,
+            selected: HashSet::new(),
+            clipboard: Vec::new(),
+            marquee: None,
+            group_last: None,
             drag: None,
         }
     }
@@ -148,13 +184,7 @@ pub fn describe(p: &Project, c: &Clip) -> (String, Color32) {
 }
 
 fn hex(s: &str) -> Color32 {
-    let h = s.trim_start_matches('#');
-    if h.len() == 6 {
-        if let Ok(v) = u32::from_str_radix(h, 16) {
-            return Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
-        }
-    }
-    crate::theme::accent()
+    crate::rack::channel_colour_of(s)
 }
 
 /// A pattern clip for the pattern at `index`, starting at `start` on `track`.
@@ -176,7 +206,55 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
     let rows = track_count(project);
     let clips = &mut project.playlist.clips;
     match edit {
-        PlEdit::Begin | PlEdit::Seek(_) | PlEdit::OpenAuto(_) => {}
+        PlEdit::Begin | PlEdit::Seek(_) | PlEdit::OpenAuto(_) | PlEdit::AskRenameTrack(_) => {}
+        PlEdit::TrackMute(t) => {
+            // tracks that the project does not list yet are made as they are needed
+            while project.playlist.tracks.len() <= *t {
+                let n = project.playlist.tracks.len();
+                project
+                    .playlist
+                    .tracks
+                    .push(las_project::create::playlist_track(n));
+            }
+            let tr = &mut project.playlist.tracks[*t];
+            tr.mute = !tr.mute;
+        }
+        PlEdit::MoveMany {
+            ids,
+            dstart,
+            dtrack,
+        } => {
+            let first = clips
+                .iter()
+                .filter(|c| ids.contains(&c.id))
+                .map(|c| c.start)
+                .fold(f64::MAX, f64::min);
+            let dstart = if first == f64::MAX {
+                0.0
+            } else {
+                dstart.max(-first)
+            };
+            let lowest = clips
+                .iter()
+                .filter(|c| ids.contains(&c.id))
+                .map(|c| c.track as i32)
+                .min()
+                .unwrap_or(0);
+            let highest = clips
+                .iter()
+                .filter(|c| ids.contains(&c.id))
+                .map(|c| c.track as i32)
+                .max()
+                .unwrap_or(0);
+            // the group keeps its shape between the first and the last track
+            let dtrack = (*dtrack).clamp(-lowest, rows as i32 - 1 - highest);
+            for c in clips.iter_mut().filter(|c| ids.contains(&c.id)) {
+                c.start += dstart;
+                c.track = (c.track as i32 + dtrack) as usize;
+            }
+        }
+        PlEdit::DeleteMany { ids } => clips.retain(|c| !ids.contains(&c.id)),
+        PlEdit::Paste { clips: add } => clips.extend(add.iter().cloned()),
         PlEdit::Add(c) => clips.push((**c).clone()),
         PlEdit::Move { id, start, track } => {
             if let Some(c) = clips.iter_mut().find(|c| &c.id == id) {
@@ -231,7 +309,7 @@ pub fn draw(
     let ticks = song_length(project) + bar * 4.0;
     let width = HEAD + ticks as f32 * state.zoom;
     let height = RULER + rows as f32 * state.row;
-    egui::ScrollArea::both()
+    let out = egui::ScrollArea::both()
         .auto_shrink([false, false])
         .id_salt("playlist")
         .show_viewport(ui, |ui, viewport| {
@@ -297,7 +375,11 @@ pub fn draw(
                 painter.rect_stroke(
                     r,
                     3.0,
-                    Stroke::new(1.0, Color32::from_black_alpha(150)),
+                    if state.selected.contains(&c.id) {
+                        Stroke::new(2.0, Color32::WHITE)
+                    } else {
+                        Stroke::new(1.0, Color32::from_black_alpha(150))
+                    },
                     egui::StrokeKind::Inside,
                 );
                 if c.kind == ClipKind::Automation {
@@ -325,6 +407,16 @@ pub fn draw(
                     name,
                     egui::FontId::proportional(11.5),
                     Color32::from_gray(15),
+                );
+            }
+            if let Some((a, b)) = state.marquee {
+                let m = Rect::from_two_pos(a, b);
+                painter.rect_filled(m, 0.0, pl.accent.gamma_multiply(0.18));
+                painter.rect_stroke(
+                    m,
+                    0.0,
+                    Stroke::new(1.0, pl.accent),
+                    egui::StrokeKind::Inside,
                 );
             }
             // where "play song" starts, and the playhead
@@ -363,6 +455,38 @@ pub fn draw(
                     egui::FontId::proportional(12.0),
                     pl.text2,
                 );
+                // the mute light, and a menu on the whole header
+                let muted = project.playlist.tracks.get(r).is_some_and(|t| t.mute);
+                let dot = Rect::from_center_size(
+                    egui::pos2(cell.right() - 14.0, cell.center().y),
+                    egui::vec2(18.0, 18.0),
+                );
+                painter.circle_filled(dot.center(), 5.0, if muted { pl.led_off } else { pl.ok });
+                let hit_dot = ui.interact(
+                    dot,
+                    ui.make_persistent_id(("track-mute", r)),
+                    Sense::click(),
+                );
+                if hit_dot.on_hover_text("Mute the track").clicked() {
+                    edits.push(PlEdit::Begin);
+                    edits.push(PlEdit::TrackMute(r));
+                }
+                let head = ui.interact(
+                    cell,
+                    ui.make_persistent_id(("track-head", r)),
+                    Sense::click(),
+                );
+                head.context_menu(|ui| {
+                    if ui.button("Rename...").clicked() {
+                        edits.push(PlEdit::AskRenameTrack(r));
+                        ui.close();
+                    }
+                    if ui.button(if muted { "Unmute" } else { "Mute" }).clicked() {
+                        edits.push(PlEdit::Begin);
+                        edits.push(PlEdit::TrackMute(r));
+                        ui.close();
+                    }
+                });
             }
             painter.rect_filled(
                 Rect::from_min_max(egui::pos2(vl, vt), egui::pos2(vr, o.y + RULER)),
@@ -404,8 +528,31 @@ pub fn draw(
                             edits.push(PlEdit::Seek(snapped(t, state.snap).max(0.0)));
                         } else if !matches!(state.tool, Tool::Draw | Tool::Select) {
                             // the other tools act on a click, not a drag
+                        } else if let Some((i, false)) =
+                            hit(project, t, tr, edge).filter(|_| state.tool == Tool::Select)
+                        {
+                            let id = project.playlist.clips[i].id.clone();
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            if !state.selected.contains(&id) {
+                                if !shift {
+                                    state.selected.clear();
+                                }
+                                state.selected.insert(id);
+                            }
+                            edits.push(PlEdit::Begin);
+                            state.drag = Some(Drag::Group);
+                            state.group_last = Some((snapped(t, state.snap), tr));
+                        } else if state.tool == Tool::Select && hit(project, t, tr, edge).is_none()
+                        {
+                            if !ui.input(|i| i.modifiers.shift) {
+                                state.selected.clear();
+                            }
+                            state.drag = Some(Drag::Marquee);
+                            state.marquee = Some((p, p));
                         } else if let Some((i, at_edge)) = hit(project, t, tr, edge) {
                             let c = &project.playlist.clips[i];
+                            state.selected.clear();
+                            state.selected.insert(c.id.clone());
                             edits.push(PlEdit::Begin);
                             state.drag = Some(if at_edge {
                                 Drag::Resize { id: c.id.clone() }
@@ -434,6 +581,26 @@ pub fn draw(
                                 });
                             }
                         }
+                        Drag::Group => {
+                            let cur = (snapped(t, state.snap), tr);
+                            if let Some(last) = state.group_last {
+                                let (dstart, dtrack) =
+                                    (cur.0 - last.0, cur.1 as i32 - last.1 as i32);
+                                if dstart != 0.0 || dtrack != 0 {
+                                    edits.push(PlEdit::MoveMany {
+                                        ids: state.selected.iter().cloned().collect(),
+                                        dstart,
+                                        dtrack,
+                                    });
+                                    state.group_last = Some(cur);
+                                }
+                            }
+                        }
+                        Drag::Marquee => {
+                            if let Some((a, _)) = state.marquee {
+                                state.marquee = Some((a, p));
+                            }
+                        }
                         Drag::Move { id, grab } => {
                             edits.push(PlEdit::Move {
                                 id,
@@ -449,6 +616,24 @@ pub fn draw(
                         edits.push(PlEdit::Seek(snapped(tick_at(p.x), state.snap).max(0.0)));
                     } else if p.x > left {
                         let (t, tr) = (tick_at(p.x), track_at(p.y));
+                        if matches!(state.tool, Tool::Draw | Tool::Select) {
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            match hit(project, t, tr, edge) {
+                                Some((i, _)) => {
+                                    let id = project.playlist.clips[i].id.clone();
+                                    if shift && state.selected.contains(&id) {
+                                        state.selected.remove(&id);
+                                    } else {
+                                        if !shift {
+                                            state.selected.clear();
+                                        }
+                                        state.selected.insert(id);
+                                    }
+                                }
+                                None if !shift => state.selected.clear(),
+                                None => {}
+                            }
+                        }
                         if let Some((i, _)) = hit(project, t, tr, edge) {
                             let id = project.playlist.clips[i].id.clone();
                             match state.tool {
@@ -474,6 +659,24 @@ pub fn draw(
                 }
             }
             if resp.drag_stopped() {
+                if let Some(Drag::Marquee) = state.drag {
+                    if let Some((a, b)) = state.marquee.take() {
+                        let area = Rect::from_two_pos(a, b);
+                        for c in &project.playlist.clips {
+                            let r = Rect::from_min_max(
+                                egui::pos2(x_of(c.start), top + c.track as f32 * state.row),
+                                egui::pos2(
+                                    x_of(c.start + c.length),
+                                    top + (c.track + 1) as f32 * state.row,
+                                ),
+                            );
+                            if r.intersects(area) {
+                                state.selected.insert(c.id.clone());
+                            }
+                        }
+                    }
+                }
+                state.group_last = None;
                 state.drag = None;
             }
             if state.tool == Tool::Draw && resp.double_clicked_by(egui::PointerButton::Primary) {
@@ -509,7 +712,88 @@ pub fn draw(
                 }
             }
         });
+    keyboard(ui, out.inner_rect, project, start, state, &mut edits);
     edits
+}
+
+/// Keys that edit the selection while the pointer is over the playlist: Delete, Ctrl+A,
+/// copy, cut, paste (at the start marker), Ctrl+D (duplicate after the selection).
+fn keyboard(
+    ui: &mut Ui,
+    area: Rect,
+    project: &Project,
+    start: f64,
+    state: &mut PlaylistState,
+    edits: &mut Vec<PlEdit>,
+) {
+    if !ui.rect_contains_pointer(area) || ui.memory(|m| m.focused().is_some()) {
+        return;
+    }
+    let (del, all, copy, cut, paste, dup) = ui.input(|i| {
+        let c = i.modifiers.command;
+        (
+            i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+            c && i.key_pressed(egui::Key::A),
+            i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+            i.events.iter().any(|e| matches!(e, egui::Event::Cut)),
+            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+            c && i.key_pressed(egui::Key::D),
+        )
+    });
+    let clips = &project.playlist.clips;
+    if all {
+        state.selected = clips.iter().map(|c| c.id.clone()).collect();
+    }
+    let sel: Vec<&Clip> = clips
+        .iter()
+        .filter(|c| state.selected.contains(&c.id))
+        .collect();
+    let first = sel.iter().map(|c| c.start).fold(f64::MAX, f64::min);
+    if copy || cut {
+        state.clipboard = sel
+            .iter()
+            .map(|c| Clip {
+                start: c.start - first,
+                ..(*c).clone()
+            })
+            .collect();
+    }
+    if (del || cut) && !sel.is_empty() {
+        let ids: Vec<String> = sel.iter().map(|c| c.id.clone()).collect();
+        edits.push(PlEdit::Begin);
+        edits.push(PlEdit::DeleteMany { ids });
+        state.selected.clear();
+        return;
+    }
+    if paste && !state.clipboard.is_empty() {
+        let fresh: Vec<Clip> = state
+            .clipboard
+            .iter()
+            .map(|c| Clip {
+                id: uid("clip_"),
+                start: c.start + start,
+                ..c.clone()
+            })
+            .collect();
+        state.selected = fresh.iter().map(|c| c.id.clone()).collect();
+        edits.push(PlEdit::Begin);
+        edits.push(PlEdit::Paste { clips: fresh });
+    }
+    if dup && !sel.is_empty() {
+        let end = sel.iter().map(|c| c.start + c.length).fold(0.0, f64::max);
+        let by = end - first;
+        let fresh: Vec<Clip> = sel
+            .iter()
+            .map(|c| Clip {
+                id: uid("clip_"),
+                start: c.start + by,
+                ..(*c).clone()
+            })
+            .collect();
+        state.selected = fresh.iter().map(|c| c.id.clone()).collect();
+        edits.push(PlEdit::Begin);
+        edits.push(PlEdit::Paste { clips: fresh });
+    }
 }
 
 fn mark_ruler(p: &egui::Painter, x: f32, top: f32) {
@@ -568,6 +852,17 @@ mod tests {
     }
 
     #[test]
+    fn tracks_are_muted_and_made_when_needed() {
+        let mut p = project();
+        p.playlist.tracks.clear();
+        apply(&mut p, &PlEdit::TrackMute(2));
+        assert_eq!(p.playlist.tracks.len(), 3);
+        assert!(p.playlist.tracks[2].mute && !p.playlist.tracks[0].mute);
+        apply(&mut p, &PlEdit::TrackMute(2));
+        assert!(!p.playlist.tracks[2].mute);
+    }
+
+    #[test]
     fn clips_are_muted_and_sliced() {
         let mut p = project();
         p.playlist.clips.clear();
@@ -602,6 +897,63 @@ mod tests {
         );
         apply(&mut p, &PlEdit::Split { id, at: 500.0 });
         assert_eq!(p.playlist.clips.len(), 2);
+    }
+
+    #[test]
+    fn groups_of_clips_move_stay_in_shape_and_paste() {
+        let mut p = project();
+        p.playlist.clips.clear();
+        let mut a = new_pattern_clip(&p, 0, 96.0, 1).unwrap();
+        let mut b = new_pattern_clip(&p, 0, 480.0, 3).unwrap();
+        a.length = 96.0;
+        b.length = 96.0;
+        let ids = vec![a.id.clone(), b.id.clone()];
+        p.playlist.clips.push(a);
+        p.playlist.clips.push(b);
+        apply(
+            &mut p,
+            &PlEdit::MoveMany {
+                ids: ids.clone(),
+                dstart: 96.0,
+                dtrack: 1,
+            },
+        );
+        let c = &p.playlist.clips;
+        assert_eq!(
+            (c[0].start, c[0].track, c[1].start, c[1].track),
+            (192.0, 2, 576.0, 4)
+        );
+        // never before the start, never off the tracks
+        apply(
+            &mut p,
+            &PlEdit::MoveMany {
+                ids: ids.clone(),
+                dstart: -9999.0,
+                dtrack: -99,
+            },
+        );
+        let c = &p.playlist.clips;
+        assert_eq!(
+            (c[0].start, c[0].track, c[1].start, c[1].track),
+            (0.0, 0, 384.0, 2)
+        );
+        apply(
+            &mut p,
+            &PlEdit::MoveMany {
+                ids: ids.clone(),
+                dstart: 0.0,
+                dtrack: 999,
+            },
+        );
+        let last = track_count(&p) - 1;
+        assert_eq!(p.playlist.clips[1].track, last);
+        assert_eq!(p.playlist.clips[0].track, last - 2, "the shape is kept");
+        let mut copy = p.playlist.clips[0].clone();
+        copy.id = "new".into();
+        apply(&mut p, &PlEdit::Paste { clips: vec![copy] });
+        assert_eq!(p.playlist.clips.len(), 3);
+        apply(&mut p, &PlEdit::DeleteMany { ids });
+        assert_eq!(p.playlist.clips.len(), 1);
     }
 
     #[test]
