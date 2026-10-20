@@ -140,6 +140,9 @@ pub struct Channel {
     pub root_key: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Swing of this channel's steps (0 to 1); none follows the project's swing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swing: Option<f64>,
     /// Sounds pinned from the sound-design history.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshots: Option<Vec<Snapshot>>,

@@ -320,7 +320,7 @@ impl Engine {
         if self.song {
             notes = song_notes_in_range(p, a, b, &self.muted_tracks);
         } else if let Some(pat) = self.pattern.and_then(|i| p.patterns.get(i)) {
-            pattern_notes_in_range(pat, 0.0, 0.0, f64::INFINITY, a, b, p.swing, &mut notes);
+            pattern_notes_in_range(pat, 0.0, 0.0, f64::INFINITY, a, b, p, &mut notes);
         }
         if self.song {
             let fresh = self.fresh;

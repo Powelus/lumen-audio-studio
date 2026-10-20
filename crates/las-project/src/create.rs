@@ -178,6 +178,7 @@ pub fn channel(plugin_id: &str) -> Channel {
         root_key: 60,
         group: None,
         snapshots: None,
+        swing: None,
         extra: Extra::new(),
     }
 }

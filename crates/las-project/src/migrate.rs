@@ -419,6 +419,15 @@ fn sanitize(p: &mut Json, r: &mut Report) {
         clamped_or(c, "volume", 0.0, 1.25, 1.0);
         clamped_or(c, "pan", -1.0, 1.0, 0.0);
         clamped_or(c, "pitch", -48.0, 48.0, 0.0);
+        // a channel's own swing is optional: keep it only as a number from 0 to 1
+        if c.contains_key("swing") {
+            match finite(c.get("swing")) {
+                Some(x) => set_num(c, "swing", clamp(x, 0.0, 1.0)),
+                None => {
+                    c.remove("swing");
+                }
+            }
+        }
         let track =
             integer(c.get("mixerTrack")).map_or(0.0, |t| clamp(t as f64, 0.0, tracks as f64 - 1.0));
         set_num(c, "mixerTrack", track);

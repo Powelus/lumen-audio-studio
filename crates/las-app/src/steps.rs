@@ -46,6 +46,11 @@ pub enum ChanEdit {
         channel: usize,
         color: String,
     },
+    /// The channel's own swing (0 to 1), or none to follow the project's.
+    Swing {
+        channel: usize,
+        value: Option<f64>,
+    },
     /// Ask for a new name for a channel.
     AskRename(usize),
 }
@@ -108,6 +113,11 @@ pub fn apply(project: &mut Project, e: &ChanEdit) {
         ChanEdit::Color { channel, color } => {
             if let Some(c) = project.channels.get_mut(*channel) {
                 c.color = color.clone();
+            }
+        }
+        ChanEdit::Swing { channel, value } => {
+            if let Some(c) = project.channels.get_mut(*channel) {
+                c.swing = value.filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0));
             }
         }
     }
@@ -362,6 +372,31 @@ pub fn draw(
                                 }
                             }
                         });
+                        ui.menu_button("Swing", |ui| {
+                            let now = c.swing;
+                            if ui.selectable_label(now.is_none(), "Song's swing").clicked() {
+                                out.chans.push(ChanEdit::Begin);
+                                out.chans.push(ChanEdit::Swing {
+                                    channel: i,
+                                    value: None,
+                                });
+                                ui.close();
+                            }
+                            for pct in [0u32, 15, 25, 33, 50, 66, 75] {
+                                let v = f64::from(pct) / 100.0;
+                                let on = now.is_some_and(|x| (x - v).abs() < 1e-6);
+                                if ui.selectable_label(on, format!("{pct}%")).clicked() {
+                                    out.chans.push(ChanEdit::Begin);
+                                    out.chans.push(ChanEdit::Swing {
+                                        channel: i,
+                                        value: Some(v),
+                                    });
+                                    ui.close();
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("Swing for this channel's steps only");
                         ui.menu_button("Send to insert", |ui| {
                             for (n, t) in project.mixer.iter().enumerate() {
                                 let label = if n == 0 {
