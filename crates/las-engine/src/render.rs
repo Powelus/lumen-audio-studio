@@ -700,9 +700,24 @@ impl Engine {
             } else {
                 Vec::new()
             };
+            // a channel whose settings cannot be read is silent; the rest still plays
             let inst =
-                Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample, pad_samples)
-                    .map_err(|e| format!("{}: {}", c.name, e.0))?;
+                match Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample, pad_samples)
+                {
+                    Ok(i) => i,
+                    Err(e) => {
+                        eprintln!("{}: {}", c.name, e.0);
+                        Instrument::new(
+                            "",
+                            &serde_json::Value::Null,
+                            sr,
+                            &mut tables,
+                            None,
+                            Vec::new(),
+                        )
+                        .map_err(|e| format!("{}: {}", c.name, e.0))?
+                    }
+                };
             index.insert(c.id.clone(), channels.len());
             channels.push(ChannelRt {
                 inst,

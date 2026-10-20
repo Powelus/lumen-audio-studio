@@ -196,3 +196,31 @@ fn the_metronome_clicks_on_the_beats_while_playing() {
     let (a, b, c) = run(false);
     assert_eq!((a, b, c), (0.0, 0.0, 0.0));
 }
+
+/// A channel added from the browser has no patch yet: every instrument plays its
+/// default sound instead of the project failing to load.
+#[test]
+fn a_new_channel_of_every_instrument_plays_its_default_sound() {
+    use las_project::create::{add_channel, empty_project, step_note};
+    for id in [
+        "polaris", "vortex", "monolith", "zenith", "triosc", "facet", "mist", "nebula",
+    ] {
+        let mut p = empty_project("x");
+        let c = add_channel(&mut p, id);
+        let ch = p.channels[c].id.clone();
+        let mut n = step_note(0, 60, 0.9);
+        n.len = 96.0;
+        p.patterns[0].notes.insert(ch, vec![n]);
+        let opts = RenderOptions {
+            sample_rate: 24000.0,
+            tail: 0.3,
+            mode: Mode::Pattern { id: None, loops: 1 },
+        };
+        let out =
+            render_mix_with(&p, &Default::default(), &opts).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let peak = out.left.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.01, "{id} is silent ({peak})");
+        let player = Player::new(Arc::new(p), &Default::default(), 24000.0, PlayMode::Song);
+        assert!(player.is_ok(), "{id}: the live player builds");
+    }
+}
