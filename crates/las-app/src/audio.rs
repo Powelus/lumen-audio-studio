@@ -12,8 +12,9 @@ use las_dsp::fx::stepfx::Position;
 use las_dsp::mist::{mist_engine, Mist, MistEngine};
 use las_dsp::synth::{prepare_synth_patch, synth_engine, PreparedSynthPatch, SynthEngine};
 use las_dsp::wavetable::TableLibrary;
+use las_engine::Player;
 use rtrb::{Consumer, Producer, RingBuffer};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc as Shared;
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,6 +33,7 @@ pub enum Garbage {
     #[allow(clippy::box_collection)] // keeps the ring slot small
     Chain(Box<Vec<FxSlot>>),
     Params(Box<Params>),
+    Player(Box<Player>),
 }
 
 /// The instruments the app can play.
@@ -76,6 +78,18 @@ pub enum Command {
     /// Switch an effect on or off and set its dry/wet mix.
     FxMix(Instrument, usize, bool, f64),
     Tempo(f64),
+    /// Swap in the player of a project (the old one comes back).
+    SetPlayer(Box<Player>),
+    /// Start the player at a tick.
+    PlayerPlay(f64),
+    PlayerStop,
+    /// A key played live on one of the project's channels.
+    PlayerNote {
+        channel: usize,
+        key: u8,
+        vel: f64,
+        on: bool,
+    },
 }
 
 /// Meters and counters the audio thread publishes.
@@ -86,6 +100,9 @@ pub struct Meters {
     load: AtomicU32,
     voices: AtomicU32,
     dropouts: AtomicU32,
+    /// The player's position (ticks, as bits of an `f64`) and whether it is playing.
+    position: AtomicU64,
+    playing: AtomicU32,
 }
 
 impl Meters {
@@ -109,6 +126,14 @@ impl Meters {
     /// Callbacks that took longer than the buffer lasts.
     pub fn dropouts(&self) -> u32 {
         self.dropouts.load(Ordering::Relaxed)
+    }
+    /// Where the project's player is, in ticks.
+    pub fn position(&self) -> f64 {
+        f64::from_bits(self.position.load(Ordering::Relaxed))
+    }
+    /// Whether the project's player is playing.
+    pub fn playing(&self) -> bool {
+        self.playing.load(Ordering::Relaxed) != 0
     }
 }
 
@@ -213,6 +238,11 @@ impl Audio {
         self.send(Command::FxParams(inst, slot, Box::new(p)));
     }
 
+    /// Hand over the player of a project; it takes over the output of the last one.
+    pub fn set_player(&mut self, p: Player) {
+        self.send(Command::SetPlayer(Box::new(p)));
+    }
+
     /// Free what the audio thread has finished with.
     pub fn collect_garbage(&mut self) {
         while self.garbage.pop().is_ok() {}
@@ -293,6 +323,10 @@ struct Renderer {
     bpm: f64,
     l: Vec<f32>,
     r: Vec<f32>,
+    /// The project's player, and room for what it renders.
+    player: Option<Box<Player>>,
+    pl: Vec<f32>,
+    pr: Vec<f32>,
     meters: Arc<Meters>,
     load: f32,
 }
@@ -324,6 +358,9 @@ impl Renderer {
             bpm: 120.0,
             l: vec![0.0; 8192],
             r: vec![0.0; 8192],
+            player: None,
+            pl: vec![0.0; 8192],
+            pr: vec![0.0; 8192],
             meters,
             load: 0.0,
         }
@@ -376,6 +413,36 @@ impl Renderer {
                 }
             }
             Command::Tempo(bpm) => self.bpm = bpm,
+            Command::SetPlayer(p) => {
+                // the old player goes back to be freed off this thread
+                if let Some(old) = self.player.replace(p) {
+                    let _ = self.garbage.push(Garbage::Player(old));
+                }
+            }
+            Command::PlayerPlay(from) => {
+                if let Some(p) = &mut self.player {
+                    p.play(from);
+                }
+            }
+            Command::PlayerStop => {
+                if let Some(p) = &mut self.player {
+                    p.stop();
+                }
+            }
+            Command::PlayerNote {
+                channel,
+                key,
+                vel,
+                on,
+            } => {
+                if let Some(p) = &mut self.player {
+                    if on {
+                        p.note_on(channel, key as f64, vel);
+                    } else {
+                        p.note_off(channel, key as f64);
+                    }
+                }
+            }
             Command::Instrument(i) => {
                 if i != self.engine.active {
                     // let go of what the old instrument is playing
@@ -419,6 +486,14 @@ impl Renderer {
             r.fill(0.0);
             let t = now + done as f64 / self.sr;
             self.engine.process(l, r, t);
+            if let Some(p) = &mut self.player {
+                let (pl, pr) = (&mut self.pl[..n], &mut self.pr[..n]);
+                p.process(pl, pr);
+                for i in 0..n {
+                    l[i] += pl[i];
+                    r[i] += pr[i];
+                }
+            }
             // the active instrument's effects; the song position follows the clock
             let chain = &mut self.chains[chain_index(self.engine.active)];
             if !chain.is_empty() {
@@ -456,6 +531,15 @@ impl Renderer {
             done += n;
         }
         self.clock += frames as u64;
+        if let Some(p) = &self.player {
+            self.meters
+                .position
+                .store(p.position().to_bits(), Ordering::Relaxed);
+            self.meters.playing.store(
+                u32::from(p.is_playing() && !p.finished()),
+                Ordering::Relaxed,
+            );
+        }
         let budget = frames as f64 / self.sr;
         let used = started.elapsed().as_secs_f64() / budget;
         self.load = self.load * 0.9 + used as f32 * 0.1;
@@ -640,6 +724,72 @@ mod tests {
         }
         assert!(peak(&buf) > 0.005);
         assert!(garbage.pop().is_ok(), "the old synth patch is handed back");
+    }
+
+    fn project_player() -> Player {
+        let bytes = include_bytes!("../../las-engine/tests/fixtures/engines.las");
+        let b = las_project::decode(bytes).unwrap();
+        Player::new(
+            Arc::new(b.project),
+            &b.samples,
+            48000.0,
+            las_engine::PlayMode::Song,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_project_player_plays_stops_and_is_swapped_out() {
+        let (mut r, mut tx, mut garbage) = renderer();
+        let mut buf = vec![0f32; 512 * 2];
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        r.fill(&mut buf);
+        assert_eq!(peak(&buf), 0.0, "ready, but not playing");
+        assert!(!r.meters.playing());
+        tx.push(Command::PlayerPlay(0.0)).ok().unwrap();
+        let mut loudest = 0f32;
+        for _ in 0..200 {
+            r.fill(&mut buf);
+            loudest = loudest.max(peak(&buf));
+        }
+        assert!(loudest > 0.01, "the song is heard");
+        assert!(r.meters.playing() && r.meters.position() > 0.0);
+        tx.push(Command::PlayerStop).ok().unwrap();
+        for _ in 0..600 {
+            r.fill(&mut buf);
+        }
+        assert!(peak(&buf) < 1e-3, "silent after the release");
+        // a new player replaces it and the old one comes back to be freed
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        r.fill(&mut buf);
+        assert!(matches!(garbage.pop(), Ok(Garbage::Player(_))));
+    }
+
+    #[test]
+    fn keys_play_a_project_channel_live() {
+        let (mut r, mut tx, _g) = renderer();
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        tx.push(Command::PlayerNote {
+            channel: 0,
+            key: 60,
+            vel: 1.0,
+            on: true,
+        })
+        .ok()
+        .unwrap();
+        let mut buf = vec![0f32; 512 * 2];
+        let mut loudest = 0f32;
+        for _ in 0..40 {
+            r.fill(&mut buf);
+            loudest = loudest.max(peak(&buf));
+        }
+        assert!(loudest > 0.005, "a live key sounds through the mixer");
     }
 
     #[test]

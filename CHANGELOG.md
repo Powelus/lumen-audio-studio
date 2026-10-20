@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.15 - 2026-10-20
+
+The app opens and plays a project.
+
+- `lumen song.las` (or a `.las` file dropped on the window, or a path typed on the new Project page) opens a project. The page shows its tempo, channels and patterns.
+- Play song, Play pattern (loops the chosen pattern) and Stop. The position shows as bar:beat:tick.
+- The sounds of a project are loaded on a worker thread, and the audio thread then takes the player over through the lock-free queue; the old player is handed back to be freed off the audio thread.
+- Pick a channel and play it with the computer keyboard or the piano, through the project's own mixer and effects.
+
 ## 0.2.0-alpha.14 - 2026-10-20
 
 A live player.
