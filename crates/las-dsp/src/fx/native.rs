@@ -16,6 +16,7 @@ use super::webcomp::WebCompressor;
 use super::{db_to_lin, flush, update_params, DelayLine, StereoEffect, TAU};
 use crate::biquad::{coeffs, Coeffs, Kind};
 use crate::engine::PatchError;
+use crate::param::Glides;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -124,17 +125,24 @@ impl Default for Bq {
 }
 
 impl Bq {
+    /// Forget what the filter has heard (Web Audio does this when the type changes).
+    fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+    }
+
     fn run(&mut self, x: f64) -> f64 {
         // the node's input and output are `f32`
         let x = f64::from(x as f32);
-        let c = &self.c;
+        let c = self.c;
         let y = c.b0 * x + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
-        let y = f64::from(y as f32);
         self.x2 = self.x1;
         self.x1 = x;
         self.y2 = self.y1;
         self.y1 = flush(y);
-        y
+        f64::from(y as f32)
     }
 }
 
@@ -155,10 +163,6 @@ impl WebBiquad {
     pub fn run(&mut self, x: f64) -> f64 {
         self.0.run(x)
     }
-}
-
-fn clamp01(x: f64) -> f64 {
-    x.clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -216,47 +220,111 @@ impl Default for EqParams {
     }
 }
 
+const EQ_BANDS: usize = 7;
+
 /// Seven-band parametric equaliser.
 pub struct Eq {
     pub p: EqParams,
     sr: f64,
     filters: Vec<[Bq; 2]>,
-    applied: Vec<(bool, String, f64, f64, f64)>,
+    /// The type each band's filter has (a band that is off is a flat peak).
+    kinds: [Kind; EQ_BANDS],
+    /// Where the block being processed starts, in frames.
+    pub frame: usize,
+    /// For each band its frequency, gain and Q, then the output gain.
+    g: Glides,
+    /// The settings each filter's coefficients were last made from.
+    made: [[(f32, f32, f32); 2]; EQ_BANDS],
 }
 
 impl Eq {
     pub fn new(sr: f64) -> Self {
-        Self {
-            p: EqParams::default(),
+        let p = EqParams::default();
+        // each filter reads its parameters once for each channel
+        let mut channels = vec![2; EQ_BANDS * 3];
+        channels.push(1);
+        let g = Glides::with_channels(&Self::targets(&p), &channels);
+        let mut eq = Self {
+            p,
             sr,
-            filters: vec![[Bq::default(); 2]; 7],
-            applied: Vec::new(),
-        }
+            filters: vec![[Bq::default(); 2]; EQ_BANDS],
+            kinds: [Kind::Peaking; EQ_BANDS],
+            frame: 0,
+            g,
+            made: [[(f32::NAN, 0.0, 0.0); 2]; EQ_BANDS],
+        };
+        eq.set_kinds();
+        eq
     }
 
-    fn update(&mut self) {
-        let key: Vec<_> = self
-            .p
-            .bands
-            .iter()
-            .map(|b| (b.on, b.kind.clone(), b.freq, b.gain, b.q))
-            .collect();
-        if key == self.applied {
-            return;
+    fn band(p: &EqParams, i: usize) -> EqBand {
+        p.bands.get(i).cloned().unwrap_or_default()
+    }
+
+    fn targets(p: &EqParams) -> Vec<f64> {
+        let mut v = Vec::with_capacity(EQ_BANDS * 3 + 1);
+        for i in 0..EQ_BANDS {
+            let b = Self::band(p, i);
+            v.push(b.freq);
+            v.push(if b.on { b.gain } else { 0.0 });
+            v.push(b.q);
         }
-        for (i, b) in self.p.bands.iter().enumerate().take(self.filters.len()) {
+        v.push(db_to_lin(p.output));
+        v
+    }
+
+    fn set_kinds(&mut self) {
+        for i in 0..EQ_BANDS {
+            let b = Self::band(&self.p, i);
             let kind = if b.on {
                 Kind::parse(&b.kind).unwrap_or(Kind::Peaking)
             } else {
                 Kind::Peaking
             };
-            let gain = if b.on { b.gain } else { 0.0 };
-            let c = wa_coeffs(kind, b.freq, b.q, gain, self.sr);
-            for f in &mut self.filters[i] {
-                f.c = c;
+            if kind != self.kinds[i] {
+                // a filter forgets what it heard when its type changes
+                self.kinds[i] = kind;
+                self.made[i] = [(f32::NAN, 0.0, 0.0); 2];
+                for f in &mut self.filters[i] {
+                    f.reset();
+                }
             }
         }
-        self.applied = key;
+    }
+
+    /// Follow the parameters `p` now holds.
+    pub fn retarget(&mut self) {
+        self.set_kinds();
+        self.g
+            .retarget(&Self::targets(&self.p), self.frame, self.sr);
+    }
+
+    /// Automate a parameter through `points` (time, value) as the web version does:
+    /// `output` in dB, `bands.N.freq`, `.gain` and `.q` as they are. Returns whether
+    /// the path is one of these.
+    pub fn automate(&mut self, path: &str, points: &[(f64, f64)], first: bool) -> bool {
+        if path == "output" {
+            let pts: Vec<(f64, f64)> = points.iter().map(|&(t, v)| (t, db_to_lin(v))).collect();
+            self.g.param_mut(EQ_BANDS * 3).ramp(&pts, first);
+            return true;
+        }
+        let Some(rest) = path.strip_prefix("bands.") else {
+            return false;
+        };
+        let Some((index, what)) = rest.split_once('.') else {
+            return false;
+        };
+        let (Ok(i), Some(k)) = (
+            index.parse::<usize>(),
+            ["freq", "gain", "q"].iter().position(|w| *w == what),
+        ) else {
+            return false;
+        };
+        if i >= EQ_BANDS {
+            return false;
+        }
+        self.g.param_mut(i * 3 + k).ramp(points, first);
+        true
     }
 }
 
@@ -269,22 +337,45 @@ impl StereoEffect for Eq {
         out_r: &mut [f32],
         _sc: Option<(&[f32], &[f32])>,
     ) {
-        self.update();
-        let out = db_to_lin(self.p.output);
-        for i in 0..out_l.len() {
-            let mut l = f64::from(in_l[i]);
-            let mut r = f64::from(in_r[i]);
-            for f in &mut self.filters {
-                l = f[0].run(l);
-                r = f[1].run(r);
+        let n = out_l.len();
+        self.g.fill(self.frame, n, self.sr);
+        for i in 0..n {
+            let out = self.g.buf(EQ_BANDS * 3)[i];
+            for ch in 0..2 {
+                let mut x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
+                for b in 0..EQ_BANDS {
+                    let now = (
+                        self.g.chan(b * 3, ch)[i],
+                        self.g.chan(b * 3 + 1, ch)[i],
+                        self.g.chan(b * 3 + 2, ch)[i],
+                    );
+                    if now != self.made[b][ch] {
+                        self.made[b][ch] = now;
+                        self.filters[b][ch].c = wa_coeffs(
+                            self.kinds[b],
+                            f64::from(now.0),
+                            f64::from(now.2),
+                            f64::from(now.1),
+                            self.sr,
+                        );
+                    }
+                    x = self.filters[b][ch].run(x);
+                }
+                let v = (x as f32) * out;
+                if ch == 0 {
+                    out_l[i] = v;
+                } else {
+                    out_r[i] = v;
+                }
             }
-            out_l[i] = (l * out) as f32;
-            out_r[i] = (r * out) as f32;
         }
+        self.frame += n;
     }
 
     fn set_params(&mut self, over: &Value) -> Result<(), PatchError> {
-        update_params(&mut self.p, over)
+        update_params(&mut self.p, over)?;
+        self.retarget();
+        Ok(())
     }
 }
 
@@ -526,19 +617,44 @@ pub struct Distortion {
     shapers: [Shaper4; 2],
     tone: [Bq; 2],
     dry_delay: [DelayLine; 2],
+    /// Where the block being processed starts, in frames.
+    pub frame: usize,
+    /// Drive gain, tone, output gain, dry and wet gains.
+    g: Glides,
 }
 
 impl Distortion {
     pub fn new(sr: f64) -> Self {
+        let p = DistParams::default();
+        // the tone filter reads its frequency once for each channel
+        let g = Glides::with_channels(&Self::targets(&p), &[1, 2, 1, 1, 1]);
         Self {
-            p: DistParams::default(),
+            p,
             sr,
             curve: dist_curve("soft"),
             mode: "soft".into(),
             shapers: [Shaper4::new(), Shaper4::new()],
             tone: [Bq::default(); 2],
             dry_delay: [DelayLine::new(256), DelayLine::new(256)],
+            frame: 0,
+            g,
         }
+    }
+
+    fn targets(p: &DistParams) -> [f64; 5] {
+        [
+            db_to_lin(p.drive) * 0.5,
+            p.tone,
+            db_to_lin(p.output),
+            1.0 - p.mix,
+            p.mix,
+        ]
+    }
+
+    /// Follow the parameters `p` now holds.
+    pub fn retarget(&mut self) {
+        self.g
+            .retarget(&Self::targets(&self.p), self.frame, self.sr);
     }
 }
 
@@ -555,22 +671,26 @@ impl StereoEffect for Distortion {
             self.mode = self.p.mode.clone();
             self.curve = dist_curve(&self.mode);
         }
-        let pre = db_to_lin(self.p.drive) * 0.5;
-        let post = db_to_lin(self.p.output);
-        let mix = clamp01(self.p.mix);
-        let c = wa_coeffs(Kind::LowPass, self.p.tone, 1.0, 0.0, self.sr);
-        for t in &mut self.tone {
-            t.c = c;
-        }
+        let n = out_l.len();
+        self.g.fill(self.frame, n, self.sr);
         let lat = Shaper4::latency();
-        for i in 0..out_l.len() {
+        for i in 0..n {
+            let (pre, post) = (self.g.buf(0)[i], self.g.buf(2)[i]);
+            let (dry, wet) = (self.g.buf(3)[i], self.g.buf(4)[i]);
             for ch in 0..2 {
-                let x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
-                let w = self.shapers[ch].run(x * pre, &self.curve);
-                let w = self.tone[ch].run(w) * post;
-                self.dry_delay[ch].write(x);
-                let d = self.dry_delay[ch].read(lat);
-                let v = (d * (1.0 - mix) + w * mix) as f32;
+                let x = if ch == 0 { in_l[i] } else { in_r[i] };
+                let w = self.shapers[ch].run(f64::from(x * pre), &self.curve);
+                self.tone[ch].c = wa_coeffs(
+                    Kind::LowPass,
+                    f64::from(self.g.chan(1, ch)[i]),
+                    1.0,
+                    0.0,
+                    self.sr,
+                );
+                let w = (self.tone[ch].run(w) as f32) * post;
+                self.dry_delay[ch].write(f64::from(x));
+                let d = self.dry_delay[ch].read(lat) as f32;
+                let v = d * dry + w * wet;
                 if ch == 0 {
                     out_l[i] = v;
                 } else {
@@ -578,10 +698,13 @@ impl StereoEffect for Distortion {
                 }
             }
         }
+        self.frame += n;
     }
 
     fn set_params(&mut self, over: &Value) -> Result<(), PatchError> {
-        update_params(&mut self.p, over)
+        update_params(&mut self.p, over)?;
+        self.retarget();
+        Ok(())
     }
 
     fn latency(&self) -> f64 {
@@ -630,19 +753,46 @@ pub struct Chorus {
     fb: [[f32; CYCLE]; 2],
     n: usize,
     phase: f64,
+    /// Where the block being processed starts, in frames.
+    pub frame: usize,
+    /// LFO rate, delay time, left and right depth, feedback, dry and wet gains.
+    g: Glides,
 }
 
 impl Chorus {
     pub fn new(sr: f64) -> Self {
         let n = (sr * 0.1).ceil() as usize + 8;
+        let p = ChorusParams::default();
+        let g = Glides::new(&Self::targets(&p));
         Self {
-            p: ChorusParams::default(),
+            p,
             sr,
             lines: [DelayLine::new(n), DelayLine::new(n)],
             fb: [[0.0; CYCLE]; 2],
             n: 0,
             phase: 0.0,
+            frame: 0,
+            g,
         }
+    }
+
+    fn targets(p: &ChorusParams) -> [f64; 7] {
+        let depth = p.depth / 1000.0;
+        [
+            p.rate,
+            p.delay / 1000.0,
+            depth,
+            depth * (1.0 - 2.0 * p.spread),
+            p.feedback,
+            1.0 - p.mix * 0.5,
+            p.mix,
+        ]
+    }
+
+    /// Follow the parameters `p` now holds.
+    pub fn retarget(&mut self) {
+        self.g
+            .retarget(&Self::targets(&self.p), self.frame, self.sr);
     }
 }
 
@@ -655,19 +805,15 @@ impl StereoEffect for Chorus {
         out_r: &mut [f32],
         _sc: Option<(&[f32], &[f32])>,
     ) {
-        let p = self.p;
         let sr = self.sr;
-        // the web version's gains and delay times are `f32`
-        let depth = (p.depth / 1000.0) as f32;
-        let depth_r = ((p.depth / 1000.0) * (1.0 - 2.0 * p.spread)) as f32;
-        let depths = [depth, depth_r];
-        let delay = (p.delay / 1000.0) as f32;
-        let dry = (1.0 - p.mix * 0.5) as f32;
-        let wet = p.mix as f32;
-        let feedback = p.feedback as f32;
-        for i in 0..out_l.len() {
+        let n = out_l.len();
+        self.g.fill(self.frame, n, sr);
+        for i in 0..n {
             let lfo = (TAU * self.phase).sin() as f32;
-            self.phase = (self.phase + p.rate / sr) % 1.0;
+            self.phase = (self.phase + f64::from(self.g.buf(0)[i]) / sr) % 1.0;
+            let delay = self.g.buf(1)[i];
+            let depths = [self.g.buf(2)[i], self.g.buf(3)[i]];
+            let (feedback, dry, wet) = (self.g.buf(4)[i], self.g.buf(5)[i], self.g.buf(6)[i]);
             let slot = self.n % CYCLE;
             for ch in 0..2 {
                 let x = if ch == 0 { in_l[i] } else { in_r[i] };
@@ -685,10 +831,13 @@ impl StereoEffect for Chorus {
             }
             self.n += 1;
         }
+        self.frame += n;
     }
 
     fn set_params(&mut self, over: &Value) -> Result<(), PatchError> {
-        update_params(&mut self.p, over)
+        update_params(&mut self.p, over)?;
+        self.retarget();
+        Ok(())
     }
 }
 
@@ -730,12 +879,19 @@ pub struct Phaser {
     stages: [[Bq; MAX_STAGES]; 2],
     fb: [DelayLine; 2],
     phase: f64,
+    /// Where the block being processed starts, in frames.
+    pub frame: usize,
+    /// LFO rate, centre frequency, sweep width, feedback, dry and wet gains.
+    g: Glides,
 }
 
 impl Phaser {
     pub fn new(sr: f64) -> Self {
+        let p = PhaserParams::default();
+        // every stage reads the centre frequency once for each channel
+        let g = Glides::with_channels(&Self::targets(&p), &[1, 2, 1, 1, 1, 1]);
         Self {
-            p: PhaserParams::default(),
+            p,
             sr,
             stages: [[Bq::default(); MAX_STAGES]; 2],
             fb: [
@@ -743,7 +899,26 @@ impl Phaser {
                 DelayLine::new(FEEDBACK_DELAY + 8),
             ],
             phase: 0.0,
+            frame: 0,
+            g,
         }
+    }
+
+    fn targets(p: &PhaserParams) -> [f64; 6] {
+        [
+            p.rate,
+            p.center,
+            p.center * 0.9 * p.depth,
+            p.feedback,
+            1.0 - p.mix * 0.5,
+            p.mix,
+        ]
+    }
+
+    /// Follow the parameters `p` now holds.
+    pub fn retarget(&mut self) {
+        self.g
+            .retarget(&Self::targets(&self.p), self.frame, self.sr);
     }
 }
 
@@ -756,28 +931,29 @@ impl StereoEffect for Phaser {
         out_r: &mut [f32],
         _sc: Option<(&[f32], &[f32])>,
     ) {
-        let p = self.p;
         let sr = self.sr;
-        let count = (p.stages.round().max(1.0) as usize).min(MAX_STAGES);
-        let dry = 1.0 - p.mix * 0.5;
-        let wet = p.mix;
-        for i in 0..out_l.len() {
-            let lfo = (TAU * self.phase).sin();
-            self.phase = (self.phase + p.rate / sr) % 1.0;
-            // the same sweep for every stage and both channels
-            let f = p.center + lfo * p.center * 0.9 * p.depth;
-            let c = allpass_coeffs(f, 0.5, sr);
+        let count = (self.p.stages.round().max(1.0) as usize).min(MAX_STAGES);
+        let n = out_l.len();
+        self.g.fill(self.frame, n, sr);
+        for i in 0..n {
+            let lfo = (TAU * self.phase).sin() as f32;
+            self.phase = (self.phase + f64::from(self.g.buf(0)[i]) / sr) % 1.0;
+            // the sweep reaches every stage as a signal added to its frequency
+            let sweep = lfo * self.g.buf(2)[i];
+            let (fb, dry, wet) = (self.g.buf(3)[i], self.g.buf(4)[i], self.g.buf(5)[i]);
             for ch in 0..2 {
-                let x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
+                let x = if ch == 0 { in_l[i] } else { in_r[i] };
+                let f = self.g.chan(1, ch)[i] + sweep;
+                let c = allpass_coeffs(f64::from(f), 0.5, sr);
                 // y[n - 128] is 127 behind the last sample written (y[n - 1])
-                let head = x + self.fb[ch].read((FEEDBACK_DELAY - 1) as f64) * p.feedback;
-                let mut y = head;
+                let back = (self.fb[ch].read((FEEDBACK_DELAY - 1) as f64) as f32) * fb;
+                let mut y = f64::from(x + back);
                 for s in 0..count {
                     self.stages[ch][s].c = c;
                     y = self.stages[ch][s].run(y);
                 }
                 self.fb[ch].write(flush(y));
-                let v = (x * dry + y * wet) as f32;
+                let v = x * dry + (y as f32) * wet;
                 if ch == 0 {
                     out_l[i] = v;
                 } else {
@@ -785,10 +961,13 @@ impl StereoEffect for Phaser {
                 }
             }
         }
+        self.frame += n;
     }
 
     fn set_params(&mut self, over: &Value) -> Result<(), PatchError> {
-        update_params(&mut self.p, over)
+        update_params(&mut self.p, over)?;
+        self.retarget();
+        Ok(())
     }
 }
 
@@ -828,16 +1007,52 @@ pub struct AutoFilter {
     sr: f64,
     f: [Bq; 2],
     phase: f64,
+    /// Where the block being processed starts, in frames.
+    pub frame: usize,
+    kind: Kind,
+    /// Cutoff, Q, LFO rate, LFO depth (cents), wet and dry gains.
+    g: Glides,
 }
 
 impl AutoFilter {
     pub fn new(sr: f64) -> Self {
+        let p = AutoFilterParams::default();
+        // the filter reads its cutoff and Q once for each channel
+        let g = Glides::with_channels(&Self::targets(&p), &[2, 2, 1, 1, 1, 1]);
         Self {
-            p: AutoFilterParams::default(),
+            p,
             sr,
             f: [Bq::default(); 2],
             phase: 0.0,
+            frame: 0,
+            kind: Kind::LowPass,
+            g,
         }
+    }
+
+    fn targets(p: &AutoFilterParams) -> [f64; 6] {
+        [
+            p.cutoff,
+            p.res,
+            p.lfo_rate,
+            p.lfo_depth * 1200.0,
+            1.0 - p.mix,
+            p.mix,
+        ]
+    }
+
+    /// Follow the parameters `p` now holds.
+    pub fn retarget(&mut self) {
+        let kind = Kind::parse(&self.p.kind).unwrap_or(Kind::LowPass);
+        if kind != self.kind {
+            // a filter forgets what it heard when its type changes
+            self.kind = kind;
+            for f in &mut self.f {
+                f.reset();
+            }
+        }
+        self.g
+            .retarget(&Self::targets(&self.p), self.frame, self.sr);
     }
 }
 
@@ -850,19 +1065,22 @@ impl StereoEffect for AutoFilter {
         out_r: &mut [f32],
         _sc: Option<(&[f32], &[f32])>,
     ) {
-        let kind = Kind::parse(&self.p.kind).unwrap_or(Kind::LowPass);
-        let mix = clamp01(self.p.mix);
-        for i in 0..out_l.len() {
+        let kind = self.kind;
+        let n = out_l.len();
+        self.g.fill(self.frame, n, self.sr);
+        for i in 0..n {
             let lfo = (TAU * self.phase).sin();
-            self.phase = (self.phase + self.p.lfo_rate / self.sr) % 1.0;
+            self.phase = (self.phase + f64::from(self.g.buf(2)[i]) / self.sr) % 1.0;
             // the LFO moves the cutoff through `detune`, in cents
-            let f = self.p.cutoff * 2f64.powf(lfo * self.p.lfo_depth);
-            let c = wa_coeffs(kind, f, self.p.res, 0.0, self.sr);
+            let detune = f64::from(lfo as f32 * self.g.buf(3)[i]);
+            let (wet, dry) = (self.g.buf(5)[i], self.g.buf(4)[i]);
             for ch in 0..2 {
+                let f = f64::from(self.g.chan(0, ch)[i]) * 2f64.powf(detune / 1200.0);
+                let c = wa_coeffs(kind, f, f64::from(self.g.chan(1, ch)[i]), 0.0, self.sr);
                 self.f[ch].c = c;
-                let x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
-                let y = self.f[ch].run(x);
-                let v = (x * (1.0 - mix) + y * mix) as f32;
+                let x = if ch == 0 { in_l[i] } else { in_r[i] };
+                let y = self.f[ch].run(f64::from(x)) as f32;
+                let v = x * dry + y * wet;
                 if ch == 0 {
                     out_l[i] = v;
                 } else {
@@ -870,10 +1088,13 @@ impl StereoEffect for AutoFilter {
                 }
             }
         }
+        self.frame += n;
     }
 
     fn set_params(&mut self, over: &Value) -> Result<(), PatchError> {
-        update_params(&mut self.p, over)
+        update_params(&mut self.p, over)?;
+        self.retarget();
+        Ok(())
     }
 }
 
@@ -904,13 +1125,39 @@ impl Default for StereoParams {
 
 pub struct StereoTool {
     pub p: StereoParams,
+    sr: f64,
+    /// Where the block being processed starts, in frames.
+    pub frame: usize,
+    /// The four routing gains: [left in to left out, left in to right out, right in
+    /// to left out, right in to right out].
+    g: Glides,
 }
 
 impl StereoTool {
-    pub fn new(_sr: f64) -> Self {
-        Self {
-            p: StereoParams::default(),
+    pub fn new(sr: f64) -> Self {
+        let p = StereoParams::default();
+        let g = Glides::new(&Self::targets(&p));
+        Self { p, sr, frame: 0, g }
+    }
+
+    fn targets(p: &StereoParams) -> [f64; 4] {
+        // mid/side width matrix: L' = L*(1+w)/2 + R*(1-w)/2
+        let a = (1.0 + p.width) / 2.0;
+        let c = (1.0 - p.width) / 2.0;
+        let sign = if p.invert { -1.0 } else { 1.0 };
+        let gl = (1.0 - p.pan).min(1.0) * db_to_lin(p.gain) * sign;
+        let gr = (1.0 + p.pan).min(1.0) * db_to_lin(p.gain) * sign;
+        if p.swap {
+            [c * gr, a * gl, a * gr, c * gl]
+        } else {
+            [a * gl, c * gr, c * gl, a * gr]
         }
+    }
+
+    /// Follow the parameters `p` now holds.
+    pub fn retarget(&mut self) {
+        self.g
+            .retarget(&Self::targets(&self.p), self.frame, self.sr);
     }
 }
 
@@ -923,29 +1170,20 @@ impl StereoEffect for StereoTool {
         out_r: &mut [f32],
         _sc: Option<(&[f32], &[f32])>,
     ) {
-        let p = self.p;
-        // mid/side width matrix: L' = L*(1+w)/2 + R*(1-w)/2
-        let a = (1.0 + p.width) / 2.0;
-        let c = (1.0 - p.width) / 2.0;
-        let sign = if p.invert { -1.0 } else { 1.0 };
-        let gl = (1.0 - p.pan).min(1.0) * db_to_lin(p.gain) * sign;
-        let gr = (1.0 + p.pan).min(1.0) * db_to_lin(p.gain) * sign;
-        // the four routing gains: [left in to left out, left in to right out,
-        // right in to left out, right in to right out]
-        let g = if p.swap {
-            [c * gr, a * gl, a * gr, c * gl]
-        } else {
-            [a * gl, c * gr, c * gl, a * gr]
-        };
-        for i in 0..out_l.len() {
-            let (l, r) = (f64::from(in_l[i]), f64::from(in_r[i]));
-            out_l[i] = (l * g[0] + r * g[2]) as f32;
-            out_r[i] = (l * g[1] + r * g[3]) as f32;
+        let n = out_l.len();
+        self.g.fill(self.frame, n, self.sr);
+        for i in 0..n {
+            let (l, r) = (in_l[i], in_r[i]);
+            out_l[i] = l * self.g.buf(0)[i] + r * self.g.buf(2)[i];
+            out_r[i] = l * self.g.buf(1)[i] + r * self.g.buf(3)[i];
         }
+        self.frame += n;
     }
 
     fn set_params(&mut self, over: &Value) -> Result<(), PatchError> {
-        update_params(&mut self.p, over)
+        update_params(&mut self.p, over)?;
+        self.retarget();
+        Ok(())
     }
 }
 
@@ -1284,12 +1522,18 @@ pub struct ConvReverb {
     pre: [DelayLine; 2],
     hp: [Bq; 2],
     ir_key: [f64; 4],
+    /// Where the block being processed starts, in frames.
+    pub frame: usize,
+    /// Dry and wet gains, pre-delay (seconds) and low cut, each of the last two
+    /// read once for each channel.
+    g: Glides,
 }
 
 impl ConvReverb {
     pub fn new(sr: f64) -> Self {
         let p = ReverbParams::default();
         let ir = ReverbImpulse::new(sr, &p);
+        let g = Glides::with_channels(&Self::targets(&p), &[1, 1, 2, 2]);
         Self {
             sr,
             conv: [Convolver::new(ir.left), Convolver::new(ir.right)],
@@ -1300,7 +1544,19 @@ impl ConvReverb {
             hp: [Bq::default(); 2],
             ir_key: [p.decay, p.damp, p.size, p.width],
             p,
+            frame: 0,
+            g,
         }
+    }
+
+    fn targets(p: &ReverbParams) -> [f64; 4] {
+        [p.dry, p.wet * 1.4, p.predelay / 1000.0, p.lowcut]
+    }
+
+    /// Follow the cheap parameters `p` now holds.
+    pub fn retarget(&mut self) {
+        self.g
+            .retarget(&Self::targets(&self.p), self.frame, self.sr);
     }
 
     /// The settings that change the impulse response.
@@ -1325,21 +1581,25 @@ impl StereoEffect for ConvReverb {
         _sc: Option<(&[f32], &[f32])>,
     ) {
         // a changed response is built by `set_impulse`; here only the cheap settings apply
-        let p = self.p;
-        let pre_d = (p.predelay / 1000.0 * self.sr).max(1.0);
-        let c = wa_coeffs(Kind::HighPass, p.lowcut, 1.0, 0.0, self.sr);
-        for h in &mut self.hp {
-            h.c = c;
-        }
-        let wet = p.wet * 1.4;
-        for i in 0..out_l.len() {
+        let n = out_l.len();
+        self.g.fill(self.frame, n, self.sr);
+        for i in 0..n {
+            let (dry, wet) = (self.g.buf(0)[i], self.g.buf(1)[i]);
             for ch in 0..2 {
-                let x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
-                self.pre[ch].write(x);
-                let d = self.pre[ch].read(pre_d);
+                let x = if ch == 0 { in_l[i] } else { in_r[i] };
+                let pre_d = (f64::from(self.g.chan(2, ch)[i]) * self.sr).max(1.0);
+                self.pre[ch].write(f64::from(x));
+                let d = self.pre[ch].read_linear(pre_d);
+                self.hp[ch].c = wa_coeffs(
+                    Kind::HighPass,
+                    f64::from(self.g.chan(3, ch)[i]),
+                    1.0,
+                    0.0,
+                    self.sr,
+                );
                 let h = self.hp[ch].run(d);
-                let y = self.conv[ch].process(h);
-                let v = (x * p.dry + y * wet) as f32;
+                let y = self.conv[ch].process(h) as f32;
+                let v = x * dry + y * wet;
                 if ch == 0 {
                     out_l[i] = v;
                 } else {
@@ -1347,6 +1607,7 @@ impl StereoEffect for ConvReverb {
                 }
             }
         }
+        self.frame += n;
     }
 
     fn set_params(&mut self, over: &Value) -> Result<(), PatchError> {
@@ -1357,6 +1618,7 @@ impl StereoEffect for ConvReverb {
             let ir = ReverbImpulse::new(self.sr, &self.p);
             self.set_impulse(ir);
         }
+        self.retarget();
         Ok(())
     }
 }
@@ -1467,10 +1729,14 @@ mod tests {
         t.set_params(&serde_json::json!({ "swap": true })).unwrap();
         t.process(&l, &r, &mut ol, &mut or, None);
         assert!(ol[10].abs() < 1e-6 && (or[10] - 0.5).abs() < 1e-6);
+        // a change after the start glides there (15 ms time constant)
         t.set_params(&serde_json::json!({ "swap": false, "width": 0 }))
             .unwrap();
+        let (l, r) = (vec![0.5f32; 4800], vec![0.0f32; 4800]);
+        let (mut ol, mut or) = (vec![0f32; 4800], vec![0f32; 4800]);
         t.process(&l, &r, &mut ol, &mut or, None);
-        assert!((ol[10] - 0.25).abs() < 1e-6 && (or[10] - 0.25).abs() < 1e-6);
+        assert!(or[10] > 0.4, "still on the way: {}", or[10]);
+        assert!((ol[4799] - 0.25).abs() < 1e-3 && (or[4799] - 0.25).abs() < 1e-3);
     }
 
     #[test]

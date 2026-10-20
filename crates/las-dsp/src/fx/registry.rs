@@ -149,7 +149,8 @@ impl ParamDef {
             _ => min + (max - min) * n,
         };
         if let Some(step) = self.step {
-            v = (v / step).round() * step;
+            // JavaScript's `Math.round`: halves go up
+            v = ((v / step) + 0.5).floor() * step;
         }
         v
     }
@@ -270,9 +271,37 @@ fn nums(v: &Value) -> Vec<f64> {
         .unwrap_or_default()
 }
 
+/// As [`parse_params`] for an effect that is already running: a reverb whose response
+/// would not change gets none built.
+pub fn parse_params_for(
+    unit: &EffectUnit,
+    id: &str,
+    state: &Value,
+    sr: f64,
+) -> Result<Params, PatchError> {
+    let params = parse_params_with(id, state, sr, false)?;
+    Ok(match (unit, params) {
+        (EffectUnit::Reverb(fx), Params::Reverb(p, _)) => {
+            let ir = (ConvReverb::ir_key(&p) != ConvReverb::ir_key(&fx.p))
+                .then(|| ReverbImpulse::new(sr, &p));
+            Params::Reverb(p, ir)
+        }
+        (_, params) => params,
+    })
+}
+
 /// Parse an effect state into typed parameters. `sr` is for the convolution
 /// reverb, which builds its impulse response here, off the audio thread.
 pub fn parse_params(id: &str, state: &Value, sr: f64) -> Result<Params, PatchError> {
+    parse_params_with(id, state, sr, true)
+}
+
+fn parse_params_with(
+    id: &str,
+    state: &Value,
+    sr: f64,
+    build_impulse: bool,
+) -> Result<Params, PatchError> {
     let defaults = descriptor(id)
         .map(|d| d.default_state.clone())
         .unwrap_or(Value::Null);
@@ -286,8 +315,8 @@ pub fn parse_params(id: &str, state: &Value, sr: f64) -> Result<Params, PatchErr
         "las-maximizer" => Params::Maximizer(parsed(&state)?),
         "las-reverb" => {
             let p: ReverbParams = parsed(&state)?;
-            let ir = ReverbImpulse::new(sr, &p);
-            Params::Reverb(p, Some(ir))
+            let ir = build_impulse.then(|| ReverbImpulse::new(sr, &p));
+            Params::Reverb(p, ir)
         }
         "las-delay" => Params::Delay(parsed(&state)?),
         "las-dist" => Params::Dist(parsed(&state)?),
@@ -512,15 +541,23 @@ impl EffectUnit {
             };
         }
         match (self, p) {
-            (EffectUnit::Eq(fx), Params::Eq(p)) => swap!(fx, Eq, p),
+            (EffectUnit::Eq(fx), Params::Eq(p)) => {
+                let old = swap!(fx, Eq, p);
+                fx.retarget();
+                old
+            }
             (EffectUnit::Comp(fx), Params::Comp(p)) => swap!(fx, Comp, p),
             (EffectUnit::Limiter(fx), Params::Limiter(p)) => swap!(fx, Limiter, p),
             (EffectUnit::Maximizer(fx), Params::Maximizer(p)) => swap!(fx, Maximizer, p),
             (EffectUnit::Reverb(fx), Params::Reverb(p, ir)) => {
                 let old = std::mem::replace(&mut fx.p, p);
-                if let Some(ir) = ir {
+                // the response is only replaced when its settings changed
+                if let Some(ir) =
+                    ir.filter(|_| ConvReverb::ir_key(&fx.p) != ConvReverb::ir_key(&old))
+                {
                     fx.set_impulse(ir);
                 }
+                fx.retarget();
                 Params::Reverb(old, None)
             }
             (EffectUnit::Delay(fx), Params::Delay(p)) => {
@@ -531,12 +568,32 @@ impl EffectUnit {
                 old.bpm = bpm;
                 Params::Delay(old)
             }
-            (EffectUnit::Dist(fx), Params::Dist(p)) => swap!(fx, Dist, p),
+            (EffectUnit::Dist(fx), Params::Dist(p)) => {
+                let old = swap!(fx, Dist, p);
+                fx.retarget();
+                old
+            }
             (EffectUnit::Crusher(fx), Params::Crusher(p)) => swap!(fx, Crusher, p),
-            (EffectUnit::Chorus(fx), Params::Chorus(p)) => swap!(fx, Chorus, p),
-            (EffectUnit::Phaser(fx), Params::Phaser(p)) => swap!(fx, Phaser, p),
-            (EffectUnit::Filter(fx), Params::Filter(p)) => swap!(fx, Filter, p),
-            (EffectUnit::Stereo(fx), Params::Stereo(p)) => swap!(fx, Stereo, p),
+            (EffectUnit::Chorus(fx), Params::Chorus(p)) => {
+                let old = swap!(fx, Chorus, p);
+                fx.retarget();
+                old
+            }
+            (EffectUnit::Phaser(fx), Params::Phaser(p)) => {
+                let old = swap!(fx, Phaser, p);
+                fx.retarget();
+                old
+            }
+            (EffectUnit::Filter(fx), Params::Filter(p)) => {
+                let old = swap!(fx, Filter, p);
+                fx.retarget();
+                old
+            }
+            (EffectUnit::Stereo(fx), Params::Stereo(p)) => {
+                let old = swap!(fx, Stereo, p);
+                fx.retarget();
+                old
+            }
             (EffectUnit::Shaper(fx), Params::Shaper(p)) => swap!(fx, Shaper, p),
             (EffectUnit::NoiseGate(fx), Params::NoiseGate(p)) => swap!(fx, NoiseGate, p),
             (EffectUnit::Transient(fx), Params::Transient(p)) => swap!(fx, Transient, p),
@@ -547,6 +604,29 @@ impl EffectUnit {
             (EffectUnit::StepFx(fx), Params::StepFx(p)) => swap!(fx, StepFx, p),
             // parameters for another kind of effect, or none: nothing to change
             (_, p) => p,
+        }
+    }
+
+    /// Tell the effects that glide to new settings where the next block starts, in frames.
+    pub fn set_time(&mut self, frame: usize) {
+        match self {
+            EffectUnit::Eq(f) => f.frame = frame,
+            EffectUnit::Reverb(f) => f.frame = frame,
+            EffectUnit::Filter(f) => f.frame = frame,
+            EffectUnit::Dist(f) => f.frame = frame,
+            EffectUnit::Chorus(f) => f.frame = frame,
+            EffectUnit::Phaser(f) => f.frame = frame,
+            EffectUnit::Stereo(f) => f.frame = frame,
+            _ => {}
+        }
+    }
+
+    /// Timed automation the effect does itself, with Web Audio parameters: whether
+    /// `path` is one of them.
+    pub fn automate(&mut self, path: &str, points: &[(f64, f64)], first: bool) -> bool {
+        match self {
+            EffectUnit::Eq(eq) => eq.automate(path, points, first),
+            _ => false,
         }
     }
 
@@ -608,27 +688,53 @@ impl FxSlot {
 
     /// Process a block in place.
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32], sidechain: Option<(&[f32], &[f32])>) {
+        let m = if self.enabled {
+            self.mix.clamp(0.0, 1.0)
+        } else {
+            0.0
+        } as f32;
+        self.run(l, r, sidechain, |_| (m, 1.0 - m));
+    }
+
+    /// Process a block in place with the wet and dry gains for each frame.
+    pub fn process_gains(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+        wet: &[f32],
+        dry: &[f32],
+    ) {
+        self.run(l, r, sidechain, |i| (wet[i], dry[i]));
+    }
+
+    fn run(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+        gains: impl Fn(usize) -> (f32, f32),
+    ) {
         let n = l.len();
         self.wet_l.resize(n, 0.0);
         self.wet_r.resize(n, 0.0);
         self.unit
             .process(l, r, &mut self.wet_l, &mut self.wet_r, sidechain);
-        let m = if self.enabled {
-            self.mix.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
         let delay = (self.latency() * self.sr).round();
         for i in 0..n {
             self.dry[0].write(f64::from(l[i]));
             self.dry[1].write(f64::from(r[i]));
             let (dl, dr) = if delay >= 1.0 {
-                (self.dry[0].read(delay), self.dry[1].read(delay))
+                (
+                    self.dry[0].read(delay) as f32,
+                    self.dry[1].read(delay) as f32,
+                )
             } else {
-                (f64::from(l[i]), f64::from(r[i]))
+                (l[i], r[i])
             };
-            l[i] = (dl * (1.0 - m) + f64::from(self.wet_l[i]) * m) as f32;
-            r[i] = (dr * (1.0 - m) + f64::from(self.wet_r[i]) * m) as f32;
+            let (wet, dry) = gains(i);
+            l[i] = dl * dry + self.wet_l[i] * wet;
+            r[i] = dr * dry + self.wet_r[i] * wet;
         }
     }
 }

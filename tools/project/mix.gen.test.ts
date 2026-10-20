@@ -199,6 +199,52 @@ cases.tempo = () => {
   return p;
 };
 
+// effect parameter automation: worklet ramps (comp threshold, hall wet), a slot's mix,
+// and state updates on a grid (chorus mix, distortion drive, filter cutoff)
+const fxAuto = (name: string, effects: [string, Record<string, unknown>][], autos: [string, string, { t: number; v: number }[], number, number, number?][]): Project => {
+  const p = base(name, 120);
+  const ch = createChannel('polaris', { name: 'Saw', mixerTrack: 1, state: { patch: patch('saw', { env: [{ a: 0.005, h: 0, d: 0.2, s: 1, r: 0.15 }], filters: [{ on: true, type: 'lp24', cutoff: 4000, res: 0 }] }), fx: [], arp: { on: false } } });
+  p.channels.push(ch);
+  p.patterns[0].notes[ch.id] = [note(48, 0, 2, 0.9), note(55, 2, 2, 0.8), note(60, 4, 3, 1)];
+  const slots = effects.map(([id, state]) => createEffectSlot(id, state));
+  slots.forEach((slot, i) => (p.mixer[1].slots[i] = slot));
+  place(p, 8);
+  autos.forEach(([id, param, points, start, length, slotIndex], i) =>
+    auto(p, `${id}${i}`, { kind: 'effect', track: 1, slotId: slots[slotIndex ?? 0].id, param }, points, start, length, 0, 2 + i),
+  );
+  return p;
+};
+const ramp3 = (a: number, b: number, c: number) => [{ t: 0, v: a }, { t: 2 * BEAT, v: b }, { t: 4 * BEAT, v: c }];
+cases.fxa_ramped = () =>
+  fxAuto('fxa_ramped', [['las-comp', { threshold: -30, ratio: 6, attack: 3, release: 80, makeup: 3 }], ['las-hall', { decay: 1.4, wet: 0.2, dry: 0.5 }]], [
+    ['thr', 'threshold', ramp3(0.9, 0.2, 0.7), 0, 4, 0],
+    ['mk', 'makeup', ramp3(0.2, 0.8, 0.4), 4, 4, 0],
+    ['wet', 'wet', ramp3(0.1, 0.9, 0.3), 0, 8, 1],
+  ]);
+cases.fxa_mix = () =>
+  fxAuto('fxa_mix', [['las-limiter', {}], ['las-hall', { decay: 1.2, wet: 1, dry: 0 }]], [
+    ['mixa', 'mix', ramp3(0.1, 1, 0.3), 0, 4, 1],
+    ['mixb', 'mix', ramp3(0.8, 0.2, 0.9), 4, 4, 1],
+  ]);
+cases.fxa_timed = () =>
+  fxAuto('fxa_timed', [['las-filter', { type: 'lowpass', cutoff: 1500, res: 0.5, lfoRate: 0, lfoDepth: 0 }]], [
+    ['cut', 'cutoff', ramp3(0.2, 0.9, 0.4), 0, 4, 0],
+    ['res', 'res', ramp3(0.1, 0.6, 0.2), 4, 4, 0],
+  ]);
+cases.fxa_timed2 = () =>
+  fxAuto('fxa_timed2', [['las-dist', { mode: 'tube', drive: 4, tone: 6000, output: -6, mix: 1 }], ['las-chorus', { rate: 0.8, depth: 0.5, mix: 0.3 }]], [
+    ['drive', 'drive', ramp3(0.1, 0.8, 0.3), 0, 4, 0],
+    ['cmix', 'mix', ramp3(0.2, 0.9, 0.5), 0, 8, 1],
+  ]);
+
+cases.fxa_native2 = () =>
+  fxAuto('fxa_native2', [['las-phaser', { rate: 0.6, depth: 0.7, feedback: 0.3, mix: 0.7 }], ['las-stereo', { width: 1.2, pan: 0, gain: 0 }], ['las-reverb', { decay: 1.2, wet: 0.5 }]], [
+    ['pc', 'center', ramp3(0.3, 0.8, 0.4), 0, 4, 0],
+    ['pm', 'mix', ramp3(0.2, 0.9, 0.6), 4, 4, 0],
+    ['sw', 'width', ramp3(0.2, 0.9, 0.5), 0, 4, 1],
+    ['sp', 'pan', ramp3(0.2, 0.9, 0.5), 4, 4, 1],
+    ['rw', 'wet', ramp3(0.1, 0.8, 0.3), 0, 4, 2],
+  ]);
 // the same projects without the effects that Web Audio builds from its own nodes,
 // so the instruments, mixer and scheduler are compared on their own
 cases.nebuladry = () => {
@@ -261,6 +307,121 @@ cases.fx_chorus_fb = () => {
   p.name = 'chorus_fb';
   return p;
 };
+
+// each automation alone
+const SPLIT: [string, [string, Record<string, unknown>], string, number, number][] = [
+  ['eqf', ['las-eq', NATIVE['las-eq']], 'bands.1.freq', 0, 4],
+  ['eqg', ['las-eq', NATIVE['las-eq']], 'bands.2.gain', 0, 4],
+  ['eqq', ['las-eq', NATIVE['las-eq']], 'bands.3.q', 2, 4],
+  ['eqo', ['las-eq', NATIVE['las-eq']], 'output', 0, 8],
+  ['eqt', ['las-eq', NATIVE['las-eq']], 'bands.0.type', 4, 2],
+  ['phc', ['las-phaser', { rate: 0.6, depth: 0.7, feedback: 0.3, mix: 0.7 }], 'center', 0, 4],
+  ['phm', ['las-phaser', { rate: 0.6, depth: 0.7, feedback: 0.3, mix: 0.7 }], 'mix', 4, 4],
+  ['stw', ['las-stereo', { width: 1.2, pan: 0, gain: 0 }], 'width', 0, 4],
+  ['stp', ['las-stereo', { width: 1.2, pan: 0, gain: 0 }], 'pan', 4, 4],
+  ['rvw', ['las-reverb', { decay: 1.2, wet: 0.5 }], 'wet', 0, 4],
+];
+for (const [name, effect, param, start, length] of SPLIT) {
+  cases[`fxs_${name}`] = () => fxAuto(`fxs_${name}`, [effect], [[name, param, ramp3(0.2, 0.9, 0.4), start, length, 0]]);
+}
+// instrument parameter automation
+const pauto = (p: Project, id: string, channelId: string, param: string, points: { t: number; v: number }[], start: number, length: number, track: number) =>
+  auto(p, id, { kind: 'plugin', channelId, param }, points, start, length, 0, track);
+const ipa = (name: string, make: (p: Project) => string, params: [string, string, number, number][]) => {
+  cases[name] = () => {
+    const p = base(name, 120);
+    const id = make(p);
+    place(p, 8);
+    params.forEach(([key, param, start, length], i) => pauto(p, `${key}${i}`, id, param, ramp3(0.2, 0.9, 0.4), start, length, 2 + i));
+    return p;
+  };
+};
+ipa('ipa_polaris', (p) => {
+  const ch = createChannel('polaris', { name: 'Saw', mixerTrack: 1, state: { patch: patch('saw', { env: [{ a: 0.005, h: 0, d: 0.2, s: 1, r: 0.15 }], filters: [{ on: true, type: 'lp24', cutoff: 1500, res: 0.3 }] }), fx: [], arp: { on: false } } });
+  p.channels.push(ch);
+  p.patterns[0].notes[ch.id] = [note(48, 0, 2, 0.9), note(55, 2, 2, 0.8), note(60, 4, 3, 1)];
+  return ch.id;
+}, [['cut', 'patch.filters.0.cutoff', 0, 4], ['res', 'patch.filters.0.res', 2, 4], ['lvl', 'patch.level', 4, 4], ['att', 'patch.env.0.r', 0, 8]]);
+ipa('ipa_nebula', (p) => {
+  const n = createChannel('nebula', {
+    name: 'Nebula',
+    mixerTrack: 1,
+    state: {
+      layers: [
+        { on: true, name: 'A', level: 0.7, pan: -0.3, transpose: 0, patch: patch('saw', { env: [{ a: 0.005, h: 0, d: 0.2, s: 1, r: 0.15 }], filters: [{ on: true, type: 'lp12', cutoff: 2000, res: 0.1 }] }) },
+        { on: false, name: 'X', level: 1, pan: 0, transpose: 0, patch: patch('saw') },
+        { on: true, name: 'B', level: 0.5, pan: 0.4, transpose: 12, patch: patch('sine') },
+      ],
+      macros: { cutoff: 0.7, res: 0.1, attack: 0.3, release: 0.6 },
+      master: 0.7,
+      fx: [],
+      arp: { on: false },
+    },
+  });
+  p.channels.push(n);
+  p.patterns[0].notes[n.id] = [note(57, 0, 2), note(60, 0, 2), note(55, 2, 2), note(62, 4, 3)];
+  return n.id;
+}, [['mc', 'macros.cutoff', 0, 4], ['mr', 'macros.res', 2, 4], ['ma', 'macros.attack', 0, 4], ['mm', 'master', 4, 4], ['l0', 'layers.0.level', 0, 4], ['l2', 'layers.2.pan', 2, 4], ['l1', 'layers.1.level', 0, 4], ['lp', 'layers.0.patch.filters.0.cutoff', 4, 4]]);
+ipa('ipa_facet', (p) => {
+  const f = createChannel('facet', { name: 'Facet', mixerTrack: 1, state: { patch: {}, fx: [], arp: { on: false } } });
+  p.channels.push(f);
+  p.patterns[0].notes[f.id] = [note(60, 0, 2), note(64, 2, 2), note(67, 4, 3)];
+  return f.id;
+}, [['cut', 'patch.filter.cutoff', 0, 4], ['op', 'patch.ops.1.level', 2, 4], ['fb', 'patch.feedback', 4, 4], ['rt', 'patch.ops.1.ratio', 0, 8]]);
+ipa('ipa_mist', (p) => {
+  const m = createChannel('mist', { name: 'Mist', mixerTrack: 1, state: { patch: {}, fx: [], arp: { on: false } } });
+  p.channels.push(m);
+  p.patterns[0].notes[m.id] = [note(48, 0, 3, 0.9), note(55, 4, 3, 0.9)];
+  return m.id;
+}, [['pos', 'patch.grain.position', 0, 4], ['size', 'patch.grain.size', 2, 4], ['den', 'patch.grain.density', 4, 4]]);
+ipa('ipa_rack', (p) => {
+  const f = createChannel('facet', { name: 'Facet', mixerTrack: 1, state: { patch: {}, fx: [{ type: 'las-filter', on: true, state: { type: 'lowpass', cutoff: 1500, res: 0.5, lfoRate: 0, lfoDepth: 0 } }, { type: 'las-hall', on: true, state: { decay: 1.2, wet: 0.4 } }, { type: 'las-comp', on: true, state: { threshold: -30, ratio: 6 } }], arp: { on: false } } });
+  p.channels.push(f);
+  p.patterns[0].notes[f.id] = [note(60, 0, 2), note(64, 2, 2), note(67, 4, 3)];
+  return f.id;
+}, [['cut', 'fx.0.state.cutoff', 0, 4], ['wet', 'fx.1.state.wet', 0, 4], ['thr', 'fx.2.state.threshold', 2, 4], ['mix', 'fx.1.state.mix', 4, 4]]);
+
+ipa('ipa_sampler', (p) => {
+  const hat = createChannel('sampler', { name: 'Loop', mixerTrack: 1, sampleId: 'factory:808-c', state: { root: 36, tune: 0, fine: 0, attack: 0.005, decay: 0.3, sustain: 1, release: 0.2, reverse: false, loop: true, start: 0.1, end: 0.3, cut: false, filterType: 'lowpass', cutoff: 3000, res: 1, velToVol: 0.7, boost: 0 } });
+  const hit = createChannel('sampler', { name: 'Hit', mixerTrack: 2, sampleId: 'factory:snare-fat', state: { root: 60, tune: 0, fine: 0, attack: 0.002, decay: 0.2, sustain: 0.6, release: 0.1, reverse: false, loop: false, start: 0, end: 1, cut: false, filterType: 'lowpass', cutoff: 20000, res: 0.7, velToVol: 0.5, boost: 0 } });
+  p.channels.push(hat, hit);
+  p.samples.push({ id: 'factory:808-c', name: '808', factory: true }, { id: 'factory:snare-fat', name: 'Snare', factory: true });
+  p.patterns[0].notes[hat.id] = [note(36, 0, 2, 0.9), note(43, 2, 2, 0.7), note(36, 4, 3, 0.9)];
+  p.patterns[0].notes[hit.id] = [0, 1, 2, 3, 4, 5, 6, 7].map((b) => note(60, b, 0.5, 0.8));
+  pauto(p, 'hcut', hat.id, 'cutoff', ramp3(0.2, 0.9, 0.4), 0, 4, 2);
+  pauto(p, 'hres', hat.id, 'res', ramp3(0.2, 0.9, 0.4), 2, 4, 3);
+  pauto(p, 'hbo', hat.id, 'boost', ramp3(0.2, 0.9, 0.4), 4, 4, 4);
+  pauto(p, 'stu', hit.id, 'tune', ramp3(0.2, 0.9, 0.4), 0, 8, 5);
+  pauto(p, 'sre', hit.id, 'release', ramp3(0.2, 0.9, 0.4), 0, 8, 6);
+  pauto(p, 'sst', hit.id, 'start', ramp3(0.1, 0.5, 0.2), 0, 8, 7);
+  return hat.id;
+}, []);
+ipa('ipa_clip', (p) => {
+  const mono = createChannel('audioclip', { name: 'Mono', mixerTrack: 1, sampleId: 'factory:ride', state: { gain: -2 } });
+  p.channels.push(mono);
+  p.samples.push({ id: 'factory:ride', name: 'Ride', factory: true });
+  p.playlist.clips.push({ id: 'm1', kind: 'audio', refId: mono.id, track: 0, start: 0, length: 6 * BEAT, offset: 0 } as never);
+  return mono.id;
+}, [['gain', 'gain', 0, 8]]);
+
+ipa('ipa_pad', (p) => {
+  const pad = (name: string, sampleId: string, key: number, extra: Record<string, unknown> = {}) => ({ name, sampleId, key, level: 0.85, pan: 0, tune: 0, cut: 0, ...extra });
+  const ch = createChannel('lumapad', {
+    name: 'Pads',
+    mixerTrack: 1,
+    state: { pads: [pad('K', 'factory:kick-punch', 36), pad('S', 'factory:snare-fat', 38, { pan: 0.2 }), pad('H', 'factory:hat-closed', 42, { cut: 1 }), pad('O', 'factory:hat-open', 46, { cut: 1, tune: 2 })], fx: [], arp: { on: false } },
+  });
+  p.channels.push(ch);
+  p.samples.push({ id: 'factory:kick-punch', name: 'k', factory: true }, { id: 'factory:snare-fat', name: 's', factory: true }, { id: 'factory:hat-closed', name: 'h', factory: true }, { id: 'factory:hat-open', name: 'o', factory: true });
+  p.patterns[0].notes[ch.id] = [
+    ...[0, 2, 4, 6].map((b) => note(36, b, 0.25, 1)),
+    ...[1, 3, 5, 7].map((b) => note(38, b, 0.25, 0.8)),
+    ...[0.5, 1.5, 2.5, 4.5, 5.5, 6.5].map((b) => note(42, b, 0.25, 0.6)),
+    ...[3.5, 7.5].map((b) => note(46, b, 0.25, 0.7)),
+    note(42, 3.75, 0.25, 0.9),
+  ];
+  return ch.id;
+}, [['lv', 'pads.0.level', 0, 8], ['pn', 'pads.1.pan', 2, 4], ['tu', 'pads.3.tune', 0, 8]]);
 
 it('writes the mix projects', async () => {
   mkdirSync(out, { recursive: true });

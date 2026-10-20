@@ -13,6 +13,7 @@ pub mod fm;
 pub mod fx;
 pub mod loudness;
 pub mod mist;
+pub mod param;
 pub mod patch;
 pub mod presets;
 pub mod stretch;

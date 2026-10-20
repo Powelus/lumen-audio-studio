@@ -184,6 +184,33 @@ impl Scheduler<'_> {
     /// Apply automation points (time, 0 to 1) to their target, as the web
     /// version's engine does.
     fn automate(&mut self, target: &AutomationTarget, points: &[(f64, f64)], first: bool) {
+        if let AutomationTarget::Effect {
+            track,
+            slot_id,
+            param,
+        } = target
+        {
+            if !self.mixer.has_slot(*track, slot_id) {
+                return;
+            }
+            let shift = self.mixer.path_latency(*track, slot_id);
+            let pts: Vec<(f64, f64)> = points
+                .iter()
+                .map(|&(t, v)| (if shift > 0.0 { t + shift } else { t }, v))
+                .collect();
+            self.mixer
+                .automate_effect(*track, slot_id, param, &pts, first);
+            return;
+        }
+        if let AutomationTarget::Plugin { channel_id, param } = target {
+            let length = self.mixer.length();
+            if let Some(&ci) = self.index.get(channel_id) {
+                self.channels[ci]
+                    .inst
+                    .automate(param, points, first, length);
+            }
+            return;
+        }
         let Some((lo, hi)) = target_range(target) else {
             return;
         };
@@ -408,7 +435,26 @@ pub fn render_mix_with(
     let last_track = project.mixer.len().saturating_sub(1);
     for c in &project.channels {
         let sample = c.sample_id.as_deref().and_then(|id| library.get(id));
-        let inst = Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample)
+        // each pad of a pad instrument has its own sample
+        let pad_samples: Vec<Option<std::sync::Arc<crate::factory::Audio>>> =
+            if c.plugin_id == "lumapad" {
+                c.state
+                    .get("pads")
+                    .and_then(|p| p.as_array())
+                    .map(|pads| {
+                        pads.iter()
+                            .map(|p| {
+                                p.get("sampleId")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|id| library.get(id))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+        let inst = Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample, pad_samples)
             .map_err(|e| format!("{}: {}", c.name, e.0))?;
         index.insert(c.id.clone(), channels.len());
         channels.push(ChannelRt {
@@ -460,6 +506,7 @@ pub fn render_mix_with(
         fresh: true,
         automation_first: HashSet::new(),
     };
+    sched.mixer.set_length(length + pad);
     let bpm0 = tempo_at(project, 0.0, song);
     for ch in &mut sched.channels {
         ch.inst.set_bpm(bpm0);

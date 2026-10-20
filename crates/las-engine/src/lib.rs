@@ -2,10 +2,12 @@
 pub mod arp;
 pub mod audioclip;
 pub mod factory;
+pub mod fxauto;
 pub mod instrument;
 pub mod library;
 pub mod mixer;
 pub mod param;
+pub mod pluginparams;
 pub mod render;
 pub mod sampler;
 pub mod timeline;

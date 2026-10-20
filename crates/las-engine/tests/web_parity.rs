@@ -121,6 +121,63 @@ fn web_audio_effects_match_closely() {
     }
 }
 
+/// Effect and instrument parameters changed by automation clips: ramps in the worklet effects,
+/// the slot's mix, and state updates on a grid, where Web Audio smooths each change
+/// with a time constant (a biquad filter evaluates its parameters once per channel).
+const AUTOMATED: [&str; 23] = [
+    "ipa_pad",
+    "ipa_polaris",
+    "ipa_nebula",
+    "ipa_facet",
+    "ipa_mist",
+    "ipa_rack",
+    "ipa_sampler",
+    "ipa_clip",
+    "fxa_ramped",
+    "fxa_mix",
+    "fxa_timed",
+    "fxa_timed2",
+    "fxa_native2",
+    "fxs_eqf",
+    "fxs_eqg",
+    "fxs_eqq",
+    "fxs_eqo",
+    "fxs_eqt",
+    "fxs_phc",
+    "fxs_phm",
+    "fxs_stw",
+    "fxs_stp",
+    "fxs_rvw",
+];
+
+#[test]
+fn effect_automation_matches_the_web_version() {
+    for name in AUTOMATED {
+        let d = compare(name);
+        assert_eq!(d.frames.0, d.frames.1, "{name}: length");
+        assert!(d.peak > 0.01, "{name}: the reference is silent");
+        assert!(
+            d.rel_db < -90.0,
+            "{name}: error only {:.1} dB below the signal",
+            -d.rel_db
+        );
+    }
+}
+
+/// The error of each case (`CASES="a b" cargo test --release summary -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn summary() {
+    let names = std::env::var("CASES").unwrap_or_default();
+    for name in names.split_whitespace() {
+        let d = compare(name);
+        println!(
+            "{name}: {:.1} dB below the signal, largest error {:e}, peak {:.3}",
+            -d.rel_db, d.max_err, d.peak
+        );
+    }
+}
+
 /// Where the error is, window by window (`CASE=mixer cargo test --release windows -- --ignored --nocapture`).
 #[test]
 #[ignore]

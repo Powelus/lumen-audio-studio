@@ -6,7 +6,10 @@
 use crate::arp::{ArpState, Arpeggiator, Transport};
 use crate::audioclip::{AudioClipper, ClipPlayback};
 use crate::factory::Audio;
-use crate::sampler::Sampler;
+use crate::fxauto::{densify, map_automation, SlotAuto};
+use crate::param::Param;
+use crate::pluginparams::plugin_param_def;
+use crate::sampler::{PadBank, Sampler};
 use las_dsp::engine::{prepare_patch, Event, PatchError};
 use las_dsp::fm::{fm_engine, Fm, FmEngine};
 use las_dsp::fx::registry::{full_state, parse_params, EffectUnit, FxSlot};
@@ -75,9 +78,22 @@ pub fn stereo_pan_a(l: &mut [f32], r: &mut [f32], pans: &[f32]) {
 /// One synth voice engine with its place in the instrument (Nebula stacks layers).
 struct Layer {
     engine: SynthEngine,
-    gain: f32,
-    pan: f64,
+    gain: Param,
+    pan: Param,
     transpose: f64,
+    /// Place in the plugin state's list of layers (disabled ones are left out).
+    index: usize,
+    /// The layer's own level, before the master.
+    level: f64,
+    /// The layer's patch before the macros scale it.
+    base: Value,
+}
+
+/// An effect in the instrument's own rack, and where it sits in the state's list.
+struct RackSlot {
+    index: usize,
+    fx: FxSlot,
+    auto: SlotAuto,
 }
 
 enum Core {
@@ -85,6 +101,7 @@ enum Core {
     Facet(Box<FmEngine>),
     Mist(Box<MistEngine>),
     Sampler(Box<Sampler>),
+    Pads(Box<PadBank>),
     AudioClip(Box<AudioClipper>),
     /// An instrument that makes no sound here (yet).
     Silent,
@@ -93,9 +110,13 @@ enum Core {
 pub struct Instrument {
     core: Core,
     arp: Option<Arpeggiator>,
-    rack: Vec<FxSlot>,
+    rack: Vec<RackSlot>,
     sr: f64,
     scratch: [Vec<f32>; 2],
+    gains: [Vec<f32>; 2],
+    plugin_id: String,
+    /// Nebula's master level.
+    master: f64,
 }
 
 fn cut_mul(m: f64) -> f64 {
@@ -115,6 +136,9 @@ struct LayerSpec {
     gain: f64,
     pan: f64,
     transpose: f64,
+    index: usize,
+    level: f64,
+    base: Value,
 }
 
 /// The layers a plugin state describes.
@@ -123,10 +147,13 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
     if plugin_id != "nebula" {
         let patch = merge_patch(&defaults, state.get("patch").unwrap_or(&Value::Null));
         return vec![LayerSpec {
+            base: patch.clone(),
             patch,
             gain: 1.0,
             pan: 0.0,
             transpose: 0.0,
+            index: 0,
+            level: 1.0,
         }];
     }
     let macros = state.get("macros");
@@ -140,11 +167,12 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
     let master = num(state.get("master"), 0.8);
     let mut out = Vec::new();
     let layers = state.get("layers").and_then(Value::as_array);
-    for l in layers.into_iter().flatten() {
+    for (index, l) in layers.into_iter().flatten().enumerate() {
         if l.get("on") == Some(&Value::Bool(false)) || !l.is_object() {
             continue;
         }
         let mut p = merge_patch(&defaults, l.get("patch").unwrap_or(&Value::Null));
+        let base = p.clone();
         if let Some(fs) = p.get_mut("filters").and_then(Value::as_array_mut) {
             for f in fs {
                 let c = (num(f.get("cutoff"), 1000.0) * cut_mul(cutoff)).clamp(20.0, 20000.0);
@@ -161,6 +189,9 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
         }
         out.push(LayerSpec {
             patch: p,
+            base,
+            index,
+            level: num(l.get("level"), 1.0),
             gain: num(l.get("level"), 1.0) * master,
             pan: num(l.get("pan"), 0.0),
             transpose: num(l.get("transpose"), 0.0),
@@ -178,6 +209,7 @@ impl Instrument {
         sr: f64,
         tables: &mut TableLibrary,
         sample: Option<Arc<Audio>>,
+        pad_samples: Vec<Option<Arc<Audio>>>,
     ) -> Result<Self, PatchError> {
         let core = match plugin_id {
             "facet" => {
@@ -209,14 +241,18 @@ impl Instrument {
                     e.apply_patch(&mut p);
                     layers.push(Layer {
                         engine: e,
-                        gain: spec.gain as f32,
-                        pan: spec.pan,
+                        gain: Param::new(f64::from(spec.gain as f32)),
+                        pan: Param::new(spec.pan),
                         transpose: spec.transpose,
+                        index: spec.index,
+                        level: spec.level,
+                        base: spec.base,
                     });
                 }
                 Core::Layers(layers)
             }
             "sampler" => Core::Sampler(Box::new(Sampler::new(state, sample, sr))),
+            "lumapad" => Core::Pads(Box::new(PadBank::new(state, pad_samples, sr))),
             "audioclip" => Core::AudioClip(Box::new(AudioClipper::new(state, sample, sr))),
             _ => Core::Silent,
         };
@@ -224,7 +260,7 @@ impl Instrument {
         let arp = arp_state.on.then(|| Arpeggiator::new(arp_state));
         let mut rack = Vec::new();
         let items = state.get("fx").and_then(Value::as_array);
-        for item in items.into_iter().flatten() {
+        for (index, item) in items.into_iter().flatten().enumerate() {
             let Some(id) = item
                 .get("type")
                 .and_then(Value::as_str)
@@ -242,7 +278,18 @@ impl Instrument {
             let mut slot = FxSlot::new(unit, sr);
             slot.enabled = item.get("on") != Some(&Value::Bool(false));
             slot.mix = 1.0;
-            rack.push(slot);
+            let auto = SlotAuto::new(
+                id,
+                item.get("state").unwrap_or(&Value::Null),
+                slot.enabled,
+                1.0,
+                sr,
+            );
+            rack.push(RackSlot {
+                index,
+                fx: slot,
+                auto,
+            });
         }
         Ok(Self {
             core,
@@ -250,6 +297,9 @@ impl Instrument {
             rack,
             sr,
             scratch: [Vec::new(), Vec::new()],
+            gains: [Vec::new(), Vec::new()],
+            plugin_id: plugin_id.to_string(),
+            master: num(state.get("master"), 0.8),
         })
     }
 
@@ -287,7 +337,7 @@ impl Instrument {
             }
             Core::Facet(e) => e.set_bpm(bpm),
             Core::Mist(e) => e.set_bpm(bpm),
-            Core::Sampler(_) | Core::AudioClip(_) | Core::Silent => {}
+            Core::Sampler(_) | Core::Pads(_) | Core::AudioClip(_) | Core::Silent => {}
         }
     }
 
@@ -327,7 +377,7 @@ impl Instrument {
             }
             Core::Facet(e) => e.queue(evs),
             Core::Mist(e) => e.queue(evs),
-            Core::Sampler(_) | Core::AudioClip(_) | Core::Silent => {}
+            Core::Sampler(_) | Core::Pads(_) | Core::AudioClip(_) | Core::Silent => {}
         }
     }
 
@@ -354,6 +404,10 @@ impl Instrument {
                 fine,
                 pan,
             );
+            return;
+        }
+        if let Core::Pads(p) = &mut self.core {
+            p.play_note(key as i32, vel, time, fine);
             return;
         }
         if let Core::AudioClip(c) = &mut self.core {
@@ -421,14 +475,14 @@ impl Instrument {
     /// Effects that follow the beat: where the song is, at block start.
     pub fn set_position(&mut self, beat: f64, bpm: f64) {
         for s in &mut self.rack {
-            s.unit
+            s.fx.unit
                 .set_position(las_dsp::fx::stepfx::Position { beat, bpm });
         }
     }
 
     /// Delay of the effects rack, seconds.
     pub fn latency(&self) -> f64 {
-        self.rack.iter().map(FxSlot::latency).sum()
+        self.rack.iter().map(|s| s.fx.latency()).sum()
     }
 
     /// Render a block into `l` and `r` (which it overwrites).
@@ -446,13 +500,21 @@ impl Instrument {
                     sl.fill(0.0);
                     sr.fill(0.0);
                     layer.engine.process(sl, sr, t0);
-                    if layer.gain != 1.0 {
+                    let frame = (t0 * self.sr).round() as usize;
+                    let [gain, pan] = &mut self.gains;
+                    gain.resize(n, 0.0);
+                    pan.resize(n, 0.0);
+                    layer.gain.fill(frame, gain, self.sr);
+                    layer.pan.fill(frame, pan, self.sr);
+                    if gain.iter().any(|&g| g != 1.0) {
                         for i in 0..n {
-                            sl[i] *= layer.gain;
-                            sr[i] *= layer.gain;
+                            sl[i] *= gain[i];
+                            sr[i] *= gain[i];
                         }
                     }
-                    stereo_pan(sl, sr, layer.pan);
+                    if pan.iter().any(|&p| p != 0.0) {
+                        stereo_pan_a(sl, sr, pan);
+                    }
                     for i in 0..n {
                         l[i] += sl[i];
                         r[i] += sr[i];
@@ -462,11 +524,154 @@ impl Instrument {
             Core::Facet(e) => e.process(l, r, t0),
             Core::Mist(e) => e.process(l, r, t0),
             Core::Sampler(s) => s.render((t0 * self.sr).round() as usize, l, r),
+            Core::Pads(p) => p.render((t0 * self.sr).round() as usize, l, r),
             Core::AudioClip(c) => c.render((t0 * self.sr).round() as usize, l, r),
             Core::Silent => {}
         }
+        let frame = (t0 * self.sr).round() as usize;
         for slot in &mut self.rack {
-            slot.process(l, r, None);
+            slot.auto.begin_block(frame, &mut slot.fx.unit);
+            let [wet, dry] = &mut self.gains;
+            wet.resize(n, 0.0);
+            dry.resize(n, 0.0);
+            slot.auto.wet.fill(frame, wet, self.sr);
+            slot.auto.dry.fill(frame, dry, self.sr);
+            slot.fx.process_gains(l, r, None, wet, dry);
+        }
+    }
+
+    /// Automate an instrument parameter through `normalised` points (time, 0 to 1).
+    /// Returns whether the instrument handles it.
+    pub fn automate(
+        &mut self,
+        path: &str,
+        normalised: &[(f64, f64)],
+        first: bool,
+        length: usize,
+    ) -> bool {
+        let def = plugin_param_def(&self.plugin_id, path);
+        let mapped = map_automation(Some(&def), normalised);
+        let points = &mapped[..];
+        if let Some(rest) = path.strip_prefix("fx.") {
+            let Some((index, sub)) = rest.split_once(".state.") else {
+                return false;
+            };
+            let Ok(index) = index.parse::<usize>() else {
+                return false;
+            };
+            // the rack's effects use the ranges the synth panels use for their names
+            let Some(slot) = self.rack.iter_mut().find(|s| s.index == index) else {
+                return false;
+            };
+            if sub != "mix" && slot.fx.unit.automate(sub, points, first) {
+                return true;
+            }
+            slot.auto
+                .automate_with(sub, normalised, first, length, Some(&def));
+            return true;
+        }
+        match &mut self.core {
+            Core::Layers(layers) if self.plugin_id != "nebula" => {
+                let Some(sub) = path.strip_prefix("patch.") else {
+                    return false;
+                };
+                for l in layers {
+                    l.engine.ramp(sub, points, first);
+                }
+                true
+            }
+            Core::Layers(layers) => {
+                let master = self.master;
+                if path == "master" {
+                    for l in layers {
+                        let pts: Vec<_> = points.iter().map(|&(t, v)| (t, v * l.level)).collect();
+                        l.gain.ramp(&pts, first);
+                    }
+                    return true;
+                }
+                if let Some(rest) = path.strip_prefix("layers.") {
+                    let Some((i, what)) = rest.split_once('.') else {
+                        return false;
+                    };
+                    let Ok(i) = i.parse::<usize>() else {
+                        return false;
+                    };
+                    let known = what == "level" || what == "pan" || what.starts_with("patch.");
+                    if !known {
+                        return false;
+                    }
+                    // a layer that is switched off has nothing to automate
+                    let Some(l) = layers.iter_mut().find(|l| l.index == i) else {
+                        return true;
+                    };
+                    if what == "level" {
+                        let pts: Vec<_> = points.iter().map(|&(t, v)| (t, v * master)).collect();
+                        l.gain.ramp(&pts, first);
+                    } else if what == "pan" {
+                        l.pan.ramp(points, first);
+                    } else {
+                        l.engine.ramp(&what[6..], points, first);
+                    }
+                    return true;
+                }
+                let Some(m) = path.strip_prefix("macros.") else {
+                    return false;
+                };
+                if !matches!(m, "cutoff" | "res" | "attack" | "release") {
+                    return false;
+                }
+                // a macro scales each layer's own values: one ramp per layer
+                let pts = densify(points, 0.02);
+                for l in layers {
+                    if m == "cutoff" || m == "res" {
+                        let filters = l.base.get("filters").and_then(Value::as_array).cloned();
+                        for (fi, f) in filters.into_iter().flatten().enumerate() {
+                            let values: Vec<(f64, f64)> = pts
+                                .iter()
+                                .map(|&(t, v)| {
+                                    let x = if m == "cutoff" {
+                                        (num(f.get("cutoff"), 1000.0) * cut_mul(v))
+                                            .clamp(20.0, 20000.0)
+                                    } else {
+                                        (num(f.get("res"), 0.0) + v).min(1.0)
+                                    };
+                                    (t, x)
+                                })
+                                .collect();
+                            l.engine.ramp(&format!("filters.{fi}.{m}"), &values, first);
+                        }
+                    } else {
+                        let key = if m == "attack" { "a" } else { "r" };
+                        let base = num(
+                            l.base.pointer("/env/0").and_then(|e| e.get(key)),
+                            if key == "a" { 0.01 } else { 0.2 },
+                        );
+                        let values: Vec<(f64, f64)> =
+                            pts.iter().map(|&(t, v)| (t, base * env_mul(v))).collect();
+                        l.engine.ramp(&format!("env.0.{key}"), &values, first);
+                    }
+                }
+                true
+            }
+            Core::Facet(e) => path.strip_prefix("patch.").is_some_and(|sub| {
+                e.ramp(sub, points, first);
+                true
+            }),
+            Core::Mist(e) => path.strip_prefix("patch.").is_some_and(|sub| {
+                e.ramp(sub, points, first);
+                true
+            }),
+            Core::Sampler(sm) => sm.automate(path, points, first),
+            Core::Pads(p) => p.automate(path, points, first),
+            Core::AudioClip(c) => {
+                if path == "gain" {
+                    c.automate_gain(points, first);
+                    true
+                } else {
+                    false
+                }
+            }
+            Core::Silent => false,
         }
     }
 }

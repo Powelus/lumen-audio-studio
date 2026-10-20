@@ -3,6 +3,7 @@
 //! routing, sidechain and plugin delay compensation. Port of the web version's
 //! `audio/mixer.ts`, which builds the same thing from Web Audio nodes.
 
+use crate::fxauto::{effect_param_def, map_automation, SlotAuto};
 use crate::instrument::stereo_pan_a;
 use crate::param::Param;
 use las_dsp::fx::registry::{descriptor, full_state, parse_params, EffectUnit, FxSlot};
@@ -70,7 +71,9 @@ struct Route {
 
 /// An effect slot of an insert, and where it sits in the model.
 struct Slot {
+    id: String,
     fx: FxSlot,
+    auto: SlotAuto,
     /// The insert that feeds its sidechain, if it takes one.
     sidechain: Option<usize>,
     takes_sidechain: bool,
@@ -105,6 +108,9 @@ pub struct Mixer {
     sc: [Vec<f32>; 2],
     /// Arrival time of each insert and its effects latency, seconds.
     arrival: Vec<f64>,
+    length: usize,
+    wet_gain: Vec<f32>,
+    dry_gain: Vec<f32>,
 }
 
 /// Inserts muted because another insert is soloed (FL semantics).
@@ -185,6 +191,8 @@ impl Mixer {
                 });
                 let sidechain = src.filter(|&x| x != i && x < n);
                 slots.push(Slot {
+                    id: s.id.clone(),
+                    auto: SlotAuto::new(&s.plugin_id, &s.state, s.enabled, s.mix, sr),
                     fx,
                     sidechain: if takes { sidechain } else { None },
                     takes_sidechain: takes,
@@ -293,6 +301,9 @@ impl Mixer {
             sr,
             sc: [vec![0.0; block], vec![0.0; block]],
             arrival,
+            length: usize::MAX,
+            wet_gain: Vec::new(),
+            dry_gain: Vec::new(),
         }
     }
 
@@ -361,6 +372,76 @@ impl Mixer {
 
     pub fn automate_master(&mut self, points: &[(f64, f64)], first: bool) {
         self.master.ramp(points, first);
+    }
+
+    /// Delay from the timeline to the input of effect slot `slot_id` on insert `index`.
+    pub fn path_latency(&self, index: usize, slot_id: &str) -> f64 {
+        let arrival = self.arrival.get(index).copied().unwrap_or(0.0);
+        let Some(t) = self.tracks.get(index) else {
+            return arrival;
+        };
+        if t.bypass {
+            return arrival;
+        }
+        let mut lat = arrival;
+        for s in &t.slots {
+            if s.id == slot_id {
+                break;
+            }
+            lat += s.fx.latency();
+        }
+        lat
+    }
+
+    /// Whether insert `index` has an effect slot `slot_id`.
+    pub fn has_slot(&self, index: usize, slot_id: &str) -> bool {
+        self.tracks
+            .get(index)
+            .is_some_and(|t| t.slots.iter().any(|s| s.id == slot_id))
+    }
+
+    /// The plugin id of an effect slot.
+    pub fn slot_plugin(&self, index: usize, slot_id: &str) -> Option<String> {
+        let t = self.tracks.get(index)?;
+        let s = t.slots.iter().find(|s| s.id == slot_id)?;
+        Some(s.auto.plugin_id().to_string())
+    }
+
+    /// Automate an effect parameter of an insert's slot through `points`
+    /// (normalised values in seconds).
+    pub fn automate_effect(
+        &mut self,
+        index: usize,
+        slot_id: &str,
+        path: &str,
+        points: &[(f64, f64)],
+        first: bool,
+    ) {
+        let length = self.length;
+        let Some(t) = self.tracks.get_mut(index) else {
+            return;
+        };
+        if let Some(s) = t.slots.iter_mut().find(|s| s.id == slot_id) {
+            // parameters the effect automates itself (Web Audio parameters)
+            if path != "mix" {
+                let def = effect_param_def(s.auto.plugin_id(), path);
+                let mapped = map_automation(def.as_ref(), points);
+                if s.fx.unit.automate(path, &mapped, first) {
+                    return;
+                }
+            }
+            s.auto.automate(path, points, first, length);
+        }
+    }
+
+    /// Frames the render lasts.
+    pub fn length(&self) -> usize {
+        self.length
+    }
+
+    /// Frames the render lasts, for the state updates that fall after it.
+    pub fn set_length(&mut self, frames: usize) {
+        self.length = frames;
     }
 
     /// Delay from the timeline to insert `index`'s output, seconds.
@@ -441,7 +522,14 @@ impl Mixer {
                     let t = &mut self.tracks[i];
                     let [sl, sr] = &mut t.sum;
                     let sc = takes.then_some((&self.sc[0][..], &self.sc[1][..]));
-                    t.slots[s].fx.process(sl, sr, sc);
+                    let slot = &mut t.slots[s];
+                    slot.auto.begin_block(frame, &mut slot.fx.unit);
+                    self.wet_gain.resize(n, 0.0);
+                    self.dry_gain.resize(n, 0.0);
+                    slot.auto.wet.fill(frame, &mut self.wet_gain, self.sr);
+                    slot.auto.dry.fill(frame, &mut self.dry_gain, self.sr);
+                    slot.fx
+                        .process_gains(sl, sr, sc, &self.wet_gain, &self.dry_gain);
                 }
             }
             // width, pan, fader, mute
