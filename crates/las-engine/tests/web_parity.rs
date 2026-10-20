@@ -5,7 +5,7 @@
 //! The web version builds its mixer from Web Audio nodes, so the two are not
 //! bit for bit; the check is that the error is far below the signal.
 
-use las_engine::{render_mix, Mode, RenderOptions};
+use las_engine::{render_mix, render_mix_with, Mode, RenderOptions};
 use las_project::decode;
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -35,7 +35,7 @@ fn compare(name: &str) -> Diff {
         tail: 0.5,
         mode: Mode::Song,
     };
-    let got = render_mix(&bundle.project, &opts).expect("renders");
+    let got = render_mix_with(&bundle.project, &bundle.samples, &opts).expect("renders");
     let want = floats(&fixture(&format!("{name}.f32")));
     let frames = want.len() / 2;
     let (wl, wr) = want.split_at(frames);
@@ -124,7 +124,8 @@ fn web_audio_effects_match_closely() {
 /// Effect and instrument parameters changed by automation clips: ramps in the worklet effects,
 /// the slot's mix, and state updates on a grid, where Web Audio smooths each change
 /// with a time constant (a biquad filter evaluates its parameters once per channel).
-const AUTOMATED: [&str; 23] = [
+const AUTOMATED: [&str; 24] = [
+    "ipa_usertable",
     "ipa_pad",
     "ipa_polaris",
     "ipa_nebula",

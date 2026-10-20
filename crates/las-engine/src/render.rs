@@ -416,6 +416,45 @@ impl Scheduler<'_> {
     }
 }
 
+/// Single-cycle frames of a sample for a wavetable: 2048 samples each, up to 256.
+fn slice_frames(data: &[f32]) -> Vec<Vec<f32>> {
+    const SIZE: usize = 2048;
+    if data.len() < SIZE {
+        return vec![data.to_vec()];
+    }
+    let count = (data.len() / SIZE).clamp(1, 256);
+    (0..count)
+        .map(|i| data[i * SIZE..(i + 1) * SIZE].to_vec())
+        .collect()
+}
+
+/// Build the wavetable for every `user:` id in `value`.
+fn register_user_tables(
+    value: &serde_json::Value,
+    library: &mut Library,
+    tables: &mut TableLibrary,
+) {
+    match value {
+        serde_json::Value::String(id) => {
+            if let Some(sample) = id.strip_prefix("user:") {
+                if let Some(audio) = library.get(sample) {
+                    if let Some(first) = audio.channels.first() {
+                        let table = las_dsp::wavetable::table_from_frames(&slice_frames(first));
+                        tables.register(id, table);
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a
+            .iter()
+            .for_each(|v| register_user_tables(v, library, tables)),
+        serde_json::Value::Object(o) => o
+            .values()
+            .for_each(|v| register_user_tables(v, library, tables)),
+        _ => {}
+    }
+}
+
 /// Render the project's mix offline (the factory samples only).
 pub fn render_mix(project: &Project, opts: &RenderOptions) -> Result<Rendered, String> {
     render_mix_with(project, &BTreeMap::new(), opts)
@@ -508,6 +547,10 @@ fn render_taps(
     let mut tables = TableLibrary::new();
     let mut channels = Vec::new();
     let mut index = HashMap::new();
+    // wavetables made from samples (`user:<sample id>` in a patch)
+    for c in &project.channels {
+        register_user_tables(&c.state, &mut library, &mut tables);
+    }
     let last_track = project.mixer.len().saturating_sub(1);
     for c in &project.channels {
         let sample = c.sample_id.as_deref().and_then(|id| library.get(id));

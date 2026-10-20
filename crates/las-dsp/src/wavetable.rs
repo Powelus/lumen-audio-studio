@@ -408,7 +408,7 @@ fn build_builtin(def: &Def) -> Table {
 
 /// Builds tables once and shares them. Unknown ids give the saw table, as in
 /// the original.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TableLibrary {
     cache: HashMap<String, Arc<Table>>,
     user: HashMap<String, Arc<Table>>,

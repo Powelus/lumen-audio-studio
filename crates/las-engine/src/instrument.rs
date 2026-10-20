@@ -237,6 +237,7 @@ impl Instrument {
                 let mut layers = Vec::new();
                 for spec in layers_from_state(plugin_id, state) {
                     let mut e = synth_engine(sr, 1);
+                    e.set_tables(tables.clone());
                     let mut p = prepare_synth_patch(tables, &spec.patch)?;
                     e.apply_patch(&mut p);
                     layers.push(Layer {

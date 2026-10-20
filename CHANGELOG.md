@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.13 - 2026-10-20
+
+Export, and wavetables made from samples.
+
+- `las midi song.las` writes the notes as a type 1 standard MIDI file, one track per channel with notes, byte for byte the file the web version writes (checked on the demo song, whole and one pattern).
+- `las render-project` writes WAV at 16, 24 or 32 bit (`--bits`, with the web version's dither at 16 bit) or FLAC at 16 or 24 bit (`--format flac`), can scale the peak to -0.3 dB (`--normalize`), and with `--stems <dir>` writes the master and each used insert after its fader, each trimmed by its own plugin delay (checked against the web stems).
+- A wavetable made from a stored sample (`user:<sample>` in a patch, as in Vortex) plays: the sample is cut into 2048 sample frames and turned into a table. The synths keep the project's tables when automation changes their patch.
+- Not yet: MP3 export, and automation of the maximizer.
+
 ## 0.2.0-alpha.12 - 2026-10-20
 
 Automation of effect and instrument parameters.

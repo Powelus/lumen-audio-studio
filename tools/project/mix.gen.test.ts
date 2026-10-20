@@ -12,6 +12,7 @@ import { it } from 'vitest';
 import { createChannel, createEffectSlot, emptyProject } from '../src/core/project';
 import type { Project } from '../src/core/types';
 import { encodeLas } from '../src/storage/lasFormat';
+import { encodeWav } from '../src/formats/wav';
 
 const out = process.env.MIX_OUT!;
 const BEAT = 96;
@@ -40,6 +41,8 @@ function place(p: Project, beats: number) {
   p.playlist.clips.push({ id: 'clip1', kind: 'pattern', refId: p.patterns[0].id, track: 0, start: 0, length: beats * BEAT, offset: 0 });
 }
 
+/** Samples stored in a case's file, by case name. */
+const stored: Record<string, Map<string, { data: Uint8Array; name: string; mime: string }>> = {};
 const cases: Record<string, () => Project> = {
   // one polaris voice, three notes, straight to the master
   single: () => {
@@ -423,11 +426,25 @@ ipa('ipa_pad', (p) => {
   return ch.id;
 }, [['lv', 'pads.0.level', 0, 8], ['pn', 'pads.1.pan', 2, 4], ['tu', 'pads.3.tune', 0, 8]]);
 
+// a wavetable made from a stored sample
+ipa('ipa_usertable', (p) => {
+  const sr = 24000;
+  const frames = 6;
+  const data = new Float32Array(frames * 2048);
+  for (let f = 0; f < frames; f++) for (let i = 0; i < 2048; i++) data[f * 2048 + i] = 0.7 * Math.sin((2 * Math.PI * i) / 2048 + f * 0.3 * Math.sin((4 * Math.PI * i) / 2048)) * (1 - f / 10);
+  stored.ipa_usertable = new Map([['smp_wt', { data: new Uint8Array(encodeWav([data], sr, 32)), name: 'wt.wav', mime: 'audio/wav' }]]);
+  p.samples.push({ id: 'smp_wt', name: 'wt.wav' } as never);
+  const ch = createChannel('polaris', { name: 'User', mixerTrack: 1, state: { patch: patch('user:smp_wt', { env: [{ a: 0.005, h: 0, d: 0.2, s: 1, r: 0.15 }] }), fx: [], arp: { on: false } } });
+  p.channels.push(ch);
+  p.patterns[0].notes[ch.id] = [note(48, 0, 2, 0.9), note(55, 2, 2, 0.8), note(60, 4, 3, 1)];
+  return ch.id;
+}, [['cut', 'patch.filters.0.cutoff', 0, 4]]);
+
 it('writes the mix projects', async () => {
   mkdirSync(out, { recursive: true });
   for (const [name, make] of Object.entries(cases)) {
     const p = make();
-    writeFileSync(`${out}/${name}.las`, await encodeLas(p, new Map(), { encrypt: false }));
+    writeFileSync(`${out}/${name}.las`, await encodeLas(p, stored[name] ?? new Map(), { encrypt: false }));
     console.log(name, p.channels.length);
   }
 });
