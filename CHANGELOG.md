@@ -2,6 +2,14 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.22
+
+Instrument windows for the project's channels.
+
+- Double click a channel's name in the rack to open its instrument. Facet, Mist and the wavetable family (Polaris, Vortex, Monolith, Zenith, TriOsc) open in the synth panels with the channel's own patch and effects loaded, and every edit, preset change and effect change is written back to the channel through undo and saved with the project; the next play uses it. Right click a name for its piano roll.
+- Instruments without a panel yet (Nebula, Sampler, LumaPad) open a basic editor that lists the channel's settings (numbers, switches and text) and writes them back the same way.
+- A knob drag is one undo step, not one per movement.
+
 ## 0.2.0-alpha.21
 
 The window now looks and works like the web version.

@@ -65,6 +65,8 @@ pub struct ProjectState {
     redo: Vec<Arc<Project>>,
     /// Changed since it was opened or saved.
     pub dirty: bool,
+    /// The kind and time of the last coalesced edit.
+    last_edit: Option<(String, std::time::Instant)>,
     /// The player no longer matches the project and is rebuilt when things are quiet.
     stale: bool,
 }
@@ -88,6 +90,7 @@ impl ProjectState {
         self.redo.clear();
         self.dirty = false;
         self.stale = false;
+        self.last_edit = None;
         Ok(())
     }
 
@@ -193,6 +196,20 @@ impl ProjectState {
                 self.stale = true;
             }
         }
+    }
+
+    /// Change the project, starting an undo step only when this is a different kind of
+    /// change from the last one or more than a moment after it: a knob drag is one step.
+    pub fn modify_coalesced(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
+        let now = std::time::Instant::now();
+        let fresh = match &self.last_edit {
+            Some((k, t)) => {
+                k != key || now.duration_since(*t) > std::time::Duration::from_millis(1200)
+            }
+            None => true,
+        };
+        self.last_edit = Some((key.to_string(), now));
+        self.modify(fresh, f);
     }
 
     pub fn undo(&mut self) {

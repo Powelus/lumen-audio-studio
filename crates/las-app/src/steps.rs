@@ -129,8 +129,10 @@ pub struct Out {
     /// Note edits, with the channel each belongs to.
     pub notes: Vec<(usize, Edit)>,
     pub chans: Vec<ChanEdit>,
-    /// A channel whose name was double-clicked: open its piano roll.
+    /// A channel whose name was right-clicked: open its piano roll.
     pub open_roll: Option<usize>,
+    /// A channel whose name was double-clicked: open its instrument.
+    pub open_synth: Option<usize>,
 }
 
 pub fn draw(
@@ -230,8 +232,12 @@ pub fn draw(
                         *selected = i;
                     }
                     if resp.double_clicked() {
+                        out.open_synth = Some(i);
+                    }
+                    if resp.secondary_clicked() {
                         out.open_roll = Some(i);
                     }
+                    resp.on_hover_text("Double click: instrument. Right click: piano roll.");
                     // the steps
                     let width = steps as f32 * (STEP + 3.0) + (steps / 4) as f32 * 4.0;
                     let (area, resp) =

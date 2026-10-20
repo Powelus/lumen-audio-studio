@@ -344,6 +344,7 @@ impl App {
 
     /// Send the whole chain of an instrument to the audio thread.
     pub(crate) fn rebuild_chain(&mut self, inst: crate::audio::Instrument) {
+        self.synth_dirty = true;
         let slots: Vec<FxSlot> = self.fx[index(inst)]
             .iter()
             .filter_map(|item| self.build_slot(item))
@@ -376,6 +377,7 @@ impl App {
 
     /// The effect at `slot` changed: send its new parameters.
     fn push_fx(&mut self, inst: crate::audio::Instrument, slot: usize) {
+        self.synth_dirty = true;
         let item = &self.fx[index(inst)][slot];
         match parse_params(&item.id, &item.state, self.rate()) {
             Ok(p) => {

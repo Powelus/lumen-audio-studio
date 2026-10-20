@@ -740,6 +740,7 @@ impl App {
                         );
                     if r.clicked() {
                         if let Some(i) = inst {
+                            self.bound = None;
                             self.switch(i);
                             self.shell.open.synth = true;
                         }
@@ -888,7 +889,10 @@ impl App {
         if open.synth {
             win("Synth", a.min + vec2(200.0, 30.0), vec2(860.0, 640.0))
                 .open(&mut open.synth)
-                .show(ctx, |ui| self.synth_window(ui));
+                .show(ctx, |ui| match self.bound {
+                    Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
+                    _ => self.synth_window(ui),
+                });
         }
         if open.export {
             egui::Window::new("Export audio")
@@ -952,6 +956,9 @@ impl App {
             self.project.channel = c;
             self.shell.open.roll = true;
         }
+        if let Some(c) = out.open_synth {
+            self.open_channel(c);
+        }
         for (ch, e) in &out.notes {
             self.project.edit_channel(*ch, std::slice::from_ref(e));
         }
@@ -971,6 +978,18 @@ impl App {
     }
 
     fn synth_window(&mut self, ui: &mut Ui) {
+        if let (Some(b), Some(l)) = (self.bound, &self.project.loaded) {
+            if let Some(c) = l.project.channels.get(b.channel()) {
+                ui.label(
+                    RichText::new(format!("{}  ({})", c.name, c.plugin_id))
+                        .strong()
+                        .size(15.0)
+                        .color(pal().accent_text),
+                );
+            }
+        } else {
+            ui.label(RichText::new("Stand-alone synth (not part of the project)").weak());
+        }
         ui.horizontal(|ui| {
             for (inst, name) in [
                 (Instrument::Polaris, "Polaris"),
