@@ -2,6 +2,13 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.42
+
+Keyboard shortcuts.
+
+- Help > Keyboard shortcuts (or F1) lists the shortcuts of the whole app, the piano roll, the playlist and the mixer.
+- Ctrl+N and Ctrl+O now make a new project and open one, as the File menu said they would (asking first when there are unsaved changes, as the menu does).
+
 ## 0.2.0-alpha.41
 
 Swing per channel.

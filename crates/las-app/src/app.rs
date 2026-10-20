@@ -1483,6 +1483,19 @@ impl App {
         if save {
             self.save_project();
         }
+        let (new, open) = ctx.input(|i| {
+            let c = i.modifiers.command && !i.modifiers.shift;
+            (
+                c && i.key_pressed(egui::Key::N),
+                c && i.key_pressed(egui::Key::O),
+            )
+        });
+        if new {
+            self.guard(crate::menus::Action::New);
+        }
+        if open {
+            self.guard(crate::menus::Action::Open);
+        }
         let space =
             ctx.input(|i| i.key_pressed(egui::Key::Space)) && ctx.memory(|m| m.focused().is_none());
         if space {
