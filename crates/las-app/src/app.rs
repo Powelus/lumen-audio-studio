@@ -67,6 +67,7 @@ pub struct FxItem {
 pub enum View {
     Sound,
     Effects,
+    Project,
 }
 
 pub struct App {
@@ -102,6 +103,8 @@ pub struct App {
     pub(crate) view: View,
     /// Tempo for the effects that follow the beat.
     pub(crate) bpm: f64,
+    /// The open project and its player.
+    pub(crate) project: crate::project::ProjectState,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -159,6 +162,7 @@ impl App {
             typed: Vec::new(),
             clicked: None,
             error: None,
+            project: Default::default(),
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
@@ -169,6 +173,10 @@ impl App {
         }
         if std::env::args().any(|a| a == "--facet") {
             app.switch(Instrument::Facet);
+        }
+        // `lumen song.las` opens a project
+        if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
+            app.open_project(&path);
         }
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
@@ -1340,6 +1348,24 @@ impl App {
     }
 
     /// Computer keyboard: play notes, change octave. Mouse: the on-screen piano.
+    /// A key played from the screen or the computer keyboard: the project's selected
+    /// channel while its page is open, otherwise the synth on the other pages.
+    fn note(&mut self, key: u8, vel: f64, on: bool) {
+        let c = if self.view == View::Project && self.project.has_player {
+            Command::PlayerNote {
+                channel: self.project.channel,
+                key,
+                vel,
+                on,
+            }
+        } else if on {
+            Command::NoteOn { key, vel }
+        } else {
+            Command::NoteOff { key }
+        };
+        self.send(c);
+    }
+
     fn keys(&mut self, ctx: &egui::Context) {
         let events = ctx.input(|i| i.events.clone());
         for e in events {
@@ -1358,14 +1384,11 @@ impl App {
                     if pressed && !self.typed.iter().any(|(k, _)| *k == key) {
                         let note = (12 * (self.octave + 1) + *semis as i32).clamp(0, 127) as u8;
                         self.typed.push((key, note));
-                        self.send(Command::NoteOn {
-                            key: note,
-                            vel: 0.8,
-                        });
+                        self.note(note, 0.8, true);
                     } else if !pressed {
                         if let Some(p) = self.typed.iter().position(|(k, _)| *k == key) {
                             let (_, note) = self.typed.remove(p);
-                            self.send(Command::NoteOff { key: note });
+                            self.note(note, 0.0, false);
                         }
                     }
                 } else if pressed && key == egui::Key::Z {
@@ -1394,10 +1417,10 @@ impl App {
         let pressed = piano(ui, 36, 96, &held);
         if pressed != self.clicked {
             if let Some(old) = self.clicked {
-                self.send(Command::NoteOff { key: old });
+                self.note(old, 0.0, false);
             }
             if let Some(new) = pressed {
-                self.send(Command::NoteOn { key: new, vel: 0.8 });
+                self.note(new, 0.8, true);
             }
             self.clicked = pressed;
         }
@@ -1414,7 +1437,12 @@ impl eframe::App for App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
+        self.poll_project();
         for path in dropped {
+            if path.extension().is_some_and(|e| e == "las") {
+                self.open_project(&path.to_string_lossy());
+                continue;
+            }
             match self.load_wav(&path) {
                 Ok(()) => {
                     self.error = None;
@@ -1464,8 +1492,13 @@ impl eframe::App for App {
                     format!("Effects ({n})")
                 };
                 ui.selectable_value(&mut self.view, View::Effects, label);
+                ui.selectable_value(&mut self.view, View::Project, "Project");
             });
             ui.separator();
+            if self.view == View::Project {
+                egui::ScrollArea::both().show(ui, |ui| self.project_view(ui));
+                return;
+            }
             if self.view == View::Effects {
                 egui::ScrollArea::both().show(ui, |ui| self.effects_view(ui));
                 return;

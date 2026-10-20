@@ -9,6 +9,7 @@ mod audio;
 mod fxui;
 mod midi;
 mod presets;
+mod project;
 mod widgets;
 
 fn main() -> eframe::Result {
