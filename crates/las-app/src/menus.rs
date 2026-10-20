@@ -110,6 +110,56 @@ pub fn import_wav(
     Ok(at)
 }
 
+/// Add a WAV file to a project as an audio clip in the playlist, as FL Studio does when
+/// a sample is dropped on it: an audio clip channel plays the file, and a clip as long
+/// as the file (at the project's tempo) sits at `at` ticks on `track`. Returns the
+/// channel's index.
+pub fn import_audio_clip(
+    p: &mut Project,
+    samples: &mut std::collections::BTreeMap<String, las_project::Sample>,
+    name: &str,
+    bytes: Vec<u8>,
+    at: f64,
+    track: usize,
+) -> Result<usize, String> {
+    let audio =
+        las_engine::library::decode_wav(&bytes).ok_or("not a WAV file this app can read")?;
+    let seconds = audio.frames() as f64 / audio.sample_rate;
+    let id = las_project::create::uid("smp_");
+    p.samples.push(las_project::SampleRef {
+        id: id.clone(),
+        name: name.to_string(),
+        duration: Some(seconds),
+        ..las_project::SampleRef::default()
+    });
+    samples.insert(
+        id.clone(),
+        las_project::Sample {
+            name: name.to_string(),
+            mime: "audio/wav".into(),
+            data: bytes,
+        },
+    );
+    let ch = add_channel(p, "audioclip");
+    p.channels[ch].name = name.to_string();
+    p.channels[ch].sample_id = Some(id);
+    let insert = p.channels[ch].mixer_track;
+    if let Some(t) = p.mixer.get_mut(insert) {
+        t.name = name.to_string();
+    }
+    let ticks = seconds * p.bpm / 60.0 * f64::from(las_project::PPQ);
+    p.playlist.clips.push(las_project::Clip {
+        id: las_project::create::uid("clip_"),
+        kind: las_project::ClipKind::Audio,
+        ref_id: p.channels[ch].id.clone(),
+        track,
+        start: at.max(0.0),
+        length: ticks.max(1.0),
+        ..Default::default()
+    });
+    Ok(ch)
+}
+
 /// Add a factory sample as a sampler channel.
 pub fn add_factory(p: &mut Project, id: &str, name: &str) -> usize {
     if !p.samples.iter().any(|s| s.id == id) {
@@ -161,6 +211,31 @@ impl App {
         match result {
             Ok(at) => {
                 self.project.channel = at;
+                self.project.error = None;
+            }
+            Err(e) => self.project.error = Some(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// Add the WAV file at `path` as an audio clip at `at` ticks on `track`.
+    pub(crate) fn import_clip_path(&mut self, path: &std::path::Path, at: f64, track: usize) {
+        let name = path
+            .file_stem()
+            .map_or("Audio".to_string(), |s| s.to_string_lossy().into_owned());
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.project.error = Some(format!("{}: {e}", path.display()));
+                return;
+            }
+        };
+        let mut result = Ok(0);
+        self.project.modify_with_samples(true, |p, samples| {
+            result = import_audio_clip(p, samples, &name, bytes, at, track);
+        });
+        match result {
+            Ok(ch) => {
+                self.project.channel = ch;
                 self.project.error = None;
             }
             Err(e) => self.project.error = Some(format!("{}: {e}", path.display())),
@@ -545,6 +620,48 @@ mod tests {
         }
         w.finalize().unwrap();
         out.into_inner()
+    }
+
+    #[test]
+    fn a_wav_dropped_on_the_playlist_becomes_an_audio_clip_that_plays_there() {
+        let mut p = las_project::create::empty_project("x");
+        p.bpm = 120.0;
+        let mut samples = Default::default();
+        // one bar in at 120 BPM is two seconds; the file lasts one second
+        let bar = f64::from(las_project::PPQ) * 4.0;
+        let ch = import_audio_clip(&mut p, &mut samples, "Vox", wav(1.0), bar, 2).unwrap();
+        let c = &p.channels[ch];
+        assert_eq!(
+            (c.name.as_str(), c.plugin_id.as_str()),
+            ("Vox", "audioclip")
+        );
+        let clip = p.playlist.clips.last().unwrap();
+        assert_eq!(clip.kind, las_project::ClipKind::Audio);
+        assert_eq!((clip.ref_id.as_str(), clip.track), (c.id.as_str(), 2));
+        assert_eq!(clip.start, bar);
+        // one second at 120 BPM is two beats
+        assert!((clip.length - f64::from(las_project::PPQ) * 2.0).abs() < 1.0);
+        let r = las_engine::render_mix_with(
+            &p,
+            &samples,
+            &las_engine::RenderOptions {
+                sample_rate: 24000.0,
+                tail: 0.2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let level = |a: f64, b: f64| {
+            r.left[(a * 24000.0) as usize..(b * 24000.0) as usize]
+                .iter()
+                .fold(0f32, |m, s| m.max(s.abs()))
+        };
+        assert!(level(0.0, 1.9) < 1e-4, "silent before the clip");
+        assert!(
+            level(2.0, 2.5) > 0.1,
+            "the clip sounds where it was dropped"
+        );
+        assert!(import_audio_clip(&mut p, &mut samples, "x", b"no".to_vec(), 0.0, 0).is_err());
     }
 
     #[test]

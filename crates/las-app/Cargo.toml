@@ -23,6 +23,7 @@ rtrb = "0.4.0"
 serde_json = "1"
 hound = "3"
 rfd = "0.17.2"
+memory-stats = "1"
 
 [lints]
 workspace = true
