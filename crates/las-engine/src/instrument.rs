@@ -5,6 +5,7 @@
 
 use crate::arp::{ArpState, Arpeggiator, Transport};
 use crate::audioclip::{AudioClipper, ClipPlayback};
+use crate::external::{plugin_host, Hosted, PLUGIN_ID};
 use crate::factory::Audio;
 use crate::fxauto::{densify, map_automation, SlotAuto};
 use crate::param::Param;
@@ -103,6 +104,8 @@ enum Core {
     Sampler(Box<Sampler>),
     Pads(Box<PadBank>),
     AudioClip(Box<AudioClipper>),
+    /// A hosted plugin.
+    Hosted(Box<Hosted>),
     /// An instrument that makes no sound here (yet).
     Silent,
 }
@@ -255,6 +258,9 @@ impl Instrument {
             "sampler" => Core::Sampler(Box::new(Sampler::new(state, sample, sr))),
             "lumapad" => Core::Pads(Box::new(PadBank::new(state, pad_samples, sr))),
             "audioclip" => Core::AudioClip(Box::new(AudioClipper::new(state, sample, sr))),
+            PLUGIN_ID => plugin_host()
+                .and_then(|h| h.instrument(state, sr))
+                .map_or(Core::Silent, |p| Core::Hosted(Box::new(Hosted::new(p, sr)))),
             _ => Core::Silent,
         };
         let arp_state = ArpState::from_json(state.get("arp"));
@@ -338,7 +344,11 @@ impl Instrument {
             }
             Core::Facet(e) => e.set_bpm(bpm),
             Core::Mist(e) => e.set_bpm(bpm),
-            Core::Sampler(_) | Core::Pads(_) | Core::AudioClip(_) | Core::Silent => {}
+            Core::Sampler(_)
+            | Core::Pads(_)
+            | Core::AudioClip(_)
+            | Core::Hosted(_)
+            | Core::Silent => {}
         }
     }
 
@@ -378,6 +388,15 @@ impl Instrument {
             }
             Core::Facet(e) => e.queue(evs),
             Core::Mist(e) => e.queue(evs),
+            Core::Hosted(h) => {
+                for e in evs {
+                    match *e {
+                        Event::On { time, key, vel, .. } => h.on(time, key, vel),
+                        Event::Off { time, key } => h.off(time, key),
+                        _ => {}
+                    }
+                }
+            }
             Core::Sampler(_) | Core::Pads(_) | Core::AudioClip(_) | Core::Silent => {}
         }
     }
@@ -465,6 +484,7 @@ impl Instrument {
             Core::Sampler(s) => s.stop(time),
             Core::Pads(p) => p.stop(time),
             Core::AudioClip(c) => c.stop(time),
+            Core::Hosted(h) => h.stop(time),
             Core::Silent => {}
         }
     }
@@ -576,6 +596,7 @@ impl Instrument {
             Core::Sampler(s) => s.render((t0 * self.sr).round() as usize, l, r),
             Core::Pads(p) => p.render((t0 * self.sr).round() as usize, l, r),
             Core::AudioClip(c) => c.render((t0 * self.sr).round() as usize, l, r),
+            Core::Hosted(h) => h.render(t0, l, r),
             Core::Silent => {}
         }
         let frame = (t0 * self.sr).round() as usize;
@@ -721,7 +742,7 @@ impl Instrument {
                     false
                 }
             }
-            Core::Silent => false,
+            Core::Hosted(_) | Core::Silent => false,
         }
     }
 }

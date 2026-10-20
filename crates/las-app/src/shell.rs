@@ -752,6 +752,7 @@ impl App {
                 }
                 ui.label(&d.name).on_hover_text(&d.description);
             }
+            self.hosted_list(ui);
         });
     }
 
@@ -885,6 +886,7 @@ impl App {
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
                     Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
+                    Some(crate::inst::Bound::Hosted(c)) => self.hosted_channel(ui, c),
                     Some(crate::inst::Bound::Sampler(c)) => self.sampler_window(ui, c),
                     _ => self.synth_window(ui),
                 });

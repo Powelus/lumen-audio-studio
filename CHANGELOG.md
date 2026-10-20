@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.30
+
+Plugin hosting: CLAP plugins load as instruments and as effects.
+
+- New crate `las-host` (on the `clack` host library) finds `.clap` plugins in the usual folders and in `CLAP_PATH`, reads what each one is (instrument, effect or both) and runs them: notes in and audio out for an instrument, audio in and out for an effect, with sample accurate note timing, parameter changes and the plugin's saved state. The engine only knows a small `PluginHost` interface, so offline renders, exports and the live player all play hosted plugins the same way.
+- The browser's Plugins tab lists the plugins found (with Rescan). A click on an instrument adds it as a channel; the "+ Slot" menu of a mixer insert lists the effects. The window of a channel or slot shows a slider for each parameter of the plugin; the values are saved in the project with the plugin's id (never a file path, so a project cannot make the app load an arbitrary file). A project that names a plugin that is not installed plays silent (a channel) or is skipped (an effect) instead of failing to open.
+- `las-testplug` is a small CLAP plugin made for the tests (a gain parameter, a sine from note events, state). The tests load it as a real library: scanning, effect and instrument processing, note offsets, block splitting, parameters, state round trip, and whole projects rendered by the engine with it as an instrument and as an effect.
+- Not yet: VST3, the plugins' own windows, plugin state beyond parameters, and running plugins in a separate process (a crashing plugin can still take the app down).
+
 ## 0.2.0-alpha.26
 
 Selecting, moving and copying in the editors.

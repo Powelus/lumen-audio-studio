@@ -8,6 +8,7 @@ mod app;
 mod audio;
 mod auto;
 mod fxui;
+mod hosted;
 mod inst;
 mod menus;
 mod mfx;
@@ -29,6 +30,11 @@ fn main() -> eframe::Result {
         println!("lumen {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // plugins are looked for in the background; the browser lists what is found
+    las_host::install();
+    std::thread::spawn(|| {
+        las_host::rescan(&las_host::search_paths());
+    });
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Lumen Audio Studio")

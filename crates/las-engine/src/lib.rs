@@ -2,6 +2,7 @@
 pub mod arp;
 pub mod audioclip;
 pub mod export;
+pub mod external;
 pub mod factory;
 pub mod fxauto;
 pub mod instrument;

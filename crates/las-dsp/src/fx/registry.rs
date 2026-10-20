@@ -414,6 +414,24 @@ impl StereoEffect for Meter {
     }
 }
 
+/// An effect made outside this crate, for example a hosted plugin.
+pub trait External: Send {
+    /// Process a block (`out` is the same length as `in`).
+    fn process(
+        &mut self,
+        in_l: &[f32],
+        in_r: &[f32],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+    );
+
+    /// Delay the effect adds, seconds.
+    fn latency(&self) -> f64 {
+        0.0
+    }
+}
+
 /// A running effect.
 #[allow(clippy::large_enum_variant)]
 pub enum EffectUnit {
@@ -438,6 +456,7 @@ pub enum EffectUnit {
     Hall(Hall),
     StepFx(StepFx),
     Meter(Meter),
+    External(Box<dyn External>),
     /// The scope draws from what passes; the audio is unchanged.
     Pass,
 }
@@ -466,6 +485,7 @@ macro_rules! each {
             EffectUnit::Hall($fx) => $body,
             EffectUnit::StepFx($fx) => $body,
             EffectUnit::Meter($fx) => $body,
+            EffectUnit::External($fx) => $body,
             EffectUnit::Pass => $none,
         }
     };
