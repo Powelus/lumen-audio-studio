@@ -44,11 +44,12 @@ enum Start {
 }
 
 /// What a rename dialog renames.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RenameTarget {
     Channel(usize),
     Pattern(usize),
     Track(usize),
+    Marker(String),
 }
 
 #[derive(Default)]
@@ -188,6 +189,16 @@ impl ProjectState {
                         .get(*t)
                         .map_or_else(|| format!("Track {}", t + 1), |x| x.name.clone());
                     self.rename = Some((RenameTarget::Track(*t), name));
+                }
+                PlEdit::AskRenameMarker(id) => {
+                    let name = l
+                        .project
+                        .markers
+                        .iter()
+                        .flatten()
+                        .find(|m| &m.id == id)
+                        .map_or_else(String::new, |m| m.name.clone());
+                    self.rename = Some((RenameTarget::Marker(id.clone()), name));
                 }
                 _ => {
                     playlist::apply(Arc::make_mut(&mut l.project), e);
@@ -576,6 +587,44 @@ impl App {
                     .edit_channel(ch, &[Edit::Begin, Edit::Quantize { snap }]);
                 let _ = pattern;
             }
+            ui.menu_button("Tools", |ui| {
+                let ids: Vec<String> = self.project.roll.selected.iter().cloned().collect();
+                ui.label(if ids.is_empty() {
+                    "On all notes"
+                } else {
+                    "On the selected notes"
+                });
+                let mut run = None;
+                for (name, op, tip) in roll::NOTE_TOOLS {
+                    if ui.button(name).on_hover_text(tip).clicked() {
+                        run = Some(match op {
+                            roll::NoteTool::Humanize(_) => roll::NoteTool::Humanize(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(1, |d| d.as_nanos() as u64),
+                            ),
+                            o => o,
+                        });
+                    }
+                }
+                if let Some((root, steps)) = self.project.roll.scale {
+                    if ui
+                        .button("Snap to scale")
+                        .on_hover_text(
+                            "Move keys outside the highlighted scale to the nearest one in it",
+                        )
+                        .clicked()
+                    {
+                        run = Some(roll::NoteTool::ToScale(root, steps));
+                    }
+                }
+                if let Some(op) = run {
+                    let ch = self.project.channel;
+                    self.project
+                        .edit_channel(ch, &[Edit::Begin, Edit::Tool { op, ids }]);
+                    ui.close();
+                }
+            });
             ui.checkbox(&mut self.project.roll.ghost, "Ghost notes");
             let roll = &mut self.project.roll;
             let scale_name = roll.scale.map_or("No scale".to_string(), |(root, steps)| {

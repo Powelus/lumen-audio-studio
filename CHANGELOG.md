@@ -2,6 +2,13 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.36
+
+Piano roll tools and song markers.
+
+- Piano roll Tools menu, after FL's: Legato, Strum, Flip, Reverse, Humanize, Chop (sixteenths), Velocity ramp, Double and Half length, and Snap to scale (when a scale is highlighted). Each works on the selected notes, or on all of them when none are selected, and is one undo step.
+- Song markers: right-click the playlist to add a marker on the snap, rename or delete the one under the pointer, or jump to any marker. Markers show as named flags on the ruler and are saved in the project.
+
 ## 0.2.0-alpha.35
 
 FL style faders, an undo history, and the "Modern Talking" bass.
