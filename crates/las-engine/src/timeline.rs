@@ -71,6 +71,17 @@ pub fn swing_offset(pos: f64, swing: f64) -> f64 {
     }
 }
 
+/// The swing a channel's steps get: its own, or the project's (0 to 1).
+pub fn channel_swing(p: &Project, channel: &str) -> f64 {
+    p.channels
+        .iter()
+        .find(|c| c.id == channel)
+        .and_then(|c| c.swing)
+        .filter(|s| s.is_finite())
+        .unwrap_or(p.swing)
+        .clamp(0.0, 1.0)
+}
+
 pub struct Scheduled<'a> {
     pub channel: &'a str,
     pub note: &'a Note,
@@ -88,10 +99,11 @@ pub fn pattern_notes_in_range<'a>(
     src_end: f64,
     from: f64,
     to: f64,
-    swing: f64,
+    project: &Project,
     out: &mut Vec<Scheduled<'a>>,
 ) {
     for (channel, notes) in &pattern.notes {
+        let swing = channel_swing(project, channel);
         for note in notes {
             if note.pos < src_start || note.pos >= src_end {
                 continue;
@@ -140,7 +152,7 @@ pub fn song_notes_in_range<'a>(
             clip.offset + clip.length,
             from,
             to,
-            p.swing,
+            p,
             &mut out,
         );
     }

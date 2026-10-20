@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.41
+
+Swing per channel.
+
+- Each channel in the step sequencer can have its own swing: right-click the channel's name, Swing, and pick from 0 to 75%, or "Song's swing" to follow the song again. It moves only that channel's steps, in the player, renders and exports. Saved in the project; a value that is not a number from 0 to 1 is put right when the project opens. A test checks that it moves one channel's steps and not another's.
+
 ## 0.2.0-alpha.40
 
 Make unique.
