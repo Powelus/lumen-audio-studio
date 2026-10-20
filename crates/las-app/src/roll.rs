@@ -104,6 +104,10 @@ pub struct RollState {
     pub tool: Tool,
     /// Show the other channels' notes faintly behind this one's.
     pub ghost: bool,
+    /// Highlight a scale: its root (0 = C) and steps.
+    pub scale: Option<(i32, &'static [i32])>,
+    /// Draw a chord with each click instead of one note (FL's stamps).
+    pub stamp: Option<&'static [i32]>,
     /// The notes selected (by id) and the ones copied.
     pub selected: HashSet<String>,
     pub clipboard: Vec<Note>,
@@ -120,6 +124,44 @@ pub struct RollState {
     centred: Option<(usize, usize)>,
 }
 
+/// Scales, as steps above the root.
+pub const SCALES: [(&str, &[i32]); 7] = [
+    ("Major", &[0, 2, 4, 5, 7, 9, 11]),
+    ("Minor", &[0, 2, 3, 5, 7, 8, 10]),
+    ("Harmonic minor", &[0, 2, 3, 5, 7, 8, 11]),
+    ("Dorian", &[0, 2, 3, 5, 7, 9, 10]),
+    ("Phrygian", &[0, 1, 3, 5, 7, 8, 10]),
+    ("Pentatonic major", &[0, 2, 4, 7, 9]),
+    ("Pentatonic minor", &[0, 3, 5, 7, 10]),
+];
+
+/// Chords a click can stamp, as intervals above the clicked key.
+pub const STAMPS: [(&str, &[i32]); 10] = [
+    ("Major", &[0, 4, 7]),
+    ("Minor", &[0, 3, 7]),
+    ("Major 7", &[0, 4, 7, 11]),
+    ("Minor 7", &[0, 3, 7, 10]),
+    ("Dominant 7", &[0, 4, 7, 10]),
+    ("Sus 2", &[0, 2, 7]),
+    ("Sus 4", &[0, 5, 7]),
+    ("Diminished", &[0, 3, 6]),
+    ("Power", &[0, 7, 12]),
+    ("Octave", &[0, 12]),
+];
+
+/// The keys a click on `key` adds: the key, or the stamp's chord on it (keys that fall
+/// off the keyboard are left out).
+pub fn chord_keys(key: i32, stamp: Option<&[i32]>) -> Vec<i32> {
+    match stamp {
+        None => vec![key],
+        Some(iv) => iv
+            .iter()
+            .map(|i| key + i)
+            .filter(|k| (0..KEYS).contains(k))
+            .collect(),
+    }
+}
+
 impl Default for RollState {
     fn default() -> Self {
         Self {
@@ -129,6 +171,8 @@ impl Default for RollState {
             len: f64::from(TICKS_PER_STEP) * 4.0,
             tool: Tool::Draw,
             ghost: true,
+            scale: None,
+            stamp: None,
             selected: HashSet::new(),
             clipboard: Vec::new(),
             paste_at: 0.0,
@@ -350,7 +394,8 @@ pub fn draw(
     let bar = ticks_per_bar(project.time_sig);
     let beat = f64::from(PPQ);
 
-    let width = GUTTER + (ticks as f32 + bar as f32) * state.zoom;
+    // the grid runs at least as wide as the window, like FL's
+    let width = (GUTTER + (ticks as f32 + bar as f32) * state.zoom).max(ui.available_width());
     let height = KEYS as f32 * state.row;
     const LANE: f32 = 74.0;
     let mut area = egui::ScrollArea::both()
@@ -387,7 +432,16 @@ pub fn draw(
         for r in first.max(0)..last {
             let k = KEYS - 1 - r;
             let black = matches!(k % 12, 1 | 3 | 6 | 8 | 10);
-            let shade = if black { pl.roll_row_b } else { pl.roll_row_a };
+            let mut shade = if black { pl.roll_row_b } else { pl.roll_row_a };
+            if let Some((root, steps)) = state.scale {
+                // keys outside the scale are dimmed, the root is lit
+                let deg = (k - root).rem_euclid(12);
+                if deg == 0 {
+                    shade = shade.lerp_to_gamma(pl.accent, 0.16);
+                } else if !steps.contains(&deg) {
+                    shade = shade.gamma_multiply(0.55);
+                }
+            }
             let row = Rect::from_min_size(
                 egui::pos2(grid_left, y_of(k)),
                 egui::vec2(width - GUTTER, state.row),
@@ -402,7 +456,7 @@ pub fn draw(
         }
         // beat and bar lines (and steps when zoomed in)
         let step = f64::from(TICKS_PER_STEP);
-        let end = ticks + bar;
+        let end = f64::from((width - GUTTER) / state.zoom).max(ticks + bar);
         let mut t = 0.0;
         while t <= end {
             let on_bar = (t / bar).fract().abs() < 1e-9;
@@ -680,7 +734,9 @@ pub fn draw(
                     if state.tool == Tool::Draw && hit(notes, t, k, edge).is_none() {
                         edits.push(Edit::Begin);
                         let at = snapped(t, state.snap).max(0.0);
-                        edits.push(Edit::Add(new_note(k, at, state.len)));
+                        for key in chord_keys(k, state.stamp) {
+                            edits.push(Edit::Add(new_note(key, at, state.len)));
+                        }
                         edits.push(Edit::Audition { key: k, on: true });
                         edits.push(Edit::Audition { key: k, on: false });
                     }
@@ -795,6 +851,17 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stamp_draws_its_chord_and_a_plain_click_one_note() {
+        assert_eq!(chord_keys(60, None), vec![60]);
+        assert_eq!(chord_keys(60, Some(&[0, 4, 7])), vec![60, 64, 67]);
+        // keys past the top of the keyboard are left out
+        assert_eq!(chord_keys(KEYS - 2, Some(&[0, 12])), vec![KEYS - 2]);
+        for (name, iv) in STAMPS.iter().chain(SCALES.iter()) {
+            assert_eq!(iv[0], 0, "{name} starts on its root");
+        }
+    }
 
     fn project() -> Project {
         let bytes = include_bytes!("../../las-engine/tests/fixtures/engines.las");

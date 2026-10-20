@@ -21,12 +21,21 @@ pub enum Bound {
     Basic(usize),
     /// A hosted plugin.
     Hosted(usize),
+    /// Nebula's window.
+    Nebula(usize),
+    /// LumaPad's window.
+    Pads(usize),
 }
 
 impl Bound {
     pub fn channel(self) -> usize {
         match self {
-            Bound::Synth(c) | Bound::Sampler(c) | Bound::Basic(c) | Bound::Hosted(c) => c,
+            Bound::Synth(c)
+            | Bound::Sampler(c)
+            | Bound::Basic(c)
+            | Bound::Hosted(c)
+            | Bound::Nebula(c)
+            | Bound::Pads(c) => c,
         }
     }
 }
@@ -175,6 +184,8 @@ impl App {
             }
             None if plugin == "sampler" => self.bound = Some(Bound::Sampler(channel)),
             None if plugin == las_host::HOSTED => self.bound = Some(Bound::Hosted(channel)),
+            None if plugin == "nebula" => self.bound = Some(Bound::Nebula(channel)),
+            None if plugin == "lumapad" => self.bound = Some(Bound::Pads(channel)),
             None => self.bound = Some(Bound::Basic(channel)),
         }
         // loading is not an edit

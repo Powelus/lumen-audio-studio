@@ -104,6 +104,57 @@ pub fn effect_slot(plugin_id: &str) -> EffectSlot {
     }
 }
 
+/// The kit a new LumaPad starts with: sixteen pads from the factory samples, on the keys
+/// from C2 up, as drum machines lay them out.
+pub const DEFAULT_PADS: [(&str, &str); 16] = [
+    ("factory:kick-punch", "Kick"),
+    ("factory:snare-tight", "Snare"),
+    ("factory:clap-classic", "Clap"),
+    ("factory:hat-closed", "Hat"),
+    ("factory:hat-open", "Open hat"),
+    ("factory:kick-deep", "Kick 2"),
+    ("factory:snare-trap", "Snare 2"),
+    ("factory:snap", "Snap"),
+    ("factory:tom-low", "Tom low"),
+    ("factory:tom-mid", "Tom mid"),
+    ("factory:tom-high", "Tom high"),
+    ("factory:rim", "Rim"),
+    ("factory:cowbell", "Cowbell"),
+    ("factory:shaker", "Shaker"),
+    ("factory:ride", "Ride"),
+    ("factory:crash", "Crash"),
+];
+
+/// The state a new channel of an instrument starts with (most start empty and play
+/// their default patch).
+pub fn default_state(plugin_id: &str) -> Value {
+    match plugin_id {
+        "lumapad" => {
+            let pads: Vec<Value> = DEFAULT_PADS
+                .iter()
+                .enumerate()
+                .map(|(i, (id, name))| {
+                    json!({
+                        "key": 36 + i,
+                        "name": name,
+                        "sampleId": id,
+                        "level": 0.85,
+                        "pan": 0.0,
+                        "tune": 0.0,
+                        // the hats choke each other
+                        "cut": if *id == "factory:hat-closed" || *id == "factory:hat-open" { 1 } else { 0 },
+                    })
+                })
+                .collect();
+            json!({ "pads": pads })
+        }
+        "nebula" => las_dsp::presets::bank("nebula")
+            .and_then(|b| b.find("Init").map(|i| b.presets[i].state.clone()))
+            .unwrap_or_else(|| json!({})),
+        _ => json!({}),
+    }
+}
+
 pub fn channel(plugin_id: &str) -> Channel {
     let known = INSTRUMENTS.iter().find(|i| i.0 == plugin_id);
     Channel {
@@ -117,7 +168,7 @@ pub fn channel(plugin_id: &str) -> Channel {
         }
         .into(),
         plugin_id: plugin_id.into(),
-        state: json!({}),
+        state: default_state(plugin_id),
         volume: 1.0,
         pan: 0.0,
         pitch: 0.0,

@@ -2,6 +2,19 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.34
+
+Instrument windows that look like plugins, every instrument in the browser, MP3 export, and piano roll scales and chord stamps.
+
+- Plugin faces: each instrument window is painted like the synth it is modelled on, with its own colours, panels, knobs and a header bar with its name. Polaris and Vortex are graphite with blue screens, Monolith silver with a blue LCD, Zenith black and orange, TriOsc FL grey and green, Facet black and amber, Mist teal, Nebula night blue and magenta, LumaPad black and red. Effect windows are dark steel rack units with green LEDs.
+- Wavetable screens: each oscillator shows its wavetable at the current position. Vortex shows the whole table in 3D, Serum style: every frame stacked in perspective over a floor grid, with the playing frame glowing. Mist shows its grain cloud around the play position.
+- Nebula has its own window: 230 factory presets by category, master and macro knobs, and layer cards (on, name, waveform, level, pan, semitones; add and remove layers). A new Nebula starts from its Init preset.
+- LumaPad has its own window: a 4 by 4 grid of pads you can click to play. Right-click a pad to give it any factory sample; each pad has level, pan, tune and a choke group. A new LumaPad comes with a sixteen pad kit.
+- The browser's Plugins tab adds any instrument (Vortex, Monolith, Zenith, TriOsc, Nebula, Sampler, LumaPad included) as a channel and opens its window. Before, most were greyed out.
+- Export to MP3 at 320 or 192 kbit/s. The file name follows the chosen format.
+- Piano roll: highlight a scale (any root; major, minor, harmonic minor, dorian, phrygian, pentatonics), dimming the keys outside it. Chord stamps (major, minor, 7ths, sus, diminished, power, octave) make each click draw the whole chord, as FL's stamps do.
+- Fixes: Polaris' and Facet's right-hand oscillators and operators were cut off (Facet's operators are now a 2 by 2 grid); the piano roll grid stopped after one bar; the mixer's insert panel ran off the window; a plugin face's background ran past the bottom of a shrunk window; a channel's window no longer shows the stand-alone synth switch.
+
 ## 0.2.0-alpha.33
 
 A fix for new channels.

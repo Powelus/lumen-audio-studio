@@ -203,12 +203,14 @@ fn the_metronome_clicks_on_the_beats_while_playing() {
 fn a_new_channel_of_every_instrument_plays_its_default_sound() {
     use las_project::create::{add_channel, empty_project, step_note};
     for id in [
-        "polaris", "vortex", "monolith", "zenith", "triosc", "facet", "mist", "nebula",
+        "polaris", "vortex", "monolith", "zenith", "triosc", "facet", "mist", "nebula", "lumapad",
     ] {
         let mut p = empty_project("x");
         let c = add_channel(&mut p, id);
         let ch = p.channels[c].id.clone();
-        let mut n = step_note(0, 60, 0.9);
+        // LumaPad's first pad sits on C2
+        let key = if id == "lumapad" { 36 } else { 60 };
+        let mut n = step_note(0, key, 0.9);
         n.len = 96.0;
         p.patterns[0].notes.insert(ch, vec![n]);
         let opts = RenderOptions {

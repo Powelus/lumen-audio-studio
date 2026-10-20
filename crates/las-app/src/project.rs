@@ -546,6 +546,61 @@ impl App {
                 let _ = pattern;
             }
             ui.checkbox(&mut self.project.roll.ghost, "Ghost notes");
+            let roll = &mut self.project.roll;
+            let scale_name = roll.scale.map_or("No scale".to_string(), |(root, steps)| {
+                let name = roll::SCALES
+                    .iter()
+                    .find(|s| s.1 == steps)
+                    .map_or("", |s| s.0);
+                format!(
+                    "{} {name}",
+                    ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+                        [root as usize % 12]
+                )
+            });
+            ui.menu_button(scale_name, |ui| {
+                if ui.button("No scale").clicked() {
+                    roll.scale = None;
+                    ui.close();
+                }
+                for (root, rn) in [
+                    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    ui.menu_button(*rn, |ui| {
+                        for (name, steps) in roll::SCALES {
+                            if ui.button(name).clicked() {
+                                roll.scale = Some((root as i32, steps));
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+            })
+            .response
+            .on_hover_text("Highlight a scale: keys outside it are dimmed");
+            let stamp_name = roll.stamp.map_or("Stamp: off".to_string(), |iv| {
+                format!(
+                    "Stamp: {}",
+                    roll::STAMPS.iter().find(|s| s.1 == iv).map_or("", |s| s.0)
+                )
+            });
+            ui.menu_button(stamp_name, |ui| {
+                if ui.button("Off (one note)").clicked() {
+                    roll.stamp = None;
+                    ui.close();
+                }
+                for (name, iv) in roll::STAMPS {
+                    if ui.button(name).clicked() {
+                        roll.stamp = Some(iv);
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Each click draws this chord on the key clicked");
             ui.label("Zoom");
             ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false));
         });
