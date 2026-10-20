@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.40
+
+Make unique.
+
+- Right-click a pattern clip in the playlist and pick "Make unique", as in FL: the clip gets its own copy of the pattern (named "... copy"), so editing it no longer changes the other clips of the original. One undo step.
+
 ## 0.2.0-alpha.39
 
 Clip colours.

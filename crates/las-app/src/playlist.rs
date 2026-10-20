@@ -52,6 +52,8 @@ pub enum PlEdit {
         clip: String,
         color: String,
     },
+    /// Give a pattern clip its own copy of the pattern, so editing it leaves the others.
+    MakeUnique(String),
     /// Put a song marker at a tick.
     AddMarker(f64),
     DeleteMarker(String),
@@ -346,6 +348,22 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
                     }
                 }
                 ClipKind::Audio => {}
+            }
+        }
+        PlEdit::MakeUnique(clip) => {
+            let Some(ci) = project.playlist.clips.iter().position(|c| &c.id == clip) else {
+                return;
+            };
+            if project.playlist.clips[ci].kind != ClipKind::Pattern {
+                return;
+            }
+            let of = project.playlist.clips[ci].ref_id.clone();
+            let Some(pi) = project.patterns.iter().position(|x| x.id == of) else {
+                return;
+            };
+            if let Some(ni) = crate::menus::clone_pattern(project, pi) {
+                let id = project.patterns[ni].id.clone();
+                project.playlist.clips[ci].ref_id = id;
             }
         }
         PlEdit::AddMarker(t) => {
@@ -838,6 +856,22 @@ pub fn draw(
                                 }
                             }
                         });
+                        let pattern = project
+                            .playlist
+                            .clips
+                            .iter()
+                            .find(|c| c.id == id)
+                            .is_some_and(|c| c.kind == ClipKind::Pattern);
+                        if pattern
+                            && ui
+                                .button("Make unique")
+                                .on_hover_text("Give this clip its own copy of the pattern")
+                                .clicked()
+                        {
+                            edits.push(PlEdit::Begin);
+                            edits.push(PlEdit::MakeUnique(id.clone()));
+                            ui.close();
+                        }
                         ui.separator();
                     }
                 }
@@ -1286,6 +1320,34 @@ mod tests {
         assert_eq!(
             p.patterns.iter().find(|x| x.id == of).unwrap().color,
             "#3fbf7f"
+        );
+    }
+
+    #[test]
+    fn make_unique_gives_a_clip_its_own_pattern() {
+        let mut p = project();
+        let i = p
+            .playlist
+            .clips
+            .iter()
+            .position(|c| c.kind == ClipKind::Pattern)
+            .unwrap();
+        let (clip, of) = (
+            p.playlist.clips[i].id.clone(),
+            p.playlist.clips[i].ref_id.clone(),
+        );
+        let n = p.patterns.len();
+        apply(&mut p, &PlEdit::MakeUnique(clip));
+        assert_eq!(p.patterns.len(), n + 1);
+        let now = &p.playlist.clips[i].ref_id;
+        assert_ne!(now, &of);
+        let (a, b) = (
+            p.patterns.iter().find(|x| x.id == of).unwrap(),
+            p.patterns.iter().find(|x| &x.id == now).unwrap(),
+        );
+        assert_eq!(
+            a.notes.values().map(Vec::len).sum::<usize>(),
+            b.notes.values().map(Vec::len).sum::<usize>()
         );
     }
 
