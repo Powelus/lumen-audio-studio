@@ -985,7 +985,13 @@ impl App {
             return;
         };
         let project = l.project.clone();
-        let edits = mixer::draw(ui, &project, &mut self.project.mixer_state);
+        let peaks: Vec<f32> = match &self.audio {
+            Some(a) if a.meters.playing() => (0..project.mixer.len())
+                .map(|i| a.meters.insert_peak(i))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let edits = mixer::draw(ui, &project, &mut self.project.mixer_state, &peaks);
         drop(project);
         self.project.edit_mixer(&edits);
     }

@@ -121,6 +121,11 @@ impl Player {
         self.playing
     }
 
+    /// The peak level of each mixer insert (master first), falling slowly.
+    pub fn insert_peaks(&self) -> &[f32] {
+        self.engine.insert_peaks()
+    }
+
     /// Switch the metronome on or off.
     pub fn set_metronome(&mut self, on: bool) {
         self.metronome = on;

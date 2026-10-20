@@ -244,7 +244,7 @@ pub struct MixerState {
     pub selected: usize,
 }
 
-pub fn draw(ui: &mut Ui, project: &Project, state: &mut MixerState) -> Vec<MixEdit> {
+pub fn draw(ui: &mut Ui, project: &Project, state: &mut MixerState, peaks: &[f32]) -> Vec<MixEdit> {
     let mut edits = Vec::new();
     state.selected = state.selected.min(project.mixer.len().saturating_sub(1));
     let panel_w = 190.0;
@@ -258,7 +258,8 @@ pub fn draw(ui: &mut Ui, project: &Project, state: &mut MixerState) -> Vec<MixEd
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for i in 0..project.mixer.len() {
-                        strip(ui, project, i, state, &mut edits);
+                        let peak = peaks.get(i).copied().unwrap_or(0.0);
+                        strip(ui, project, i, state, peak, &mut edits);
                     }
                 });
             });
@@ -486,6 +487,7 @@ fn strip(
     project: &Project,
     i: usize,
     state: &mut MixerState,
+    peak: f32,
     edits: &mut Vec<MixEdit>,
 ) {
     let t = &project.mixer[i];
@@ -564,11 +566,18 @@ fn strip(
                     }
                 });
                 let mut vol = t.volume;
-                let r = ui.add(
-                    egui::Slider::new(&mut vol, 0.0..=1.25)
-                        .vertical()
-                        .show_value(false),
-                );
+                let r = ui
+                    .horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        let r = ui.add(
+                            egui::Slider::new(&mut vol, 0.0..=1.25)
+                                .vertical()
+                                .show_value(false),
+                        );
+                        crate::widgets::meter(ui, peak, egui::vec2(6.0, 100.0));
+                        r
+                    })
+                    .inner;
                 if r.changed() {
                     if r.drag_started() || !r.dragged() {
                         edits.push(MixEdit::Begin);
@@ -867,7 +876,7 @@ mod tests {
         let mut state = MixerState::default();
         for _ in 0..2 {
             crate::widgets::run_frame(&ctx, egui::RawInput::default(), |ui| {
-                out = draw(ui, &p, &mut state);
+                out = draw(ui, &p, &mut state, &[0.5, 0.2]);
             });
         }
         assert!(out.is_empty());

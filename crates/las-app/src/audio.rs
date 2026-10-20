@@ -117,6 +117,8 @@ pub struct Meters {
     /// The player's position (ticks, as bits of an `f64`) and whether it is playing.
     position: AtomicU64,
     playing: AtomicU32,
+    /// The peak of each mixer insert, master first (bits of an `f32`).
+    inserts: [AtomicU32; 32],
 }
 
 impl Meters {
@@ -144,6 +146,10 @@ impl Meters {
     /// Where the project's player is, in ticks.
     pub fn position(&self) -> f64 {
         f64::from_bits(self.position.load(Ordering::Relaxed))
+    }
+    /// The peak level of insert `i` of the project's mixer (0 beyond the last).
+    pub fn insert_peak(&self, i: usize) -> f32 {
+        self.inserts.get(i).map_or(0.0, Self::load_f)
     }
     /// Whether the project's player is playing.
     pub fn playing(&self) -> bool {
@@ -587,6 +593,9 @@ impl Renderer {
         }
         self.clock += frames as u64;
         if let Some(p) = &self.player {
+            for (slot, v) in self.meters.inserts.iter().zip(p.insert_peaks()) {
+                Meters::store(slot, *v);
+            }
             self.meters
                 .position
                 .store(p.position().to_bits(), Ordering::Relaxed);
@@ -811,6 +820,10 @@ mod tests {
         }
         assert!(loudest > 0.01, "the song is heard");
         assert!(r.meters.playing() && r.meters.position() > 0.0);
+        // the master's meter moved, and one beyond the mixer stays at zero
+        let master = r.meters.insert_peak(0);
+        assert!(master > 0.0, "the master's level is published");
+        assert_eq!(r.meters.insert_peak(31 + 5), 0.0);
         tx.push(Command::PlayerStop).ok().unwrap();
         for _ in 0..600 {
             r.fill(&mut buf);
