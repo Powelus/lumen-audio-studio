@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.38
+
+Export the loop.
+
+- The export window has "Only the loop": with a song loop set, it renders just that stretch of the song (with the usual tail), for bouncing a section or a loop to a sample. A test checks that a range renders what the live player plays from the range's start.
+
 ## 0.2.0-alpha.37
 
 Song loops.

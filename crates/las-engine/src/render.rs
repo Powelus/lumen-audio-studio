@@ -26,6 +26,8 @@ pub enum Mode {
     Song,
     /// One pattern (the first when `id` is `None`), played `loops` times.
     Pattern { id: Option<String>, loops: usize },
+    /// A stretch of the song, from tick `from` to tick `to`.
+    Range { from: f64, to: f64 },
 }
 
 #[derive(Clone, Debug)]
@@ -840,9 +842,10 @@ fn render_taps(
     taps: &[Tap],
 ) -> Result<Vec<Rendered>, String> {
     let sr = opts.sample_rate;
-    let song = matches!(opts.mode, Mode::Song);
+    let song = matches!(opts.mode, Mode::Song | Mode::Range { .. });
     let (from, to, loops, pattern) = match &opts.mode {
         Mode::Song => (0.0, song_length(project), 1, None),
+        Mode::Range { from, to } => (from.max(0.0), to.max(from.max(0.0)), 1, None),
         Mode::Pattern { id, loops } => {
             let index = id
                 .as_ref()

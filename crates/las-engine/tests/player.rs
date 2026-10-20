@@ -259,3 +259,51 @@ fn a_song_loop_comes_back_to_its_start() {
     assert!(seen_back, "the playhead never went back to the loop start");
     assert!(!player.finished());
 }
+
+#[test]
+fn a_range_renders_what_the_player_plays_from_its_start() {
+    let bundle = decode(&fixture("engines.las")).expect("a project");
+    let opts = RenderOptions {
+        sample_rate: 24000.0,
+        tail: 0.0,
+        mode: Mode::Range {
+            from: 96.0,
+            to: 288.0,
+        },
+    };
+    let want = render_mix_with(&bundle.project, &bundle.samples, &opts).unwrap();
+    let bar = las_engine::timeline::seconds_between(&bundle.project, 96.0, 288.0, true);
+    assert!(
+        (want.left.len() as f64 / 24000.0 - bar).abs() < 0.05,
+        "{} frames for {bar} s",
+        want.left.len()
+    );
+    assert!(
+        want.left.iter().any(|v| v.abs() > 1e-3),
+        "the range is silent; the song is {} ticks",
+        las_engine::timeline::song_length(&bundle.project)
+    );
+    let mut player = Player::new(
+        Arc::new(bundle.project.clone()),
+        &bundle.samples,
+        24000.0,
+        PlayMode::Song,
+    )
+    .unwrap();
+    assert!(player.play(96.0));
+    let skip = (player.output_latency() * 24000.0).round() as usize;
+    let total = want.left.len();
+    let (mut got, mut bl, mut br) = (Vec::new(), vec![0f32; 441], vec![0f32; 441]);
+    while got.len() < total + skip {
+        player.process(&mut bl, &mut br);
+        got.extend_from_slice(&bl);
+    }
+    let (mut e2, mut s2) = (0f64, 0f64);
+    for i in 0..total {
+        let (g, w) = (f64::from(got[i + skip]), f64::from(want.left[i]));
+        e2 += (g - w) * (g - w);
+        s2 += w * w;
+    }
+    let db = 10.0 * (e2.max(1e-30) / s2.max(1e-30)).log10();
+    assert!(db < -60.0, "the range differs from the player by {db} dB");
+}
