@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pub mod arp;
 pub mod audioclip;
+pub mod export;
 pub mod factory;
 pub mod fxauto;
 pub mod instrument;
@@ -11,4 +12,6 @@ pub mod pluginparams;
 pub mod render;
 pub mod sampler;
 pub mod timeline;
-pub use render::{render_mix, render_mix_with, Mode, RenderOptions, Rendered};
+pub use render::{
+    render_mix, render_mix_with, render_stems, used_inserts, Mode, RenderOptions, Rendered, Stem,
+};

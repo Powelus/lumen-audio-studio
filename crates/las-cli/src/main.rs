@@ -24,11 +24,16 @@ USAGE
     las info <project.las>
     las convert <in.las> <out.las> [--plain]
     las render-project <project.las> [-o <out.wav>] [--rate <hz>] [--tail <s>]
-                       [--pattern [<id>]] [--loops <n>]
+                       [--pattern [<id>]] [--loops <n>] [--format wav|flac]
+                       [--bits 16|24|32] [--normalize] [--stems <dir>]
+    las midi <project.las> [-o <out.mid>] [--pattern [<id>]]
     las --version
 
 info lists what a project holds. convert reads a project (and repairs or updates
-it) and writes it again; --plain leaves the file unencrypted.
+it) and writes it again; --plain leaves the file unencrypted. render-project
+writes the mix (32 bit float WAV by default, or 16/24 bit WAV or 24/16 bit FLAC);
+--stems writes the master and each insert to a folder instead. midi writes the
+notes as a standard MIDI file.
 
 A case file is JSON with a \"patch\" (only what differs from the defaults), a list
 of \"events\" and an optional \"seed\". See examples/facet-bell.json and
@@ -208,6 +213,7 @@ fn main() -> ExitCode {
         Some("info") => project::info(&args[1..]),
         Some("convert") => project::convert(&args[1..]),
         Some("render-project") => project::render(&args[1..]),
+        Some("midi") => project::midi(&args[1..]),
         Some("--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())
