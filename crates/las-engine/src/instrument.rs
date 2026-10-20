@@ -452,6 +452,55 @@ impl Instrument {
         }
     }
 
+    /// Stop at `time`: notes that have not happened yet are forgotten and what sounds is
+    /// released (or faded).
+    pub fn stop(&mut self, time: f64) {
+        if let Some(arp) = &mut self.arp {
+            arp.clear();
+        }
+        match &mut self.core {
+            Core::Layers(ls) => ls.iter_mut().for_each(|l| l.engine.stop()),
+            Core::Facet(e) => e.stop(),
+            Core::Mist(e) => e.stop(),
+            Core::Sampler(s) => s.stop(time),
+            Core::Pads(p) => p.stop(time),
+            Core::AudioClip(c) => c.stop(time),
+            Core::Silent => {}
+        }
+    }
+
+    /// A key played live: sounds from `time` until [`Instrument::note_off`].
+    pub fn note_on(&mut self, key: f64, vel: f64, time: f64) {
+        match &mut self.core {
+            Core::Sampler(s) => s.play_note(key as i32, vel, time, None, 0.0, 0.0),
+            Core::Pads(p) => p.play_note(key as i32, vel, time, 0.0),
+            Core::AudioClip(c) => c.play_note(time),
+            Core::Silent => {}
+            _ => {
+                let evs = [Event::On {
+                    time,
+                    key,
+                    vel,
+                    fine: 0.0,
+                    pan: 0.0,
+                }];
+                self.queue_all(&evs, true);
+            }
+        }
+    }
+
+    /// A key played live is let go.
+    pub fn note_off(&mut self, key: f64, time: f64) {
+        match &mut self.core {
+            Core::Sampler(s) => s.note_off(key as i32, time),
+            Core::Pads(_) | Core::AudioClip(_) | Core::Silent => {}
+            _ => {
+                let evs = [Event::Off { time, key }];
+                self.queue_all(&evs, true);
+            }
+        }
+    }
+
     /// Whether the output is a mono signal (a channel then pans it with the
     /// mono law, which is 3 dB down in the middle).
     pub fn is_mono(&self) -> bool {

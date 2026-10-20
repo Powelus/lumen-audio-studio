@@ -1026,6 +1026,12 @@ impl SynthEngine {
         }
     }
 
+    /// Forget the notes that have not happened yet and release what sounds.
+    pub fn stop(&mut self) {
+        self.events.clear();
+        self.all_off();
+    }
+
     pub fn all_off(&mut self) {
         self.held_keys.clear();
         for v in &mut self.voices {

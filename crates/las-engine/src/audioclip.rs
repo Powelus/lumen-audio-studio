@@ -351,6 +351,15 @@ impl AudioClipper {
         });
     }
 
+    /// Fade out the clips that sound.
+    pub fn stop(&mut self, time: f64) {
+        for v in &mut self.voices {
+            v.gain.cancel_scheduled_values(time);
+            v.gain.set_target_at_time(0.0, time, 0.02);
+            v.src.stop = Some(time + 0.15);
+        }
+    }
+
     /// A note previews the sample from its start.
     pub fn play_note(&mut self, time: f64) {
         if let Some(s) = self.sample.clone() {

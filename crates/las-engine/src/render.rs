@@ -13,6 +13,7 @@ use las_dsp::wavetable::TableLibrary;
 use las_project::{AutomationClip, AutomationTarget, ClipKind, Project, Sample};
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 /// Frames per block (the web version's render quantum).
 pub const BLOCK: usize = 128;
@@ -68,6 +69,14 @@ struct ChannelRt {
     pitch_line: Timeline,
 }
 
+/// A stretch of scheduled ticks: where it starts in time and in ticks.
+#[derive(Clone, Copy)]
+struct Segment {
+    time: f64,
+    tick: f64,
+    sec_per_tick: f64,
+}
+
 /// Where the song is at a point in time (tempo changes make anchors).
 #[derive(Clone, Copy)]
 struct Anchor {
@@ -76,10 +85,14 @@ struct Anchor {
     bpm: f64,
 }
 
-struct Scheduler<'a> {
-    project: &'a Project,
+/// The scheduler and the block renderer of a project: the offline render and the live
+/// player both drive one of these.
+pub(crate) struct Engine {
+    pub(crate) project: Arc<Project>,
+    pub(crate) sr: f64,
     song: bool,
-    pattern: Option<&'a las_project::Pattern>,
+    /// Index of the pattern played in pattern mode.
+    pattern: Option<usize>,
     channels: Vec<ChannelRt>,
     index: HashMap<String, usize>,
     cursor_tick: f64,
@@ -87,12 +100,20 @@ struct Scheduler<'a> {
     abs_ticks: f64,
     last_bpm: f64,
     anchors: Vec<Anchor>,
+    segments: std::collections::VecDeque<Segment>,
+    /// Time, tick and seconds per tick of the start of the stretch at one tempo.
+    time_anchor: Option<(f64, f64, f64)>,
     muted_tracks: Vec<bool>,
     mixer: Mixer,
     library: Library,
     /// The first segment of a run: automation jumps rather than ramps.
     fresh: bool,
     automation_first: HashSet<String>,
+    /// Scratch for rendering a block.
+    bl: Vec<f32>,
+    br: Vec<f32>,
+    vol: Vec<f32>,
+    pan: Vec<f32>,
 }
 
 /// The clip's value at `t`, its stored points ramped, between clip ticks `from` and `to`.
@@ -135,7 +156,7 @@ struct ClipInfoSecs {
     x_out: bool,
 }
 
-impl Scheduler<'_> {
+impl Engine {
     /// Play an audio clip on its channel, as the web engine's `playClip`.
     fn play_clip(
         &mut self,
@@ -251,7 +272,13 @@ impl Scheduler<'_> {
     }
 
     fn bpm(&self) -> f64 {
-        tempo_at(self.project, self.cursor_tick, self.song)
+        // with tempo automation the tempo is that at the start of the cell the cursor is in
+        let tick = if has_tempo_automation(&self.project, self.song) {
+            (self.cursor_tick / TEMPO_CELL).floor() * TEMPO_CELL
+        } else {
+            self.cursor_tick
+        };
+        tempo_at(&self.project, tick, self.song)
     }
 
     fn transport(&self) -> Transport {
@@ -278,13 +305,17 @@ impl Scheduler<'_> {
         });
     }
 
-    fn schedule_range(&mut self, a: f64, b: f64, time_a: f64, sec_per_tick: f64) {
-        let p = self.project;
-        let time_of = |tick: f64| time_a + (tick - a) * sec_per_tick;
+    /// Schedule the notes and automation in ticks `[a, b)`. A tick `t` plays at engine
+    /// time `anchor.0 + (t - anchor.1) * sec_per_tick`.
+    fn schedule_range(&mut self, a: f64, b: f64, anchor: (f64, f64), sec_per_tick: f64) {
+        let time_a = anchor.0 + (a - anchor.1) * sec_per_tick;
+        let project = Arc::clone(&self.project);
+        let p = &*project;
+        let time_of = |tick: f64| anchor.0 + (tick - anchor.1) * sec_per_tick;
         let mut notes = Vec::new();
         if self.song {
             notes = song_notes_in_range(p, a, b, &self.muted_tracks);
-        } else if let Some(pat) = self.pattern {
+        } else if let Some(pat) = self.pattern.and_then(|i| p.patterns.get(i)) {
             pattern_notes_in_range(pat, 0.0, 0.0, f64::INFINITY, a, b, p.swing, &mut notes);
         }
         if self.song {
@@ -375,14 +406,50 @@ impl Scheduler<'_> {
         }
     }
 
-    /// Schedule ticks `[from, to)` starting at time `at`, without looping.
-    /// Returns the end time.
-    fn schedule_offline(&mut self, from: f64, to: f64, at: f64) -> f64 {
+    pub(crate) fn output_latency(&self) -> f64 {
+        self.mixer.output_latency(0).min(MAX_PAD)
+    }
+
+    pub(crate) fn cursor_time(&self) -> f64 {
+        self.cursor_time
+    }
+
+    pub(crate) fn cursor_tick(&self) -> f64 {
+        self.cursor_tick
+    }
+
+    pub(crate) fn current_bpm(&self) -> f64 {
+        self.bpm()
+    }
+
+    /// Stop every instrument at engine time `time`.
+    pub(crate) fn stop_instruments(&mut self, time: f64) {
+        for ch in &mut self.channels {
+            ch.inst.stop(time);
+        }
+    }
+
+    /// A key played live on channel `channel` (by index).
+    pub(crate) fn note_on(&mut self, channel: usize, key: f64, vel: f64, time: f64) {
+        if let Some(ch) = self.channels.get_mut(channel) {
+            ch.inst.note_on(key, vel, time);
+        }
+    }
+
+    pub(crate) fn note_off(&mut self, channel: usize, key: f64, time: f64) {
+        if let Some(ch) = self.channels.get_mut(channel) {
+            ch.inst.note_off(key, time);
+        }
+    }
+
+    /// Start a run: the ticks from `from` will play from engine time `at`.
+    pub(crate) fn begin_run(&mut self, from: f64, at: f64) {
         self.cursor_tick = from;
         self.cursor_time = at;
         self.abs_ticks = from;
         self.last_bpm = 0.0;
         self.fresh = true;
+        self.time_anchor = None;
         self.automation_first.clear();
         let bpm0 = self.bpm();
         self.anchors.push(Anchor {
@@ -390,29 +457,87 @@ impl Scheduler<'_> {
             beat: from / PPQ_F,
             bpm: bpm0,
         });
-        while self.cursor_tick < to - 1e-9 {
-            let bpm = self.bpm();
-            let sec_per_tick = 60.0 / (bpm * PPQ_F);
-            let seg_end = if has_tempo_automation(self.project, self.song) {
-                to.min(((self.cursor_tick / TEMPO_CELL).floor() + 1.0) * TEMPO_CELL)
-            } else {
-                to
-            };
-            self.note_tempo(bpm);
-            let t0 = self.cursor_time;
-            self.schedule_range(self.cursor_tick, seg_end, t0, sec_per_tick);
-            self.abs_ticks += seg_end - self.cursor_tick;
-            self.cursor_time += (seg_end - self.cursor_tick) * sec_per_tick;
-            self.cursor_tick = seg_end;
-            self.fresh = false;
-            // time-based generators (the arpeggiator) follow the same segments
-            let transport = self.transport();
-            let end = self.cursor_time;
-            for ch in &mut self.channels {
-                ch.inst.tick(t0, end, transport);
-            }
+    }
+
+    /// Schedule the next stretch of the run: up to tick `to`, at most `max_ticks` long
+    /// and not across a tempo cell. Returns the engine time of its end.
+    pub(crate) fn schedule_step(&mut self, to: f64, max_ticks: f64) -> f64 {
+        let bpm = self.bpm();
+        let sec_per_tick = 60.0 / (bpm * PPQ_F);
+        let seg_end = if has_tempo_automation(&self.project, self.song) {
+            // one tempo cell at a time, as the offline render goes, so both play alike
+            to.min(((self.cursor_tick / TEMPO_CELL).floor() + 1.0) * TEMPO_CELL)
+        } else {
+            to.min(self.cursor_tick + max_ticks)
+        };
+        self.note_tempo(bpm);
+        let t0 = self.cursor_time;
+        self.segments.push_back(Segment {
+            time: t0,
+            tick: self.cursor_tick,
+            sec_per_tick,
+        });
+        // pieces of one stretch at one tempo share their reckoning of time, so that how
+        // the song is cut up makes no difference to when a note plays
+        let anchor = match self.time_anchor {
+            Some((_, _, spt)) if spt == sec_per_tick => self.time_anchor.unwrap(),
+            _ => (t0, self.cursor_tick, sec_per_tick),
+        };
+        self.time_anchor = Some(anchor);
+        self.schedule_range(
+            self.cursor_tick,
+            seg_end,
+            (anchor.0, anchor.1),
+            sec_per_tick,
+        );
+        self.abs_ticks += seg_end - self.cursor_tick;
+        self.cursor_time += (seg_end - self.cursor_tick) * sec_per_tick;
+        self.cursor_tick = seg_end;
+        self.fresh = false;
+        // time-based generators (the arpeggiator) follow the same segments
+        let transport = self.transport();
+        let end = self.cursor_time;
+        for ch in &mut self.channels {
+            ch.inst.tick(t0, end, transport);
         }
         self.cursor_time
+    }
+
+    /// Schedule ticks `[from, to)` starting at time `at`, without looping.
+    /// Returns the end time.
+    fn schedule_offline(&mut self, from: f64, to: f64, at: f64) -> f64 {
+        self.begin_run(from, at);
+        while self.cursor_tick < to - 1e-9 {
+            self.schedule_step(to, f64::INFINITY);
+        }
+        self.cursor_time
+    }
+
+    /// The tick playing at engine time `time`, from the stretches scheduled so far.
+    pub(crate) fn tick_at(&self, time: f64) -> f64 {
+        let seg = self
+            .segments
+            .iter()
+            .rev()
+            .find(|s| s.time <= time)
+            .or(self.segments.front());
+        seg.map_or(0.0, |s| s.tick + (time - s.time).max(0.0) / s.sec_per_tick)
+    }
+
+    /// Forget what is older than engine time `time`.
+    pub(crate) fn forget_before(&mut self, time: f64) {
+        while self.segments.len() > 2 && self.segments[1].time <= time {
+            self.segments.pop_front();
+        }
+        while self.anchors.len() > 2 && self.anchors[1].time <= time {
+            self.anchors.remove(0);
+        }
+        for ch in &mut self.channels {
+            ch.pitch_line.prune(time);
+            ch.volume.compact();
+            ch.pan.compact();
+        }
+        self.mixer.compact();
     }
 }
 
@@ -535,28 +660,28 @@ pub fn render_stems(
         .collect())
 }
 
-/// Render the project and return each tap's output, trimmed by its plugin delay.
-fn render_taps(
-    project: &Project,
-    samples: &BTreeMap<String, Sample>,
-    opts: &RenderOptions,
-    taps: &[Tap],
-) -> Result<Vec<Rendered>, String> {
-    let sr = opts.sample_rate;
-    let mut library = Library::new(sr, samples);
-    let mut tables = TableLibrary::new();
-    let mut channels = Vec::new();
-    let mut index = HashMap::new();
-    // wavetables made from samples (`user:<sample id>` in a patch)
-    for c in &project.channels {
-        register_user_tables(&c.state, &mut library, &mut tables);
-    }
-    let last_track = project.mixer.len().saturating_sub(1);
-    for c in &project.channels {
-        let sample = c.sample_id.as_deref().and_then(|id| library.get(id));
-        // each pad of a pad instrument has its own sample
-        let pad_samples: Vec<Option<std::sync::Arc<crate::factory::Audio>>> =
-            if c.plugin_id == "lumapad" {
+impl Engine {
+    /// Build the engine for a project: instruments, mixer, samples.
+    pub(crate) fn new(
+        project: Arc<Project>,
+        samples: &BTreeMap<String, Sample>,
+        sr: f64,
+        song: bool,
+        pattern: Option<usize>,
+    ) -> Result<Self, String> {
+        let mut library = Library::new(sr, samples);
+        let mut tables = TableLibrary::new();
+        let mut channels = Vec::new();
+        let mut index = HashMap::new();
+        // wavetables made from samples (`user:<sample id>` in a patch)
+        for c in &project.channels {
+            register_user_tables(&c.state, &mut library, &mut tables);
+        }
+        let last_track = project.mixer.len().saturating_sub(1);
+        for c in &project.channels {
+            let sample = c.sample_id.as_deref().and_then(|id| library.get(id));
+            // each pad of a pad instrument has its own sample
+            let pad_samples: Vec<Option<Arc<crate::factory::Audio>>> = if c.plugin_id == "lumapad" {
                 c.state
                     .get("pads")
                     .and_then(|p| p.as_array())
@@ -573,117 +698,86 @@ fn render_taps(
             } else {
                 Vec::new()
             };
-        let inst = Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample, pad_samples)
-            .map_err(|e| format!("{}: {}", c.name, e.0))?;
-        index.insert(c.id.clone(), channels.len());
-        channels.push(ChannelRt {
-            inst,
-            volume: Param::new(if c.mute { 0.0 } else { c.volume }),
-            pan: Param::new(c.pan),
-            track: c.mixer_track.min(last_track),
-            mute: c.mute,
-            pitch: c.pitch,
-            pitch_line: Timeline::default(),
-        });
-    }
-    let song = matches!(opts.mode, Mode::Song);
-    let (from, to, loops, pattern) = match &opts.mode {
-        Mode::Song => (0.0, song_length(project), 1, None),
-        Mode::Pattern { id, loops } => {
-            let pat = id
-                .as_ref()
-                .and_then(|i| project.pattern(i))
-                .or_else(|| project.patterns.first());
-            let loops = (*loops).max(1);
-            (
-                0.0,
-                pattern_length(pat, project.time_sig) * loops as f64,
-                loops,
-                pat,
-            )
+            let inst =
+                Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample, pad_samples)
+                    .map_err(|e| format!("{}: {}", c.name, e.0))?;
+            index.insert(c.id.clone(), channels.len());
+            channels.push(ChannelRt {
+                inst,
+                volume: Param::new(if c.mute { 0.0 } else { c.volume }),
+                pan: Param::new(c.pan),
+                track: c.mixer_track.min(last_track),
+                mute: c.mute,
+                pitch: c.pitch,
+                pitch_line: Timeline::default(),
+            });
         }
-    };
-    let seconds = seconds_between(project, from, to, song) + opts.tail;
-    let length = (seconds * sr).ceil() as usize;
-    let pad = (MAX_PAD * sr).ceil() as usize;
-
-    let muted_tracks: Vec<bool> = project.playlist.tracks.iter().map(|t| t.mute).collect();
-    let mut sched = Scheduler {
-        project,
-        song,
-        pattern,
-        channels,
-        index,
-        cursor_tick: 0.0,
-        cursor_time: 0.0,
-        abs_ticks: 0.0,
-        last_bpm: 0.0,
-        anchors: Vec::new(),
-        muted_tracks,
-        mixer: Mixer::new(&project.mixer, project.master_volume, sr, BLOCK),
-        library,
-        fresh: true,
-        automation_first: HashSet::new(),
-    };
-    sched.mixer.set_length(length + pad);
-    let bpm0 = tempo_at(project, 0.0, song);
-    for ch in &mut sched.channels {
-        ch.inst.set_bpm(bpm0);
-    }
-    if song {
-        sched.schedule_offline(from, to, 0.0);
-    } else {
-        // pattern mode renders the loops back to back
-        let len = (to - from) / loops as f64;
-        let mut t = 0.0;
-        for _ in 0..loops {
-            t = sched.schedule_offline(0.0, len, t);
+        let muted_tracks: Vec<bool> = project.playlist.tracks.iter().map(|t| t.mute).collect();
+        let mixer = Mixer::new(&project.mixer, project.master_volume, sr, BLOCK);
+        let mut e = Engine {
+            sr,
+            song,
+            pattern,
+            channels,
+            index,
+            cursor_tick: 0.0,
+            cursor_time: 0.0,
+            abs_ticks: 0.0,
+            last_bpm: 0.0,
+            anchors: Vec::new(),
+            segments: Default::default(),
+            time_anchor: None,
+            muted_tracks,
+            mixer,
+            library,
+            fresh: true,
+            automation_first: HashSet::new(),
+            project,
+            bl: vec![0.0; BLOCK],
+            br: vec![0.0; BLOCK],
+            vol: vec![0.0; BLOCK],
+            pan: vec![0.0; BLOCK],
+        };
+        let bpm0 = tempo_at(&e.project, 0.0, song);
+        for ch in &mut e.channels {
+            ch.inst.set_bpm(bpm0);
         }
+        Ok(e)
     }
-    let Scheduler {
-        mut channels,
-        anchors,
-        mut mixer,
-        ..
-    } = sched;
 
-    let total = length + pad;
-    let mut outs: Vec<(Vec<f32>, Vec<f32>)> = taps
-        .iter()
-        .map(|_| (Vec::with_capacity(total), Vec::with_capacity(total)))
-        .collect();
-    let (mut bl, mut br) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
-    let (mut ml, mut mr) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
-    let mut gains = [vec![0f32; BLOCK], vec![0f32; BLOCK]];
-    let mut frame = 0usize;
-    while frame < total {
-        let n = BLOCK.min(total - frame);
+    /// Render the block of frames starting at `frame` into `out_l` and `out_r`: the
+    /// master's output. Insert outputs can be read afterwards from the mixer.
+    pub(crate) fn render_block(&mut self, frame: usize, out_l: &mut [f32], out_r: &mut [f32]) {
+        let n = out_l.len();
+        let sr = self.sr;
         let t0 = frame as f64 / sr;
-        let a = anchors
+        let a = self
+            .anchors
             .iter()
             .rev()
             .find(|a| a.time <= t0)
-            .or(anchors.first())
+            .or(self.anchors.first())
             .copied()
             .unwrap_or(Anchor {
                 time: 0.0,
                 beat: 0.0,
-                bpm: project.bpm,
+                bpm: self.project.bpm,
             });
         let beat = a.beat + (t0 - a.time) * a.bpm / 60.0;
-        mixer.set_position(beat, a.bpm);
-        mixer.begin(n);
-        for ch in &mut channels {
+        self.mixer.set_position(beat, a.bpm);
+        self.mixer.begin(n);
+        for v in [&mut self.bl, &mut self.br, &mut self.vol, &mut self.pan] {
+            v.resize(n, 0.0);
+        }
+        for ch in &mut self.channels {
             if ch.inst.is_silent() {
                 continue;
             }
             ch.inst.set_position(beat, a.bpm);
-            let (l, r) = (&mut bl[..n], &mut br[..n]);
+            let (l, r) = (&mut self.bl[..n], &mut self.br[..n]);
             ch.inst.render(t0, l, r);
             let mono = ch.inst.is_mono();
-            let [vol, pan] = &mut gains;
-            vol.resize(n, 0.0);
-            pan.resize(n, 0.0);
+            let (vol, pan) = (&mut self.vol, &mut self.pan);
             ch.volume.fill(frame, vol, sr);
             ch.pan.fill(frame, pan, sr);
             if vol.iter().any(|&g| g != 1.0) {
@@ -699,9 +793,69 @@ fn render_taps(
             } else if pan.iter().any(|&p| p != 0.0) {
                 stereo_pan_a(l, r, pan);
             }
-            mixer.add_input(ch.track, l, r);
+            self.mixer.add_input(ch.track, l, r);
         }
-        mixer.process(frame, &mut ml[..n], &mut mr[..n]);
+        self.mixer.process(frame, out_l, out_r);
+    }
+}
+
+/// Render the project and return each tap's output, trimmed by its plugin delay.
+fn render_taps(
+    project: &Project,
+    samples: &BTreeMap<String, Sample>,
+    opts: &RenderOptions,
+    taps: &[Tap],
+) -> Result<Vec<Rendered>, String> {
+    let sr = opts.sample_rate;
+    let song = matches!(opts.mode, Mode::Song);
+    let (from, to, loops, pattern) = match &opts.mode {
+        Mode::Song => (0.0, song_length(project), 1, None),
+        Mode::Pattern { id, loops } => {
+            let index = id
+                .as_ref()
+                .and_then(|i| project.patterns.iter().position(|p| &p.id == i))
+                .or(if project.patterns.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
+            let pat = index.map(|i| &project.patterns[i]);
+            let loops = (*loops).max(1);
+            (
+                0.0,
+                pattern_length(pat, project.time_sig) * loops as f64,
+                loops,
+                index,
+            )
+        }
+    };
+    let seconds = seconds_between(project, from, to, song) + opts.tail;
+    let length = (seconds * sr).ceil() as usize;
+    let pad = (MAX_PAD * sr).ceil() as usize;
+
+    let mut sched = Engine::new(Arc::new(project.clone()), samples, sr, song, pattern)?;
+    sched.mixer.set_length(length + pad);
+    if song {
+        sched.schedule_offline(from, to, 0.0);
+    } else {
+        // pattern mode renders the loops back to back
+        let len = (to - from) / loops as f64;
+        let mut t = 0.0;
+        for _ in 0..loops {
+            t = sched.schedule_offline(0.0, len, t);
+        }
+    }
+
+    let total = length + pad;
+    let mut outs: Vec<(Vec<f32>, Vec<f32>)> = taps
+        .iter()
+        .map(|_| (Vec::with_capacity(total), Vec::with_capacity(total)))
+        .collect();
+    let (mut ml, mut mr) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
+    let mut frame = 0usize;
+    while frame < total {
+        let n = BLOCK.min(total - frame);
+        sched.render_block(frame, &mut ml[..n], &mut mr[..n]);
         for (tap, (out_l, out_r)) in taps.iter().zip(outs.iter_mut()) {
             match tap {
                 None => {
@@ -709,7 +863,7 @@ fn render_taps(
                     out_r.extend_from_slice(&mr[..n]);
                 }
                 Some(i) => {
-                    let (l, r) = mixer.insert_output(*i);
+                    let (l, r) = sched.mixer.insert_output(*i);
                     out_l.extend_from_slice(&l[..n]);
                     out_r.extend_from_slice(&r[..n]);
                 }
@@ -718,6 +872,7 @@ fn render_taps(
         frame += n;
     }
     // plugin delay moves the output later: trim it from the start
+    let mixer = &sched.mixer;
     Ok(taps
         .iter()
         .zip(outs)

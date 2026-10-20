@@ -2089,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "las-app"
-version = "0.2.0-alpha.13"
+version = "0.2.0-alpha.14"
 dependencies = [
  "cpal",
  "eframe",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "las-cli"
-version = "0.2.0-alpha.13"
+version = "0.2.0-alpha.14"
 dependencies = [
  "hound",
  "las-dsp",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "las-dsp"
-version = "0.2.0-alpha.13"
+version = "0.2.0-alpha.14"
 dependencies = [
  "serde",
  "serde_json",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "las-engine"
-version = "0.2.0-alpha.13"
+version = "0.2.0-alpha.14"
 dependencies = [
  "claxon",
  "flacenc",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "las-project"
-version = "0.2.0-alpha.13"
+version = "0.2.0-alpha.14"
 dependencies = [
  "aes-gcm",
  "crc32fast",

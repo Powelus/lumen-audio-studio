@@ -105,6 +105,8 @@ pub struct Voice {
     key: i32,
     /// The choke group of a pad voice.
     group: i32,
+    /// Its release has begun (a note that was gated, or let go).
+    released: bool,
     started: bool,
     done: bool,
 }
@@ -180,6 +182,7 @@ fn make_voice(buf: &Arc<Audio>, sr: f64, v: VoiceSpec) -> Voice {
         pan,
         key,
         group: 0,
+        released: duration.is_some(),
         started: false,
         done: false,
     }
@@ -381,6 +384,24 @@ impl Sampler {
         ));
     }
 
+    /// Let go of the key: the voices playing it release.
+    pub fn note_off(&mut self, key: i32, time: f64) {
+        let rel = num(self.state.get("release"), 0.08);
+        for v in &mut self.voices {
+            if v.key == key && !v.released {
+                v.released = true;
+                v.gain.cancel_scheduled_values(time);
+                v.gain.set_target_at_time(0.0, time, rel.max(0.002) / 4.0);
+                v.src.stop = Some(time + rel * 1.5 + 0.05);
+            }
+        }
+    }
+
+    /// Fade out everything that sounds.
+    pub fn stop(&mut self, time: f64) {
+        self.cut_voices(time);
+    }
+
     /// Whether the sampler loops its sample.
     pub fn state_loop(&self) -> Option<bool> {
         self.state.get("loop").and_then(Value::as_bool)
@@ -535,6 +556,15 @@ impl PadBank {
         );
         v.group = cut;
         self.voices.push(v);
+    }
+
+    /// Fade out everything that sounds.
+    pub fn stop(&mut self, time: f64) {
+        for v in &mut self.voices {
+            v.gain.cancel_scheduled_values(time);
+            v.gain.set_target_at_time(0.0, time, 0.02);
+            v.src.stop = Some(time + 0.15);
+        }
     }
 
     /// Render frames `f0..f0 + l.len()` (overwriting `l` and `r`).
