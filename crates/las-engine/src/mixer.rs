@@ -3,9 +3,9 @@
 //! routing, sidechain and plugin delay compensation. Port of the web version's
 //! `audio/mixer.ts`, which builds the same thing from Web Audio nodes.
 
+use crate::fxauto::{effect_param_def, map_automation, SlotAuto};
 use crate::instrument::stereo_pan_a;
 use crate::param::Param;
-use crate::fxauto::SlotAuto;
 use las_dsp::fx::registry::{descriptor, full_state, parse_params, EffectUnit, FxSlot};
 use las_project::{MixerTrack, MIXER_SLOTS};
 use serde_json::{json, Value};
@@ -422,6 +422,14 @@ impl Mixer {
             return;
         };
         if let Some(s) = t.slots.iter_mut().find(|s| s.id == slot_id) {
+            // parameters the effect automates itself (Web Audio parameters)
+            if path != "mix" {
+                let def = effect_param_def(s.auto.plugin_id(), path);
+                let mapped = map_automation(def.as_ref(), points);
+                if s.fx.unit.automate(path, &mapped, first) {
+                    return;
+                }
+            }
             s.auto.automate(path, points, first, length);
         }
     }

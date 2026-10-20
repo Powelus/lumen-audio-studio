@@ -237,6 +237,14 @@ cases.fxa_timed2 = () =>
     ['cmix', 'mix', ramp3(0.2, 0.9, 0.5), 0, 8, 1],
   ]);
 
+cases.fxa_native2 = () =>
+  fxAuto('fxa_native2', [['las-phaser', { rate: 0.6, depth: 0.7, feedback: 0.3, mix: 0.7 }], ['las-stereo', { width: 1.2, pan: 0, gain: 0 }], ['las-reverb', { decay: 1.2, wet: 0.5 }]], [
+    ['pc', 'center', ramp3(0.3, 0.8, 0.4), 0, 4, 0],
+    ['pm', 'mix', ramp3(0.2, 0.9, 0.6), 4, 4, 0],
+    ['sw', 'width', ramp3(0.2, 0.9, 0.5), 0, 4, 1],
+    ['sp', 'pan', ramp3(0.2, 0.9, 0.5), 4, 4, 1],
+    ['rw', 'wet', ramp3(0.1, 0.8, 0.3), 0, 4, 2],
+  ]);
 // the same projects without the effects that Web Audio builds from its own nodes,
 // so the instruments, mixer and scheduler are compared on their own
 cases.nebuladry = () => {
@@ -300,6 +308,22 @@ cases.fx_chorus_fb = () => {
   return p;
 };
 
+// each automation alone
+const SPLIT: [string, [string, Record<string, unknown>], string, number, number][] = [
+  ['eqf', ['las-eq', NATIVE['las-eq']], 'bands.1.freq', 0, 4],
+  ['eqg', ['las-eq', NATIVE['las-eq']], 'bands.2.gain', 0, 4],
+  ['eqq', ['las-eq', NATIVE['las-eq']], 'bands.3.q', 2, 4],
+  ['eqo', ['las-eq', NATIVE['las-eq']], 'output', 0, 8],
+  ['eqt', ['las-eq', NATIVE['las-eq']], 'bands.0.type', 4, 2],
+  ['phc', ['las-phaser', { rate: 0.6, depth: 0.7, feedback: 0.3, mix: 0.7 }], 'center', 0, 4],
+  ['phm', ['las-phaser', { rate: 0.6, depth: 0.7, feedback: 0.3, mix: 0.7 }], 'mix', 4, 4],
+  ['stw', ['las-stereo', { width: 1.2, pan: 0, gain: 0 }], 'width', 0, 4],
+  ['stp', ['las-stereo', { width: 1.2, pan: 0, gain: 0 }], 'pan', 4, 4],
+  ['rvw', ['las-reverb', { decay: 1.2, wet: 0.5 }], 'wet', 0, 4],
+];
+for (const [name, effect, param, start, length] of SPLIT) {
+  cases[`fxs_${name}`] = () => fxAuto(`fxs_${name}`, [effect], [[name, param, ramp3(0.2, 0.9, 0.4), start, length, 0]]);
+}
 it('writes the mix projects', async () => {
   mkdirSync(out, { recursive: true });
   for (const [name, make] of Object.entries(cases)) {

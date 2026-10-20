@@ -10,7 +10,9 @@
 //!    nearest each point (everything else).
 
 use crate::param::{Param, Timeline};
-use las_dsp::fx::registry::{descriptor, full_state, parse_params, EffectUnit, ParamDef, ParamKind};
+use las_dsp::fx::registry::{
+    descriptor, full_state, parse_params_for, EffectUnit, ParamDef, ParamKind,
+};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
@@ -157,7 +159,14 @@ pub fn effect_param_def(plugin_id: &str, path: &str) -> Option<ParamDef> {
 fn is_ramped(plugin_id: &str, path: &str) -> bool {
     let fixed: &[&str] = match plugin_id {
         "las-comp" | "las-ducker" => &[
-            "threshold", "ratio", "attack", "release", "knee", "makeup", "mix", "scHpf",
+            "threshold",
+            "ratio",
+            "attack",
+            "release",
+            "knee",
+            "makeup",
+            "mix",
+            "scHpf",
         ],
         "las-limiter" => &["gain", "ceiling", "release", "lookahead"],
         "las-crusher" => &["bits", "downsample", "mix"],
@@ -258,9 +267,7 @@ impl SlotAuto {
             if frame >= length as f64 {
                 continue;
             }
-            let off: f64 = std::env::var("FOFF").ok().and_then(|x| x.parse().ok()).unwrap_or(0.0);
-            let frame = (frame + off).max(0.0) as usize;
-            if std::env::var("DBGEV").is_ok() { eprintln!("EV {} {} {}", frame, path, v); }
+            let frame = frame.max(0.0) as usize;
             let at = self.timed.partition_point(|e| e.frame <= frame);
             self.timed.insert(
                 at,
@@ -297,8 +304,7 @@ impl SlotAuto {
             }
         }
         if state != self.applied {
-            if std::env::var("DBGEV").is_ok() { eprintln!("APPLY frame {} cutoff {:?}", frame, state.get("cutoff")); }
-            if let Ok(p) = parse_params(&self.plugin_id, &state, self.sr) {
+            if let Ok(p) = parse_params_for(unit, &self.plugin_id, &state, self.sr) {
                 unit.apply(p);
             }
             self.applied = state;

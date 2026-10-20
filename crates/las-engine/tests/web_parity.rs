@@ -121,6 +121,41 @@ fn web_audio_effects_match_closely() {
     }
 }
 
+/// Effect parameters changed by automation clips: ramps in the worklet effects,
+/// the slot's mix, and state updates on a grid, where Web Audio smooths each change
+/// with a time constant (a biquad filter evaluates its parameters once per channel).
+const AUTOMATED: [&str; 15] = [
+    "fxa_ramped",
+    "fxa_mix",
+    "fxa_timed",
+    "fxa_timed2",
+    "fxa_native2",
+    "fxs_eqf",
+    "fxs_eqg",
+    "fxs_eqq",
+    "fxs_eqo",
+    "fxs_eqt",
+    "fxs_phc",
+    "fxs_phm",
+    "fxs_stw",
+    "fxs_stp",
+    "fxs_rvw",
+];
+
+#[test]
+fn effect_automation_matches_the_web_version() {
+    for name in AUTOMATED {
+        let d = compare(name);
+        assert_eq!(d.frames.0, d.frames.1, "{name}: length");
+        assert!(d.peak > 0.01, "{name}: the reference is silent");
+        assert!(
+            d.rel_db < -90.0,
+            "{name}: error only {:.1} dB below the signal",
+            -d.rel_db
+        );
+    }
+}
+
 /// The error of each case (`CASES="a b" cargo test --release summary -- --ignored --nocapture`).
 #[test]
 #[ignore]

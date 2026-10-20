@@ -2,6 +2,17 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.12 - 2026-10-20
+
+Automation of effect parameters.
+
+- Automation clips now drive effect parameters and a slot's mix, as the web version does: ramps read once per render block for the dynamics, limiter, crusher, gate, shaper, step and DSP-module effects; the slot's mix as wet and dry gain ramps; the equaliser's frequency, gain, Q and output as parameter ramps; and everything else as state updates on a 30 ms grid.
+- The effects that the browser builds from Web Audio nodes (equaliser, overdrive, chorus, phaser, auto filter, stereo tool, reverb) now move to a changed setting the way the nodes do: with a 15 ms time constant, so an edit while playing no longer clicks. A filter forgets what it heard when its type changes.
+- The parameter timeline learned two more things about Chromium, found by measuring it: a node that processes two channels asks for each parameter once per channel, and a target curve carries on from one request to the next (so the right channel of a filter runs a render quantum ahead of the left); and a target counts as reached within 1.5 sixteen-bit steps of its value, so large values such as a cutoff in Hz snap later than gains.
+- A reverb whose response does not change keeps its tail when a setting moves.
+- Checked against the web render: ramps and the slot mix exact to rounding; the other automated effects 98 to 125 dB below the signal (`web_parity.rs`).
+- Not yet: automation of the maximizer, and of instrument parameters.
+
 ## 0.2.0-alpha.11 - 2026-10-16
 
 Audio clips, automation of the mixer and channels, and tempo changes.

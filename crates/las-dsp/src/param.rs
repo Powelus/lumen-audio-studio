@@ -210,7 +210,11 @@ impl Param {
                             let init = if e.time == t {
                                 match (prev, self.carried.take()) {
                                     // a request that carries on from another: the value it left
-                                    (Some(c), Some(v)) if matches!(self.events[c].kind, Kind::Target { .. }) => v,
+                                    (Some(c), Some(v))
+                                        if matches!(self.events[c].kind, Kind::Target { .. }) =>
+                                    {
+                                        v
+                                    }
                                     (Some(c), _) => self.hold(c, sample_rate),
                                     (None, _) => self.default,
                                 }
@@ -273,10 +277,20 @@ impl Param {
             if i + 1 == n {
                 // where the curve stands for the next frame
                 self.next_value = match self.cur.map(|c| self.events[c]) {
-                    Some(Event { kind: Kind::Target { tc }, value, .. })
-                        if !self.finished && tc > 0.0 && self.events.get(self.cur.map_or(0, |c| c + 1)).is_none_or(|n| !matches!(n.kind, Kind::Ramp)) =>
+                    Some(Event {
+                        kind: Kind::Target { tc },
+                        value,
+                        ..
+                    }) if !self.finished
+                        && tc > 0.0
+                        && self
+                            .events
+                            .get(self.cur.map_or(0, |c| c + 1))
+                            .is_none_or(|n| !matches!(n.kind, Kind::Ramp)) =>
                     {
-                        value + (self.init - value) * (-(self.pos - CARRY_SLIP) / (tc * sample_rate)).exp()
+                        value
+                            + (self.init - value)
+                                * (-(self.pos - CARRY_SLIP) / (tc * sample_rate)).exp()
                     }
                     _ => v,
                 };
@@ -309,7 +323,10 @@ impl Glides {
     pub fn with_channels(values: &[f64], channels: &[usize]) -> Self {
         Self {
             params: values.iter().map(|&v| Param::new(v)).collect(),
-            bufs: channels.iter().map(|&c| vec![Vec::new(); c.max(1)]).collect(),
+            bufs: channels
+                .iter()
+                .map(|&c| vec![Vec::new(); c.max(1)])
+                .collect(),
         }
     }
 
@@ -336,6 +353,11 @@ impl Glides {
             let mut outs: Vec<&mut [f32]> = chans.iter_mut().map(|b| &mut b[..]).collect();
             p.fill_channels(frame, &mut outs, sr);
         }
+    }
+
+    /// Parameter `i` itself, to put automation on.
+    pub fn param_mut(&mut self, i: usize) -> &mut Param {
+        &mut self.params[i]
     }
 
     /// Parameter `i`'s values for the first channel from the last [`Glides::fill`].

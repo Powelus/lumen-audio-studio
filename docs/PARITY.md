@@ -56,7 +56,10 @@ them with the web version in headless Chromium. The reference audio is committed
 under `crates/las-engine/tests/fixtures/` and `crates/las-engine/tests/web_parity.rs`
 compares. The instruments, mixer and scheduler agree to rounding; the Web Audio
 based effects agree to better than 85 dB below the signal (the browser is the
-reference for them, since Web Audio does not specify them).
+reference for them, since Web Audio does not specify them). Effect automation
+(`fxa_*` and `fxs_*` cases: ramps, a slot's mix, 30 ms state updates, equaliser
+parameter ramps and type changes) agrees to 98 dB or better. Not yet automated:
+the maximizer and instrument parameters.
 
 The synth worklet needs browser globals; `tools/parity/synth.gen.test.ts` supplies
 them and fixes `Math.random`. The original is not seeded, so its cases leave out
