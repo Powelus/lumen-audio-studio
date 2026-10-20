@@ -33,8 +33,35 @@ pub enum PlEdit {
     Delete {
         id: String,
     },
+    /// Switch a clip's mute on or off.
+    Mute {
+        id: String,
+    },
+    /// Cut a clip in two at a tick.
+    Split {
+        id: String,
+        at: f64,
+    },
+    /// Open the editor of an automation clip (by the clip's own id).
+    OpenAuto(String),
     /// Start playing from here.
     Seek(f64),
+}
+
+/// What a click on the playlist does, as in FL Studio's tool row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Tool {
+    /// Place pattern clips, move and resize clips.
+    #[default]
+    Draw,
+    /// Move and resize clips without placing new ones.
+    Select,
+    /// Cut the clip that is clicked at the grid line.
+    Slice,
+    /// Switch a clip's mute on or off.
+    Mute,
+    /// Delete the clip that is clicked.
+    Delete,
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +77,7 @@ pub struct PlaylistState {
     pub row: f32,
     /// Snap in ticks.
     pub snap: f64,
+    pub tool: Tool,
     drag: Option<Drag>,
 }
 
@@ -59,6 +87,7 @@ impl Default for PlaylistState {
             zoom: 0.12,
             row: 44.0,
             snap: f64::from(PPQ) * 4.0,
+            tool: Tool::Draw,
             drag: None,
         }
     }
@@ -147,7 +176,7 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
     let rows = track_count(project);
     let clips = &mut project.playlist.clips;
     match edit {
-        PlEdit::Begin | PlEdit::Seek(_) => {}
+        PlEdit::Begin | PlEdit::Seek(_) | PlEdit::OpenAuto(_) => {}
         PlEdit::Add(c) => clips.push((**c).clone()),
         PlEdit::Move { id, start, track } => {
             if let Some(c) = clips.iter_mut().find(|c| &c.id == id) {
@@ -161,6 +190,27 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
             }
         }
         PlEdit::Delete { id } => clips.retain(|c| &c.id != id),
+        PlEdit::Mute { id } => {
+            if let Some(c) = clips.iter_mut().find(|c| &c.id == id) {
+                c.muted = Some(c.muted != Some(true));
+            }
+        }
+        PlEdit::Split { id, at } => {
+            let Some(i) = clips.iter().position(|c| &c.id == id) else {
+                return;
+            };
+            let c = &clips[i];
+            if *at <= c.start || *at >= c.start + c.length {
+                return;
+            }
+            let mut right = c.clone();
+            right.id = uid("c");
+            right.start = *at;
+            right.length = c.start + c.length - at;
+            right.offset = c.offset + (at - c.start);
+            clips[i].length = at - clips[i].start;
+            clips.insert(i + 1, right);
+        }
     }
 }
 
@@ -250,6 +300,25 @@ pub fn draw(
                     Stroke::new(1.0, Color32::from_black_alpha(150)),
                     egui::StrokeKind::Inside,
                 );
+                if c.kind == ClipKind::Automation {
+                    if let Some(a) = project.automation.iter().find(|a| a.id == c.ref_id) {
+                        let len = a.length.max(1.0);
+                        let line: Vec<egui::Pos2> = a
+                            .points
+                            .iter()
+                            .map(|q| {
+                                egui::pos2(
+                                    r.left() + (q.t / len) as f32 * r.width(),
+                                    r.bottom() - 4.0 - q.v as f32 * (r.height() - 18.0),
+                                )
+                            })
+                            .collect();
+                        painter.with_clip_rect(r).add(egui::Shape::line(
+                            line,
+                            Stroke::new(1.5, Color32::from_black_alpha(190)),
+                        ));
+                    }
+                }
                 painter.with_clip_rect(r).text(
                     r.left_top() + egui::vec2(5.0, 3.0),
                     egui::Align2::LEFT_TOP,
@@ -333,6 +402,8 @@ pub fn draw(
                         if in_ruler(p) {
                             state.drag = Some(Drag::Seek);
                             edits.push(PlEdit::Seek(snapped(t, state.snap).max(0.0)));
+                        } else if !matches!(state.tool, Tool::Draw | Tool::Select) {
+                            // the other tools act on a click, not a drag
                         } else if let Some((i, at_edge)) = hit(project, t, tr, edge) {
                             let c = &project.playlist.clips[i];
                             edits.push(PlEdit::Begin);
@@ -376,17 +447,45 @@ pub fn draw(
                 if let Some(p) = resp.interact_pointer_pos() {
                     if in_ruler(p) {
                         edits.push(PlEdit::Seek(snapped(tick_at(p.x), state.snap).max(0.0)));
+                    } else if p.x > left {
+                        let (t, tr) = (tick_at(p.x), track_at(p.y));
+                        if let Some((i, _)) = hit(project, t, tr, edge) {
+                            let id = project.playlist.clips[i].id.clone();
+                            match state.tool {
+                                Tool::Mute => {
+                                    edits.push(PlEdit::Begin);
+                                    edits.push(PlEdit::Mute { id });
+                                }
+                                Tool::Delete => {
+                                    edits.push(PlEdit::Begin);
+                                    edits.push(PlEdit::Delete { id });
+                                }
+                                Tool::Slice => {
+                                    edits.push(PlEdit::Begin);
+                                    edits.push(PlEdit::Split {
+                                        id,
+                                        at: snapped(t, state.snap),
+                                    });
+                                }
+                                Tool::Draw | Tool::Select => {}
+                            }
+                        }
                     }
                 }
             }
             if resp.drag_stopped() {
                 state.drag = None;
             }
-            if resp.double_clicked_by(egui::PointerButton::Primary) {
+            if state.tool == Tool::Draw && resp.double_clicked_by(egui::PointerButton::Primary) {
                 if let Some(p) = resp.interact_pointer_pos() {
                     if p.x > left && !in_ruler(p) {
                         let (t, tr) = (tick_at(p.x), track_at(p.y));
-                        if hit(project, t, tr, edge).is_none() {
+                        if let Some((i, _)) = hit(project, t, tr, edge) {
+                            let c = &project.playlist.clips[i];
+                            if c.kind == ClipKind::Automation {
+                                edits.push(PlEdit::OpenAuto(c.ref_id.clone()));
+                            }
+                        } else {
                             if let Some(c) =
                                 new_pattern_clip(project, pattern, snapped(t, bar).max(0.0), tr)
                             {
@@ -466,6 +565,43 @@ mod tests {
         );
         apply(&mut p, &PlEdit::Delete { id });
         assert_eq!(p.playlist.clips.len(), before);
+    }
+
+    #[test]
+    fn clips_are_muted_and_sliced() {
+        let mut p = project();
+        p.playlist.clips.clear();
+        let mut c = new_pattern_clip(&p, 0, 0.0, 0).unwrap();
+        c.length = 384.0;
+        let id = c.id.clone();
+        p.playlist.clips.push(c);
+        apply(&mut p, &PlEdit::Mute { id: id.clone() });
+        assert_eq!(p.playlist.clips[0].muted, Some(true));
+        apply(&mut p, &PlEdit::Mute { id: id.clone() });
+        assert_eq!(p.playlist.clips[0].muted, Some(false));
+        apply(
+            &mut p,
+            &PlEdit::Split {
+                id: id.clone(),
+                at: 96.0,
+            },
+        );
+        let [a, b] = &p.playlist.clips[..] else {
+            panic!("{:?}", p.playlist.clips.len())
+        };
+        assert_eq!((a.start, a.length, a.offset), (0.0, 96.0, 0.0));
+        assert_eq!((b.start, b.length, b.offset), (96.0, 288.0, 96.0));
+        assert_ne!(a.id, b.id);
+        // a cut outside the clip, or at its edge, does nothing
+        apply(
+            &mut p,
+            &PlEdit::Split {
+                id: id.clone(),
+                at: 0.0,
+            },
+        );
+        apply(&mut p, &PlEdit::Split { id, at: 500.0 });
+        assert_eq!(p.playlist.clips.len(), 2);
     }
 
     #[test]

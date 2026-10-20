@@ -32,11 +32,32 @@ pub enum Edit {
     Delete {
         id: String,
     },
+    /// Set a note's velocity (0 to 1).
+    Velocity {
+        id: String,
+        vel: f64,
+    },
+    /// Snap every note's start and length to the grid.
+    Quantize {
+        snap: f64,
+    },
     /// Sound a key (a note being placed or moved) or let go of it.
     Audition {
         key: i32,
         on: bool,
     },
+}
+
+/// What a click on the roll does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Tool {
+    /// Place, move and resize notes.
+    #[default]
+    Draw,
+    /// Move and resize notes without placing new ones.
+    Select,
+    /// Delete the note that is clicked.
+    Delete,
 }
 
 /// What is being dragged.
@@ -62,6 +83,11 @@ pub struct RollState {
     pub snap: f64,
     /// The length a new note gets from a click.
     pub len: f64,
+    pub tool: Tool,
+    /// Show the other channels' notes faintly behind this one's.
+    pub ghost: bool,
+    /// How far the grid is scrolled to the right, for the velocity lane under it.
+    scroll_x: f32,
     drag: Option<Drag>,
     /// The pattern and channel the view was last centred for.
     centred: Option<(usize, usize)>,
@@ -74,6 +100,9 @@ impl Default for RollState {
             row: 14.0,
             snap: f64::from(TICKS_PER_STEP),
             len: f64::from(TICKS_PER_STEP) * 4.0,
+            tool: Tool::Draw,
+            ghost: true,
+            scroll_x: 0.0,
             drag: None,
             centred: None,
         }
@@ -124,6 +153,18 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
             }
         }
         Edit::Delete { id } => notes.retain(|n| &n.id != id),
+        Edit::Velocity { id, vel } => {
+            if let Some(n) = notes.iter_mut().find(|n| &n.id == id) {
+                n.vel = vel.clamp(0.0, 1.0);
+            }
+        }
+        Edit::Quantize { snap } => {
+            let g = snap.max(1.0);
+            for n in notes.iter_mut() {
+                n.pos = (n.pos / g).round() * g;
+                n.len = ((n.len / g).round() * g).max(g);
+            }
+        }
     }
     if notes.is_empty() {
         p.notes.remove(channel);
@@ -165,8 +206,10 @@ pub fn draw(
 
     let width = GUTTER + (ticks as f32 + bar as f32) * state.zoom;
     let height = KEYS as f32 * state.row;
+    const LANE: f32 = 74.0;
     let mut area = egui::ScrollArea::both()
         .auto_shrink([false, false])
+        .max_height((ui.available_height() - LANE - 10.0).max(120.0))
         .id_salt("roll");
     if state.centred != Some((pattern, channel)) {
         // bring the notes into view: the middle of their keys, or middle C
@@ -181,7 +224,7 @@ pub fn draw(
         area = area.vertical_scroll_offset(y);
         state.centred = Some((pattern, channel));
     }
-    area.show_viewport(ui, |ui, viewport| {
+    let out = area.show_viewport(ui, |ui, viewport| {
         let (resp, painter) =
             ui.allocate_painter(egui::vec2(width, height), Sense::click_and_drag());
         let origin = resp.rect.min;
@@ -244,6 +287,27 @@ pub fn draw(
             ],
             Stroke::new(2.0, crate::theme::accent().gamma_multiply(0.7)),
         );
+        // the other channels' notes, faintly
+        if state.ghost {
+            if let Some(pat) = pat {
+                for (i, c) in project.channels.iter().enumerate() {
+                    if i == channel {
+                        continue;
+                    }
+                    let col = crate::rack::channel_colour(c);
+                    for n in pat.notes.get(&c.id).into_iter().flatten() {
+                        let r = Rect::from_min_max(
+                            egui::pos2(x_of(n.pos), y_of(n.key) + 2.0),
+                            egui::pos2(
+                                (x_of(n.pos + n.len) - 1.0).max(x_of(n.pos) + 3.0),
+                                y_of(n.key) + state.row - 1.0,
+                            ),
+                        );
+                        painter.rect_filled(r, 2.0, col.gamma_multiply(0.22));
+                    }
+                }
+            }
+        }
         // notes
         for n in notes {
             let r = Rect::from_min_max(
@@ -306,6 +370,11 @@ pub fn draw(
                     let (t, k) = ptr(origin_pos);
                     edits.push(Edit::Begin);
                     match hit(notes, t, k, edge) {
+                        Some((i, _)) if state.tool == Tool::Delete => {
+                            edits.push(Edit::Delete {
+                                id: notes[i].id.clone(),
+                            });
+                        }
                         Some((i, true)) => {
                             state.drag = Some(Drag::Resize {
                                 id: notes[i].id.clone(),
@@ -323,6 +392,7 @@ pub fn draw(
                                 on: true,
                             });
                         }
+                        None if state.tool != Tool::Draw => {}
                         None => {
                             let at = snapped(t, state.snap).max(0.0);
                             let n = new_note(k, at, state.snap.max(1.0));
@@ -371,7 +441,7 @@ pub fn draw(
             if let Some(p) = resp.interact_pointer_pos() {
                 if p.x > grid_left {
                     let (t, k) = ptr(p);
-                    if hit(notes, t, k, edge).is_none() {
+                    if state.tool == Tool::Draw && hit(notes, t, k, edge).is_none() {
                         edits.push(Edit::Begin);
                         let at = snapped(t, state.snap).max(0.0);
                         edits.push(Edit::Add(new_note(k, at, state.len)));
@@ -408,6 +478,61 @@ pub fn draw(
             }
         }
     });
+    state.scroll_x = out.state.clamped_offset().x;
+    // the velocity lane under the grid
+    let (lane, lresp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), LANE),
+        Sense::click_and_drag(),
+    );
+    let painter = ui.painter_at(lane);
+    painter.rect_filled(lane, 0.0, pl.well_deep);
+    painter.text(
+        lane.left_top() + egui::vec2(6.0, 4.0),
+        egui::Align2::LEFT_TOP,
+        "VELOCITY",
+        egui::FontId::proportional(9.5),
+        pl.muted,
+    );
+    let lx = |t: f64| lane.left() + GUTTER + t as f32 * state.zoom - state.scroll_x;
+    let bar_h = LANE - 16.0;
+    for n in notes {
+        let x = lx(n.pos);
+        if x > lane.right() || lx(n.pos + n.len) < lane.left() + GUTTER {
+            continue;
+        }
+        let h = bar_h * n.vel.clamp(0.0, 1.0) as f32;
+        let r = Rect::from_min_max(
+            egui::pos2(x.max(lane.left() + GUTTER), lane.bottom() - 4.0 - h),
+            egui::pos2(
+                (lx(n.pos + n.len) - 1.0).max(x + 3.0).min(lane.right()),
+                lane.bottom() - 4.0,
+            ),
+        );
+        painter.rect_filled(r, 2.0, pl.accent.gamma_multiply(0.85));
+    }
+    if lresp.drag_started_by(egui::PointerButton::Primary)
+        || lresp.clicked_by(egui::PointerButton::Primary)
+    {
+        edits.push(Edit::Begin);
+    }
+    if lresp.dragged_by(egui::PointerButton::Primary)
+        || lresp.clicked_by(egui::PointerButton::Primary)
+        || lresp.drag_started_by(egui::PointerButton::Primary)
+    {
+        if let Some(p) = lresp.interact_pointer_pos() {
+            let tick = f64::from((p.x - lane.left() - GUTTER + state.scroll_x) / state.zoom);
+            let vel = f64::from(((lane.bottom() - 4.0 - p.y) / bar_h).clamp(0.0, 1.0));
+            if let Some(n) = notes
+                .iter()
+                .find(|n| tick >= n.pos && tick < n.pos + n.len.max(1.0))
+            {
+                edits.push(Edit::Velocity {
+                    id: n.id.clone(),
+                    vel,
+                });
+            }
+        }
+    }
     edits
 }
 
@@ -480,6 +605,66 @@ mod tests {
         assert!(!p.patterns[0].notes.contains_key("nobody"));
         // a pattern that does not exist is ignored
         apply(&mut p, 999, "nobody", &Edit::Add(new_note(60, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn velocity_is_set_and_held_between_zero_and_one() {
+        let mut p = project();
+        let ch = p.channels[0].id.clone();
+        p.patterns[0].notes.remove(&ch);
+        let n = new_note(60, 0.0, 24.0);
+        let id = n.id.clone();
+        apply(&mut p, 0, &ch, &Edit::Add(n));
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Velocity {
+                id: id.clone(),
+                vel: 0.3,
+            },
+        );
+        assert_eq!(p.patterns[0].notes[&ch][0].vel, 0.3);
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Velocity {
+                id: id.clone(),
+                vel: 7.0,
+            },
+        );
+        assert_eq!(p.patterns[0].notes[&ch][0].vel, 1.0);
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Velocity {
+                id: "nope".into(),
+                vel: 0.1,
+            },
+        );
+        assert_eq!(p.patterns[0].notes[&ch][0].vel, 1.0);
+    }
+
+    #[test]
+    fn quantize_snaps_starts_and_lengths_to_the_grid() {
+        let mut p = project();
+        let ch = p.channels[0].id.clone();
+        p.patterns[0].notes.remove(&ch);
+        let mut n = new_note(60, 50.0, 30.0);
+        n.step = None;
+        apply(&mut p, 0, &ch, &Edit::Add(n));
+        apply(&mut p, 0, &ch, &Edit::Quantize { snap: 24.0 });
+        let (pos, len, id) = {
+            let n = &p.patterns[0].notes[&ch][0];
+            (n.pos, n.len, n.id.clone())
+        };
+        assert_eq!((pos, len), (48.0, 24.0));
+        // a very short note never vanishes
+        apply(&mut p, 0, &ch, &Edit::Resize { id, len: 1.0 });
+        apply(&mut p, 0, &ch, &Edit::Quantize { snap: 24.0 });
+        assert_eq!(p.patterns[0].notes[&ch][0].len, 24.0);
     }
 
     #[test]

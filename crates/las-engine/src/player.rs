@@ -43,6 +43,10 @@ pub struct Player {
     /// Rendered frames not yet taken.
     ready: usize,
     used: bool,
+    /// Click on every beat while playing.
+    metronome: bool,
+    /// The click sounding: frames left and the frequency.
+    click: Option<(usize, f32)>,
 }
 
 impl Player {
@@ -76,6 +80,8 @@ impl Player {
             out: [vec![0.0; BLOCK], vec![0.0; BLOCK]],
             ready: 0,
             used: false,
+            metronome: false,
+            click: None,
         })
     }
 
@@ -113,6 +119,64 @@ impl Player {
 
     pub fn is_playing(&self) -> bool {
         self.playing
+    }
+
+    /// The peak level of each mixer insert (master first), falling slowly.
+    pub fn insert_peaks(&self) -> &[f32] {
+        self.engine.insert_peaks()
+    }
+
+    /// Switch the metronome on or off.
+    pub fn set_metronome(&mut self, on: bool) {
+        self.metronome = on;
+        if !on {
+            self.click = None;
+        }
+    }
+
+    /// Mix the click of a beat that starts in the block of `BLOCK` frames at `frame`.
+    fn add_click(&mut self, frame: usize) {
+        if !self.metronome || !self.playing {
+            return;
+        }
+        let t0 = frame as f64 / self.sr;
+        let t1 = (frame + BLOCK) as f64 / self.sr;
+        let (a, b) = (self.engine.tick_at(t0), self.engine.tick_at(t1));
+        let beat = PPQ_F * 4.0 / f64::from(self.project.time_sig.1.max(1));
+        let bar = beat * f64::from(self.project.time_sig.0.max(1));
+        let (na, nb) = ((a / beat).ceil(), (b / beat).ceil());
+        if nb > na || (a <= 0.0 && frame == 0) {
+            // a beat line lies in this block: the first frame at or after it
+            let tick = na * beat;
+            let at = if b > a {
+                (((tick - a) / (b - a)) * BLOCK as f64).clamp(0.0, (BLOCK - 1) as f64) as usize
+            } else {
+                0
+            };
+            let accent = (tick / bar).fract().abs() < 1e-9;
+            let f = if accent { 1500.0 } else { 1000.0 };
+            self.click = Some(((self.sr * 0.03) as usize, f));
+            self.render_click(at);
+        } else if self.click.is_some() {
+            self.render_click(0);
+        }
+    }
+
+    /// Add the sounding click to the output block from frame `from`.
+    fn render_click(&mut self, from: usize) {
+        let Some((left, f)) = self.click else {
+            return;
+        };
+        let total = (self.sr * 0.03) as usize;
+        let n = left.min(BLOCK - from);
+        for i in 0..n {
+            let k = (total - left + i) as f32;
+            let env = (1.0 - k / total as f32).powi(2);
+            let v = (k * f * std::f32::consts::TAU / self.sr as f32).sin() * env * 0.35;
+            self.out[0][from + i] += v;
+            self.out[1][from + i] += v;
+        }
+        self.click = (left > n).then_some((left - n, f));
     }
 
     /// Whether this player can still be started.
@@ -181,6 +245,8 @@ impl Player {
                 self.schedule();
                 let [bl, br] = &mut self.out;
                 self.engine.render_block(self.frame, bl, br);
+                let at = self.frame;
+                self.add_click(at);
                 self.frame += BLOCK;
                 self.ready = BLOCK;
             }

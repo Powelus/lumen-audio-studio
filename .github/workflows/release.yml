@@ -1,8 +1,8 @@
 # Builds the `las` command line tool on Windows, macOS and Linux, smoke-tests
 # the built binary, and publishes a GitHub Release when a new version lands on
-# main. Pull requests get the same build and test, with the packages attached
-# to the run (no release). A version with a "-" (for example 0.2.0-alpha.1) is
-# published as a pre-release.
+# main. Pull requests get the same build and smoke test but upload nothing, so
+# they use no Actions storage. A version with a "-" (for example 0.2.0-alpha.1)
+# is published as a pre-release.
 name: Release
 
 on:
@@ -91,6 +91,7 @@ jobs:
           print("peak", peak)
           PY
       - name: Package
+        if: needs.prepare.outputs.publish == 'true'
         shell: bash
         run: |
           name="las-$VERSION-${{ matrix.name }}"
@@ -105,12 +106,15 @@ jobs:
           fi
           rm -rf "$name"
           ls -l
+      # only a release needs the packages, and only until the release job below has
+      # downloaded them, so they are kept for a day
       - uses: actions/upload-artifact@v4
+        if: needs.prepare.outputs.publish == 'true'
         with:
           name: las-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   release:
     needs: [prepare, build]

@@ -5,6 +5,7 @@
 
 use crate::app::App;
 use crate::audio::Command;
+use crate::auto::{self, AutoEdit, AutoRequest, AutoState};
 use crate::mixer::{self, MixEdit};
 use crate::playlist::{self, PlEdit, PlaylistState};
 use crate::roll::{self, Edit, RollState};
@@ -58,6 +59,10 @@ pub struct ProjectState {
     pub has_player: bool,
     pub roll: RollState,
     pub playlist: PlaylistState,
+    pub mixer_state: mixer::MixerState,
+    /// The automation clip whose editor is open, and its state.
+    pub open_auto: Option<String>,
+    pub auto_state: AutoState,
     /// Where "Play song" starts, in ticks.
     pub start_tick: f64,
     /// Earlier and later states of the project, for undo and redo.
@@ -76,12 +81,30 @@ pub struct ProjectState {
 impl ProjectState {
     pub fn open(&mut self, path: &str) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        let b = decode(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        self.open_bytes(&bytes, path)
+            .map_err(|e| format!("{path}: {e}"))
+    }
+
+    /// Open a project from its bytes; `path` is where it will be saved ("" for none).
+    pub fn open_bytes(&mut self, bytes: &[u8], path: &str) -> Result<(), String> {
+        let b = decode(bytes).map_err(|e| e.to_string())?;
+        self.install(b.project, b.samples, path, b.warnings);
+        Ok(())
+    }
+
+    /// Make a project the open one.
+    pub fn install(
+        &mut self,
+        project: Project,
+        samples: BTreeMap<String, Sample>,
+        path: &str,
+        warnings: Vec<String>,
+    ) {
         self.loaded = Some(Loaded {
             path: path.to_string(),
-            project: Arc::new(b.project),
-            samples: Arc::new(b.samples),
-            warnings: b.warnings,
+            project: Arc::new(project),
+            samples: Arc::new(samples),
+            warnings,
         });
         self.pattern = 0;
         self.channel = 0;
@@ -93,7 +116,13 @@ impl ProjectState {
         self.dirty = false;
         self.stale = false;
         self.last_edit = None;
-        Ok(())
+        self.open_effect = None;
+        self.open_auto = None;
+    }
+
+    /// Whether the project has a file to be saved to.
+    pub fn has_file(&self) -> bool {
+        self.loaded.as_ref().is_some_and(|l| !l.path.is_empty())
     }
 
     /// Carry out the edits of one frame on the open project.
@@ -140,6 +169,7 @@ impl ProjectState {
                     self.redo.clear();
                 }
                 PlEdit::Seek(t) => self.start_tick = *t,
+                PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
                 _ => {
                     playlist::apply(Arc::make_mut(&mut l.project), e);
                     self.dirty = true;
@@ -149,11 +179,40 @@ impl ProjectState {
         }
     }
 
-    /// Carry out the mixer edits of one frame.
-    pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
+    /// Make an automation clip for a request, at the start marker, and open its editor.
+    pub fn create_automation(&mut self, req: &AutoRequest) {
+        let at = self.start_tick;
+        let mut id = String::new();
+        self.modify(true, |p| id = auto::create_clip(p, req, at));
+        self.open_auto = Some(id);
+    }
+
+    /// Carry out the edits of an automation clip's curve.
+    pub fn edit_auto(&mut self, edits: &[AutoEdit]) {
         let Some(l) = &mut self.loaded else { return };
         for e in edits {
-            if let MixEdit::OpenEffect { insert, slot } = e {
+            if *e == AutoEdit::Begin {
+                self.undo.push(l.project.clone());
+                if self.undo.len() > 200 {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            } else {
+                auto::apply(Arc::make_mut(&mut l.project), e);
+                self.dirty = true;
+                self.stale = true;
+            }
+        }
+    }
+
+    /// Carry out the mixer edits of one frame.
+    pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
+        let mut pending: Vec<AutoRequest> = Vec::new();
+        let Some(l) = &mut self.loaded else { return };
+        for e in edits {
+            if let MixEdit::Automate(req) = e {
+                pending.push(req.clone());
+            } else if let MixEdit::OpenEffect { insert, slot } = e {
                 self.open_effect = Some((*insert, *slot));
             } else if *e == MixEdit::Begin {
                 self.undo.push(l.project.clone());
@@ -166,6 +225,9 @@ impl ProjectState {
                 self.dirty = true;
                 self.stale = true;
             }
+        }
+        for r in pending {
+            self.create_automation(&r);
         }
     }
 
@@ -186,9 +248,12 @@ impl ProjectState {
 
     /// Carry out channel setting edits (level, pan, mute, swing).
     pub fn edit_chans(&mut self, edits: &[ChanEdit]) {
+        let mut pending: Vec<AutoRequest> = Vec::new();
         let Some(l) = &mut self.loaded else { return };
         for e in edits {
-            if *e == ChanEdit::Begin {
+            if let ChanEdit::Automate(req) = e {
+                pending.push(req.clone());
+            } else if *e == ChanEdit::Begin {
                 self.undo.push(l.project.clone());
                 if self.undo.len() > 200 {
                     self.undo.remove(0);
@@ -200,6 +265,29 @@ impl ProjectState {
                 self.stale = true;
             }
         }
+        for r in pending {
+            self.create_automation(&r);
+        }
+    }
+
+    /// Change the project and its samples together (undo covers the project; a sample
+    /// that no channel uses any more is harmless).
+    pub fn modify_with_samples(
+        &mut self,
+        begin: bool,
+        f: impl FnOnce(&mut Project, &mut BTreeMap<String, Sample>),
+    ) {
+        let Some(l) = &mut self.loaded else { return };
+        if begin {
+            self.undo.push(l.project.clone());
+            if self.undo.len() > 200 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        f(Arc::make_mut(&mut l.project), Arc::make_mut(&mut l.samples));
+        self.dirty = true;
+        self.stale = true;
     }
 
     /// Change the project, starting an undo step only when this is a different kind of
@@ -234,13 +322,26 @@ impl ProjectState {
 
     /// Write the project back to the file it came from.
     pub fn save(&mut self) -> Result<(), String> {
-        let Some(l) = &self.loaded else {
+        let Some(path) = self.loaded.as_ref().map(|l| l.path.clone()) else {
             return Ok(());
         };
+        self.save_to(&path)
+    }
+
+    /// Write the project to a file, which is then the one it belongs to.
+    pub fn save_to(&mut self, path: &str) -> Result<(), String> {
+        let Some(l) = &mut self.loaded else {
+            return Ok(());
+        };
+        if path.is_empty() {
+            return Err("no file to save to".into());
+        }
         let bytes = encode(&l.project, &l.samples, true).map_err(|e| e.to_string())?;
-        let tmp = format!("{}.tmp", l.path);
+        let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, bytes).map_err(|e| format!("{tmp}: {e}"))?;
-        std::fs::rename(&tmp, &l.path).map_err(|e| format!("{}: {e}", l.path))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))?;
+        l.path = path.to_string();
+        self.path = path.to_string();
         self.dirty = false;
         Ok(())
     }
@@ -298,10 +399,23 @@ impl App {
         }
     }
 
+    /// Save: to the file the project has, or ask for one.
     pub(crate) fn save_project(&mut self) {
+        if !self.project.has_file() {
+            self.save_as_dialog();
+            return;
+        }
         match self.project.save() {
             Ok(()) => self.project.error = None,
             Err(e) => self.project.error = Some(e),
+        }
+    }
+
+    /// Make the project that was just installed ready to play and to take live keys.
+    pub(crate) fn ready_project(&mut self) {
+        self.project.error = None;
+        if let Some(rate) = self.audio.as_ref().map(|a| a.sample_rate as f64) {
+            self.project.start(PlayMode::Song, Start::Ready, rate);
         }
     }
 
@@ -311,6 +425,16 @@ impl App {
         };
         let project = l.project.clone();
         ui.horizontal(|ui| {
+            for (t, name) in [
+                (playlist::Tool::Draw, "Draw"),
+                (playlist::Tool::Select, "Select"),
+                (playlist::Tool::Slice, "Slice"),
+                (playlist::Tool::Mute, "Mute"),
+                (playlist::Tool::Delete, "Delete"),
+            ] {
+                ui.selectable_value(&mut self.project.playlist.tool, t, name);
+            }
+            ui.separator();
             ui.label("Snap");
             let snap = &mut self.project.playlist.snap;
             egui::ComboBox::from_id_salt("playlist-snap")
@@ -351,6 +475,14 @@ impl App {
                 ui.selectable_value(&mut self.project.channel, i, &c.name);
             }
             ui.separator();
+            for (t, name) in [
+                (roll::Tool::Draw, "Draw"),
+                (roll::Tool::Select, "Select"),
+                (roll::Tool::Delete, "Delete"),
+            ] {
+                ui.selectable_value(&mut self.project.roll.tool, t, name);
+            }
+            ui.separator();
             ui.label("Snap");
             let snap = &mut self.project.roll.snap;
             egui::ComboBox::from_id_salt("roll-snap")
@@ -360,6 +492,15 @@ impl App {
                         ui.selectable_value(snap, v, snap_name(v));
                     }
                 });
+            if ui.button("Quantize").clicked() {
+                let snap = self.project.roll.snap;
+                let pattern = self.project.pattern;
+                let ch = self.project.channel;
+                self.project
+                    .edit_channel(ch, &[Edit::Begin, Edit::Quantize { snap }]);
+                let _ = pattern;
+            }
+            ui.checkbox(&mut self.project.roll.ghost, "Ghost notes");
             ui.label("Zoom");
             ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false));
         });
@@ -426,6 +567,9 @@ impl App {
             Ok(p) => {
                 if let Some(a) = &mut self.audio {
                     a.set_player(p);
+                    // a new player does not know about the metronome switch
+                    let metro = self.shell.metronome;
+                    a.send(Command::Metronome(metro));
                     match from {
                         Start::Ready => {}
                         Start::At(t) => a.send(Command::PlayerPlay(t)),

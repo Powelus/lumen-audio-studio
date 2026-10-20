@@ -16,6 +16,7 @@ struct Changes {
     on: Option<bool>,
     mix: Option<f64>,
     remove: bool,
+    automate: Option<crate::auto::AutoRequest>,
 }
 
 impl App {
@@ -65,6 +66,32 @@ impl App {
                     }
                 }
             });
+            ui.menu_button("Automate", |ui| {
+                let slot_id = s.id.clone();
+                let mut list: Vec<(String, String, f64)> =
+                    vec![("mix".to_string(), "Mix".to_string(), s.mix.clamp(0.0, 1.0))];
+                for d in &desc.params {
+                    if d.kind != las_dsp::fx::registry::ParamKind::Knob {
+                        continue;
+                    }
+                    let v = crate::inst::at(&state, &d.id).and_then(Value::as_f64);
+                    list.push((
+                        d.id.clone(),
+                        d.label.clone(),
+                        v.map_or(0.0, |v| d.to_normalized(v)),
+                    ));
+                }
+                for (param, label, start) in list {
+                    if ui.button(&label).clicked() {
+                        ch.automate = Some(crate::auto::AutoRequest {
+                            target: crate::auto::effect_target(insert, &slot_id, &param),
+                            name: format!("{} {label}", desc.name),
+                            start,
+                        });
+                        ui.close();
+                    }
+                }
+            });
             ui.label("Mix");
             if ui
                 .add(egui::Slider::new(&mut mix, 0.0..=1.0).show_value(false))
@@ -93,6 +120,9 @@ impl App {
         });
         if changed {
             ch.state = Some(state);
+        }
+        if let Some(req) = ch.automate.take() {
+            self.project.create_automation(&req);
         }
         if ch.remove {
             self.project.modify(true, |p| {

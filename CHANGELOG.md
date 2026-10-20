@@ -2,6 +2,30 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.25
+
+More of an FL Studio workflow.
+
+- Import your own samples: File > Import samples..., the Import button in the browser, or drop WAV files on the window. Each becomes a sampler channel with its own insert, and the file is stored in the project. Double click a factory sample in the browser to add it as a channel (a single click still plays it).
+- Metronome: a button next to Stop; a click on every beat (higher on the first of the bar) while the project plays.
+- Piano roll: a velocity lane under the grid; drag in it to set the velocity of the notes above.
+- Mixer routing: choose what an insert plays to, and add sends with their own level and a sidechain-only switch. Loops are refused.
+- Level meters on every mixer strip while the project plays.
+- Automation clips, as in FL Studio: right click a fader or a knob (an insert's volume or pan, a channel's level or pan, the master's volume), or pick a parameter from the "Automate" menu of an effect's window, and a clip is made at the start marker, flat at the parameter's value. It sits in the playlist with a preview of its curve; double click it to edit the curve in its own window (click to add a point, drag to move, right click to remove, set its length in bars, rename or delete it). The engine plays them as the web version does (a test checks a made clip really pulls a fader down in the render).
+- This release also carries everything of 0.2.0-alpha.24 above, which was not published on its own.
+
+## 0.2.0-alpha.24
+
+Menus, new and demo projects, and FL Studio style tools.
+
+- The app opens on the "new project" of the web version: Kick, Clap, Hat and Snare samplers and a Nebula, a four on the floor pattern in the playlist. `lumen song.las` opens that file instead.
+- Main menu (the button at the left of the top bar): File (New, Open, Open demo song, Save, Save as, Export, Quit), Edit (undo, redo), Add (any instrument as a new channel on a free insert), Patterns (new, clone, delete), View, Options (themes) and Help (About). Native file dialogs for Open and Save as; a question about unsaved changes before anything that would lose them. Shortcuts: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+R, F4 (new pattern), F5 to F9 (windows), Space (play and stop).
+- The rack has an "Add channel" menu.
+- Piano roll: Draw, Select and Delete tools, Quantize, and ghost notes (the other channels' notes behind the one being edited).
+- Playlist: Draw, Select, Slice, Mute and Delete tools; slicing cuts a clip at the grid line, mute switches a clip off.
+- Mixer: every insert is shown with its coloured name, pan, mute, solo and fader; the selected insert has a panel with its name, its ten effect slots (add an effect to any slot) and its stereo width.
+- Builds on pull requests no longer upload packages (only a release does, kept for a day), which stops the runs from filling the repository's Actions storage.
+
 ## 0.2.0-alpha.23
 
 Effect windows for the mixer.

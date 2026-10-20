@@ -33,6 +33,7 @@ pub struct Windows {
     pub mixer: bool,
     pub synth: bool,
     pub export: bool,
+    pub about: bool,
 }
 
 /// What the export window holds.
@@ -60,6 +61,7 @@ pub struct Shell {
     pub open: Windows,
     /// Song mode plays the playlist; pattern mode loops the chosen pattern.
     pub song_mode: bool,
+    pub metronome: bool,
     pub search: String,
     /// The theme chosen ("system" or an id) and the one painted.
     pub theme: String,
@@ -68,6 +70,8 @@ pub struct Shell {
     pub steps: StepState,
     pub export: Export,
     pub status: String,
+    /// An action waiting for an answer about unsaved changes.
+    pub pending: Option<crate::menus::Action>,
     placed: bool,
 }
 
@@ -83,8 +87,10 @@ impl Shell {
                 mixer: false,
                 synth: false,
                 export: false,
+                about: false,
             },
             song_mode: true,
+            metronome: false,
             search: String::new(),
             theme: theme::saved_choice(),
             applied: String::new(),
@@ -99,6 +105,7 @@ impl Shell {
                 message: None,
             },
             status: "Ready".into(),
+            pending: None,
             placed: false,
         }
     }
@@ -209,6 +216,7 @@ fn segmented(ui: &mut Ui, labels: &[&str], active: &[bool]) -> Option<usize> {
 enum Icon {
     Play,
     Stop,
+    Metronome,
 }
 
 fn icon_button(ui: &mut Ui, icon: Icon, active: bool, tip: &str) -> egui::Response {
@@ -241,6 +249,22 @@ fn icon_button(ui: &mut Ui, icon: Icon, active: bool, tip: &str) -> egui::Respon
         Icon::Stop => {
             ui.painter()
                 .rect_filled(Rect::from_center_size(c, vec2(11.0, 11.0)), 2.0, ink);
+        }
+        Icon::Metronome => {
+            // a tall triangle with the pendulum arm across it
+            ui.painter().add(egui::Shape::closed_line(
+                vec![
+                    pos2(c.x - 6.0, c.y + 7.0),
+                    pos2(c.x + 6.0, c.y + 7.0),
+                    pos2(c.x + 2.5, c.y - 7.0),
+                    pos2(c.x - 2.5, c.y - 7.0),
+                ],
+                Stroke::new(1.5, ink),
+            ));
+            ui.painter().line_segment(
+                [pos2(c.x, c.y + 4.0), pos2(c.x + 4.0, c.y - 6.0)],
+                Stroke::new(1.5, ink),
+            );
         }
     }
     resp.on_hover_text(tip)
@@ -299,7 +323,7 @@ impl App {
         }
     }
 
-    fn choose_theme(&mut self, choice: &str) {
+    pub(crate) fn choose_theme(&mut self, choice: &str) {
         self.shell.theme = choice.to_string();
         theme::save_choice(choice);
     }
@@ -327,53 +351,7 @@ impl App {
             logo(ui);
             ui.label(RichText::new("LAS").strong().size(17.0));
             ui.menu_button(RichText::new("\u{2630}").size(16.0), |ui| {
-                if ui.button("Open project").clicked() {
-                    self.shell.browser = true;
-                    self.shell.tab = BrowserTab::Project;
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(self.project.dirty, egui::Button::new("Save    Ctrl+S"))
-                    .clicked()
-                {
-                    self.save_project();
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(
-                        self.project.loaded.is_some(),
-                        egui::Button::new("Export audio"),
-                    )
-                    .clicked()
-                {
-                    self.shell.open.export = true;
-                    ui.close();
-                }
-                ui.separator();
-                ui.menu_button("Theme", |ui| {
-                    let current = self.shell.theme.clone();
-                    for t in theme::themes() {
-                        if ui
-                            .selectable_label(current == t.id, t.name)
-                            .on_hover_text(t.description)
-                            .clicked()
-                        {
-                            self.choose_theme(t.id);
-                            ui.close();
-                        }
-                    }
-                    if ui
-                        .selectable_label(current == theme::SYSTEM, "Match the system")
-                        .clicked()
-                    {
-                        self.choose_theme(theme::SYSTEM);
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                ui.horizontal(|ui| self.main_menu(ui));
             });
             ui.add_space(4.0);
             // transport
@@ -387,6 +365,11 @@ impl App {
             if icon_button(ui, Icon::Stop, false, "Stop").clicked() {
                 self.stop_project();
                 self.send(Command::PreviewStop);
+            }
+            let metro = self.shell.metronome;
+            if icon_button(ui, Icon::Metronome, metro, "Metronome").clicked() {
+                self.shell.metronome = !metro;
+                self.send(Command::Metronome(!metro));
             }
             // tempo
             let r = lcd(ui, &format!("{bpm:.2}"), "BPM", 86.0);
@@ -562,7 +545,7 @@ impl App {
                     .loaded
                     .as_ref()
                     .map_or("No project".to_string(), |l| {
-                        let dirty = if self.project.dirty { " *" } else { "" };
+                        let dirty = if self.project.dirty { " \u{2022}" } else { "" };
                         format!("{}{dirty}", l.project.name)
                     });
                 ui.label(RichText::new(name).size(12.0).color(p.text2));
@@ -630,6 +613,7 @@ impl App {
         let query = self.shell.search.clone();
         let hits = matching_samples(&query);
         let mut play: Option<&'static str> = None;
+        let mut add: Option<(&'static str, &'static str)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.label(
                 RichText::new("\u{2605} LUMEN FACTORY KIT")
@@ -648,8 +632,12 @@ impl App {
                     .show(ui, |ui| {
                         for s in items {
                             ui.horizontal(|ui| {
-                                let r = ui.selectable_label(false, s.name);
-                                if r.clicked() {
+                                let r = ui.selectable_label(false, s.name).on_hover_text(
+                                    "Click to hear it, double click to add it as a channel",
+                                );
+                                if r.double_clicked() {
+                                    add = Some((s.id, s.name));
+                                } else if r.clicked() {
                                     play = Some(s.id);
                                 }
                                 ui.with_layout(
@@ -674,6 +662,9 @@ impl App {
                     .strong()
                     .color(p.muted),
             );
+            if ui.button("Import files...").clicked() {
+                self.import_dialog();
+            }
             match &self.project.loaded {
                 Some(l) if !l.project.samples.is_empty() => {
                     for s in &l.project.samples {
@@ -690,6 +681,9 @@ impl App {
         });
         if let Some(id) = play {
             self.audition(id);
+        }
+        if let Some((id, name)) = add {
+            self.add_factory_channel(id, name);
         }
     }
 
@@ -903,6 +897,15 @@ impl App {
                 self.project.open_effect = None;
             }
         }
+        if let Some(id) = self.project.open_auto.clone() {
+            let mut keep = true;
+            win("Automation", a.min + vec2(220.0, 140.0), vec2(620.0, 380.0))
+                .open(&mut keep)
+                .show(ctx, |ui| self.auto_window(ui, &id));
+            if !keep {
+                self.project.open_auto = None;
+            }
+        }
         if open.export {
             egui::Window::new("Export audio")
                 .open(&mut open.export)
@@ -911,6 +914,8 @@ impl App {
                 .show(ctx, |ui| self.export_window(ui));
         }
         self.shell.open = open;
+        self.about_window(ctx);
+        self.discard_dialog(ctx);
     }
 
     fn no_project(&self, ui: &mut Ui) {
@@ -937,6 +942,14 @@ impl App {
         );
         ui.separator();
         ui.horizontal(|ui| {
+            ui.menu_button("+ Add channel", |ui| {
+                for (id, name, _) in las_project::create::INSTRUMENTS {
+                    if ui.button(*name).clicked() {
+                        self.add_channel(id);
+                        ui.close();
+                    }
+                }
+            });
             ui.label(
                 RichText::new(
                     project
@@ -976,12 +989,95 @@ impl App {
         }
     }
 
+    /// The editor of an automation clip: its name, length, curve, and a way to delete it.
+    fn auto_window(&mut self, ui: &mut Ui, id: &str) {
+        let Some(l) = &self.project.loaded else {
+            return;
+        };
+        let project = l.project.clone();
+        let Some(clip) = project.automation.iter().find(|c| c.id == id) else {
+            ui.label("This automation clip no longer exists.");
+            return;
+        };
+        let mut name = clip.name.clone();
+        let mut bars = (clip.length / (f64::from(PPQ) * 4.0)).round().max(1.0);
+        let mut delete = false;
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::TextEdit::singleline(&mut name).desired_width(180.0))
+                .changed()
+            {
+                let (id, n) = (clip.id.clone(), name.clone());
+                self.project.modify_coalesced("auto-name", move |p| {
+                    if let Some(c) = p.automation.iter_mut().find(|c| c.id == id) {
+                        c.name = n;
+                    }
+                });
+            }
+            ui.label(
+                RichText::new(crate::auto::describe_target(&project, &clip.target))
+                    .weak()
+                    .size(11.5),
+            );
+            ui.label("Bars");
+            if ui
+                .add(egui::DragValue::new(&mut bars).range(1.0..=64.0).speed(0.1))
+                .changed()
+            {
+                let (id, len) = (clip.id.clone(), bars * f64::from(PPQ) * 4.0);
+                self.project.modify_coalesced("auto-len", move |p| {
+                    if let Some(c) = p.automation.iter_mut().find(|c| c.id == id) {
+                        let old = c.length;
+                        c.length = len;
+                        for x in &mut c.points {
+                            x.t = (x.t / old * len).min(len);
+                        }
+                    }
+                    for c in &mut p.playlist.clips {
+                        if c.kind == las_project::ClipKind::Automation && c.ref_id == id {
+                            c.length = len;
+                        }
+                    }
+                });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Delete clip").clicked() {
+                    delete = true;
+                }
+            });
+        });
+        ui.label(
+            RichText::new("Click to add a point, drag to move it, right click to remove it.")
+                .weak()
+                .size(11.0),
+        );
+        let edits = crate::auto::draw(ui, clip, &mut self.project.auto_state);
+        let cid = clip.id.clone();
+        drop(project);
+        self.project.edit_auto(&edits);
+        if delete {
+            self.project.modify(true, |p| {
+                p.automation.retain(|c| c.id != cid);
+                p.playlist
+                    .clips
+                    .retain(|c| !(c.kind == las_project::ClipKind::Automation && c.ref_id == cid));
+            });
+            self.project.open_auto = None;
+        }
+    }
+
     fn mixer_window(&mut self, ui: &mut Ui) {
         let Some(l) = &self.project.loaded else {
             return;
         };
         let project = l.project.clone();
-        let edits = mixer::draw(ui, &project);
+        let peaks: Vec<f32> = match &self.audio {
+            Some(a) if a.meters.playing() => (0..project.mixer.len())
+                .map(|i| a.meters.insert_peak(i))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let edits = mixer::draw(ui, &project, &mut self.project.mixer_state, &peaks);
         drop(project);
         self.project.edit_mixer(&edits);
     }

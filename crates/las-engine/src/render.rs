@@ -109,6 +109,8 @@ pub(crate) struct Engine {
     /// The first segment of a run: automation jumps rather than ramps.
     fresh: bool,
     automation_first: HashSet<String>,
+    /// The peak of each insert's output (falling slowly), for the mixer's meters.
+    peaks: Vec<f32>,
     /// Scratch for rendering a block.
     bl: Vec<f32>,
     br: Vec<f32>,
@@ -733,6 +735,7 @@ impl Engine {
             fresh: true,
             automation_first: HashSet::new(),
             project,
+            peaks: Vec::new(),
             bl: vec![0.0; BLOCK],
             br: vec![0.0; BLOCK],
             vol: vec![0.0; BLOCK],
@@ -796,6 +799,21 @@ impl Engine {
             self.mixer.add_input(ch.track, l, r);
         }
         self.mixer.process(frame, out_l, out_r);
+        let inserts = self.mixer.len();
+        self.peaks.resize(inserts, 0.0);
+        for i in 0..inserts {
+            let (l, r) = self.mixer.insert_output(i);
+            let p = l[..n]
+                .iter()
+                .chain(&r[..n])
+                .fold(0f32, |m, s| m.max(s.abs()));
+            self.peaks[i] = p.max(self.peaks[i] * 0.93);
+        }
+    }
+
+    /// The peak level of each insert, master first.
+    pub fn insert_peaks(&self) -> &[f32] {
+        &self.peaks
     }
 }
 

@@ -114,7 +114,6 @@ pub fn leaves(v: &Value) -> Vec<(String, Leaf)> {
 }
 
 /// The value at a dotted path.
-#[cfg(test)]
 pub fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(v, |cur, part| match cur {
         Value::Array(a) => a.get(part.parse::<usize>().ok()?),
