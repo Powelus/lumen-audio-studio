@@ -169,7 +169,9 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
     );
     let master = num(state.get("master"), 0.8);
     let mut out = Vec::new();
-    let layers = state.get("layers").and_then(Value::as_array);
+    // a new Nebula has no layers yet: it starts with one default layer
+    let one = vec![serde_json::json!({ "on": true, "level": 1.0 })];
+    let layers = state.get("layers").and_then(Value::as_array).or(Some(&one));
     for (index, l) in layers.into_iter().flatten().enumerate() {
         if l.get("on") == Some(&Value::Bool(false)) || !l.is_object() {
             continue;

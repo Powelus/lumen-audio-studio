@@ -2,6 +2,14 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.33
+
+A fix for new channels.
+
+- A synth added from the browser (Polaris, Vortex, Monolith, Zenith, TriOsc, Facet, Mist, Nebula) stopped the whole project from playing with "invalid type: null, expected struct SynthPatch". A new channel has no patch yet; it now plays the instrument's default sound. A new Nebula starts with one layer instead of none (the starter project's Nebula was silent).
+- A channel whose settings cannot be read is now silent instead of stopping the rest of the project from playing.
+- A test adds each instrument the way the browser does and checks that it sounds, offline and in the live player.
+
 ## 0.2.0-alpha.32
 
 Audio clips, recording, and a CPU and memory display.

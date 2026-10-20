@@ -13,6 +13,8 @@ use serde_json::Value;
 /// and arrays by index (elements past the end of `over` keep the base value).
 pub fn merge_patch(base: &Value, over: &Value) -> Value {
     match (base, over) {
+        // nothing given: the base as it is (a new channel has no patch yet)
+        (_, Value::Null) => base.clone(),
         (Value::Array(b), Value::Array(o)) => {
             let len = b.len().max(o.len());
             let mut out = Vec::with_capacity(len);
