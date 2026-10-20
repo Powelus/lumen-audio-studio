@@ -10,6 +10,7 @@ mod fxui;
 mod midi;
 mod presets;
 mod project;
+mod rack;
 mod widgets;
 
 fn main() -> eframe::Result {
