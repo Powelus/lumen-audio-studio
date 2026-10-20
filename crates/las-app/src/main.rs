@@ -8,9 +8,11 @@ mod app;
 mod audio;
 mod fxui;
 mod midi;
+mod playlist;
 mod presets;
 mod project;
 mod rack;
+mod roll;
 mod widgets;
 
 fn main() -> eframe::Result {

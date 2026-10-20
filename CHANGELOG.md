@@ -2,6 +2,21 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.18 - 2026-10-20
+
+The playlist.
+
+- A playlist page lays the song out in tracks of clips (patterns, audio and automation, each with its name and colour). Double click places the chosen pattern on the bar, drag moves a clip in time and between tracks, drag an edge resizes, right click deletes, and a click on the ruler sets where "Play song" starts. Edits join the same undo, redo and save as the piano roll.
+- `lumen song.las --roll` and `--playlist` start on those pages; a project opened from the command line fills in the path box.
+
+## 0.2.0-alpha.17 - 2026-10-20
+
+The piano roll, and saving.
+
+- A piano roll for the chosen channel and pattern, next to the channel rack. Click an empty cell to place a note (it sounds as you place it), drag on empty space to place one and stretch it, drag a note to move it (in time and pitch), drag its right edge to resize it, right click to delete. Snap to a beat, a half, a quarter or an eighth of a beat, or off; zoom; the keys stay in view while the roll scrolls.
+- Undo and redo (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y) for every edit, and Save (Ctrl+S) writes the project back to its `.las` file, which the web version reads.
+- After an edit, a fresh player is built in the background when the pointer is up and nothing is playing, so the keys and the next play use the edited notes. Editing while playing is not supported yet.
+
 ## 0.2.0-alpha.16 - 2026-10-20
 
 The channel rack.
