@@ -1350,7 +1350,7 @@ impl App {
     /// Computer keyboard: play notes, change octave. Mouse: the on-screen piano.
     /// A key played from the screen or the computer keyboard: the project's selected
     /// channel while its page is open, otherwise the synth on the other pages.
-    fn note(&mut self, key: u8, vel: f64, on: bool) {
+    pub(crate) fn note(&mut self, key: u8, vel: f64, on: bool) {
         let c = if self.view == View::Project && self.project.has_player {
             Command::PlayerNote {
                 channel: self.project.channel,
@@ -1364,6 +1364,31 @@ impl App {
             Command::NoteOff { key }
         };
         self.send(c);
+    }
+
+    /// Save and undo, on the Project page.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.view != View::Project {
+            return;
+        }
+        let (save, undo, redo) = ctx.input(|i| {
+            let c = i.modifiers.command;
+            (
+                c && i.key_pressed(egui::Key::S),
+                c && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                c && (i.key_pressed(egui::Key::Y)
+                    || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
+            )
+        });
+        if save {
+            self.save_project();
+        }
+        if undo {
+            self.project.undo();
+        }
+        if redo {
+            self.project.redo();
+        }
     }
 
     fn keys(&mut self, ctx: &egui::Context) {
@@ -1430,6 +1455,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.keys(ctx);
+        self.shortcuts(ctx);
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1437,7 +1463,7 @@ impl eframe::App for App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        self.poll_project();
+        self.poll_project(ctx);
         for path in dropped {
             if path.extension().is_some_and(|e| e == "las") {
                 self.open_project(&path.to_string_lossy());

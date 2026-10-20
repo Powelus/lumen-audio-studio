@@ -11,6 +11,7 @@ mod midi;
 mod presets;
 mod project;
 mod rack;
+mod roll;
 mod widgets;
 
 fn main() -> eframe::Result {
