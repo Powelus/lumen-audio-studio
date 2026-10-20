@@ -8,6 +8,11 @@ Selecting, moving and copying in the editors.
 
 - Piano roll and playlist: with the Select tool, drag a rectangle to select notes or clips (Shift adds), click to select one, drag any selected one to move them all together in time and pitch (or between tracks); a group never leaves the grid. With the pointer over the editor: Delete removes the selection, Ctrl+A selects all, Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste (notes at the last place clicked, clips at the start marker), Ctrl+D duplicates the selection right after itself, and in the roll the arrows nudge in time and transpose (Shift for an octave). All of it joins undo.
 
+## 0.2.0-alpha.29
+
+- The playlist now runs at least 128 bars (and eight bars past the last clip) instead of ending just after the song, so there is room to arrange.
+- Pattern clips in the playlist show a small preview of their notes, repeated as often as the clip is long.
+
 ## 0.2.0-alpha.28
 
 Looking after the project the way FL Studio does.
