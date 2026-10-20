@@ -1570,5 +1570,5 @@ impl eframe::App for App {
 }
 
 fn style(ctx: &egui::Context) {
-    crate::theme::apply(ctx, "lumen");
+    crate::theme::apply(ctx, crate::theme::DEFAULT);
 }

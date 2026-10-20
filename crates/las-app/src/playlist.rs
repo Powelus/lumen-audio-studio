@@ -180,13 +180,7 @@ pub fn describe(p: &Project, c: &Clip) -> (String, Color32) {
 }
 
 fn hex(s: &str) -> Color32 {
-    let h = s.trim_start_matches('#');
-    if h.len() == 6 {
-        if let Ok(v) = u32::from_str_radix(h, 16) {
-            return Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
-        }
-    }
-    crate::theme::accent()
+    crate::rack::channel_colour_of(s)
 }
 
 /// A pattern clip for the pattern at `index`, starting at `start` on `track`.

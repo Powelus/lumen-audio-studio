@@ -18,6 +18,7 @@ mod presets;
 mod project;
 mod rack;
 mod roll;
+mod samplerui;
 mod shell;
 mod steps;
 mod theme;

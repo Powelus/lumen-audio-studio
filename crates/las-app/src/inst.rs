@@ -15,6 +15,8 @@ use serde_json::{json, Map, Value};
 pub enum Bound {
     /// A channel the synth panels edit.
     Synth(usize),
+    /// A sampler channel.
+    Sampler(usize),
     /// A channel whose parameters the basic editor lists.
     Basic(usize),
 }
@@ -22,7 +24,7 @@ pub enum Bound {
 impl Bound {
     pub fn channel(self) -> usize {
         match self {
-            Bound::Synth(c) | Bound::Basic(c) => c,
+            Bound::Synth(c) | Bound::Sampler(c) | Bound::Basic(c) => c,
         }
     }
 }
@@ -169,6 +171,7 @@ impl App {
                 self.bound = Some(Bound::Synth(channel));
                 self.view = crate::app::View::Sound;
             }
+            None if plugin == "sampler" => self.bound = Some(Bound::Sampler(channel)),
             None => self.bound = Some(Bound::Basic(channel)),
         }
         // loading is not an edit

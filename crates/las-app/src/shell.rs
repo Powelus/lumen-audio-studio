@@ -885,6 +885,7 @@ impl App {
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
                     Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
+                    Some(crate::inst::Bound::Sampler(c)) => self.sampler_window(ui, c),
                     _ => self.synth_window(ui),
                 });
         }

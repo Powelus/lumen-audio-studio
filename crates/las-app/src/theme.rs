@@ -446,17 +446,23 @@ pub fn themes() -> Vec<Theme> {
 }
 
 pub const SYSTEM: &str = "system";
-pub const DEFAULT: &str = "lumen";
+/// The look the app starts in: gunmetal grey with orange, like FL Studio.
+pub const DEFAULT: &str = "fl";
 
 static CURRENT: RwLock<Option<Palette>> = RwLock::new(None);
 
+/// Tests that switch the theme take this, so that they do not run into each other.
+#[cfg(test)]
+pub static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The palette in effect.
 pub fn pal() -> Palette {
-    CURRENT
-        .read()
-        .ok()
-        .and_then(|g| *g)
-        .unwrap_or_else(|| themes()[0].palette())
+    CURRENT.read().ok().and_then(|g| *g).unwrap_or_else(|| {
+        themes()
+            .into_iter()
+            .find(|t| t.id == DEFAULT)
+            .map_or_else(|| themes()[0].palette(), |t| t.palette())
+    })
 }
 
 /// The accent colour of the theme in effect.
@@ -600,14 +606,16 @@ mod tests {
 
     #[test]
     fn system_follows_the_operating_system_and_unknown_ids_fall_back() {
-        assert_eq!(resolve(SYSTEM, true), "lumen");
+        assert_eq!(resolve(SYSTEM, true), DEFAULT);
         assert_eq!(resolve(SYSTEM, false), "daylight");
         assert_eq!(resolve("synthwave", true), "synthwave");
-        assert_eq!(resolve("nope", true), "lumen");
+        assert_eq!(resolve("nope", true), DEFAULT);
+        assert_eq!(DEFAULT, "fl", "the default is not violet");
     }
 
     #[test]
     fn applying_a_theme_changes_the_palette() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ctx = egui::Context::default();
         apply(&ctx, "synthwave");
         assert_eq!(accent(), hex("#ff2fa5"));
