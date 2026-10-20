@@ -180,6 +180,11 @@ impl ProjectState {
                     self.redo.clear();
                 }
                 PlEdit::Seek(t) => self.start_tick = *t,
+                PlEdit::SongLoop(r) => {
+                    self.playlist.song_loop = *r;
+                    // a playing song picks the loop up from where it is
+                    self.stale = true;
+                }
                 PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
                 PlEdit::AskRenameTrack(t) => {
                     let name = l
@@ -416,9 +421,14 @@ impl ProjectState {
     fn start(&mut self, mode: PlayMode, from: Start, sample_rate: f64) {
         let Some(l) = &self.loaded else { return };
         let (project, samples) = (l.project.clone(), l.samples.clone());
+        let song_loop = self.playlist.song_loop;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let _ = tx.send(Player::new(project, &samples, sample_rate, mode));
+            let player = Player::new(project, &samples, sample_rate, mode).map(|mut p| {
+                p.set_song_loop(song_loop);
+                p
+            });
+            let _ = tx.send(player);
         });
         self.building = Some(Building { done: rx, from });
         self.error = None;

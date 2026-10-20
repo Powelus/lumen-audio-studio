@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.37
+
+Song loops.
+
+- Loop part of the song, as FL's playlist selection does: right-click the playlist and pick "Loop between these markers", "Loop this bar" or "Loop four bars from here". Play song then goes round that stretch until "Stop looping". The loop shows as a band on the ruler, and a song that is playing picks a new loop up at once. A test plays a loop in the live player and checks that the playhead comes back to its start and stays inside it.
+
 ## 0.2.0-alpha.36
 
 Piano roll tools and song markers.

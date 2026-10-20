@@ -226,3 +226,36 @@ fn a_new_channel_of_every_instrument_plays_its_default_sound() {
         assert!(player.is_ok(), "{id}: the live player builds");
     }
 }
+
+#[test]
+fn a_song_loop_comes_back_to_its_start() {
+    let bundle = decode(&fixture("engines.las")).expect("a project");
+    let mut player = Player::new(
+        Arc::new(bundle.project.clone()),
+        &bundle.samples,
+        24000.0,
+        PlayMode::Song,
+    )
+    .unwrap();
+    // one bar from bar two
+    player.set_song_loop(Some((384.0, 768.0)));
+    assert!(player.play(384.0));
+    let (mut l, mut r) = (vec![0f32; 480], vec![0f32; 480]);
+    let mut seen_back = false;
+    let mut last = 384.0;
+    // play well past the loop's length (a bar is about two seconds at most)
+    for _ in 0..(24000 * 8 / 480) {
+        player.process(&mut l, &mut r);
+        let pos = player.position();
+        assert!(
+            (384.0 - 1e-6..=768.0 + 1e-6).contains(&pos),
+            "position {pos}"
+        );
+        if pos + 100.0 < last {
+            seen_back = true;
+        }
+        last = pos;
+    }
+    assert!(seen_back, "the playhead never went back to the loop start");
+    assert!(!player.finished());
+}
