@@ -1,0 +1,20 @@
+[package]
+name = "las-host"
+description = "Lumen Audio Studio: hosting of CLAP plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+las-dsp = { path = "../las-dsp" }
+las-engine = { path = "../las-engine" }
+serde_json = "1"
+clack-host = "0.2.0"
+clack-extensions = { version = "0.2.0", features = ["clack-host", "params", "state", "audio-ports", "note-ports"] }
+
+[dev-dependencies]
+las-project = { path = "../las-project" }
+
+[lints.rust]
+unsafe_code = "allow"

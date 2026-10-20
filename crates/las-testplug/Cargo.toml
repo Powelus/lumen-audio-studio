@@ -1,0 +1,17 @@
+[package]
+name = "las-testplug"
+description = "A small CLAP plugin (a gain and a sine instrument) to test the host with"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clack-plugin = "0.2.0"
+clack-extensions = { version = "0.2.0", features = ["clack-plugin", "params", "state", "audio-ports", "note-ports"] }
+
+[lints.rust]
+unsafe_code = "allow"

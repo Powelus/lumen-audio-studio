@@ -19,12 +19,14 @@ pub enum Bound {
     Sampler(usize),
     /// A channel whose parameters the basic editor lists.
     Basic(usize),
+    /// A hosted plugin.
+    Hosted(usize),
 }
 
 impl Bound {
     pub fn channel(self) -> usize {
         match self {
-            Bound::Synth(c) | Bound::Sampler(c) | Bound::Basic(c) => c,
+            Bound::Synth(c) | Bound::Sampler(c) | Bound::Basic(c) | Bound::Hosted(c) => c,
         }
     }
 }
@@ -172,6 +174,7 @@ impl App {
                 self.view = crate::app::View::Sound;
             }
             None if plugin == "sampler" => self.bound = Some(Bound::Sampler(channel)),
+            None if plugin == las_host::HOSTED => self.bound = Some(Bound::Hosted(channel)),
             None => self.bound = Some(Bound::Basic(channel)),
         }
         // loading is not an edit

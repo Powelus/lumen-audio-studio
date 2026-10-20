@@ -3,6 +3,7 @@
 //! routing, sidechain and plugin delay compensation. Port of the web version's
 //! `audio/mixer.ts`, which builds the same thing from Web Audio nodes.
 
+use crate::external::{plugin_host, PLUGIN_ID};
 use crate::fxauto::{effect_param_def, map_automation, SlotAuto};
 use crate::instrument::stereo_pan_a;
 use crate::param::Param;
@@ -167,13 +168,22 @@ impl Mixer {
         for (i, t) in mixer.iter().enumerate() {
             let mut slots = Vec::new();
             for s in t.slots.iter().take(MIXER_SLOTS).flatten() {
-                let Some(mut unit) = EffectUnit::new(&s.plugin_id, sr) else {
-                    continue;
+                let unit = if s.plugin_id == PLUGIN_ID {
+                    let hosted = plugin_host().and_then(|h| h.effect(&s.state, sr));
+                    let Some(p) = hosted else {
+                        continue;
+                    };
+                    EffectUnit::External(p)
+                } else {
+                    let Some(mut unit) = EffectUnit::new(&s.plugin_id, sr) else {
+                        continue;
+                    };
+                    let st = full_state(&s.plugin_id, &s.state);
+                    if let Ok(p) = parse_params(&s.plugin_id, &st, sr) {
+                        unit.apply(p);
+                    }
+                    unit
                 };
-                let st = full_state(&s.plugin_id, &s.state);
-                if let Ok(p) = parse_params(&s.plugin_id, &st, sr) {
-                    unit.apply(p);
-                }
                 let mut fx = FxSlot::new(unit, sr);
                 fx.enabled = s.enabled;
                 fx.mix = s.mix;

@@ -18,6 +18,12 @@ pub enum MixEdit {
         slot: usize,
         plugin: String,
     },
+    /// Put a hosted plugin (by its id) in a slot.
+    AddHosted {
+        insert: usize,
+        slot: usize,
+        plugin: String,
+    },
     Rename {
         insert: usize,
         name: String,
@@ -218,6 +224,27 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
                 }
             }
         }
+        MixEdit::AddHosted {
+            insert,
+            slot,
+            plugin,
+        } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                if t.slots.len() < las_project::MIXER_SLOTS {
+                    t.slots.resize(las_project::MIXER_SLOTS, None);
+                }
+                if let Some(free) = t.slots.get_mut(*slot).filter(|s| s.is_none()) {
+                    *free = Some(las_project::EffectSlot {
+                        id: las_project::create::uid("fx"),
+                        plugin_id: las_host::HOSTED.into(),
+                        enabled: true,
+                        mix: 1.0,
+                        state: las_host::plugin_state(plugin, &[]),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
         MixEdit::RemoveEffect { insert, slot } => {
             if let Some(s) = project
                 .mixer
@@ -309,9 +336,7 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                         });
                     }
                     let b = ui
-                        .add(
-                            egui::Button::new(short(&s.plugin_id)).min_size(egui::vec2(100.0, 0.0)),
-                        )
+                        .add(egui::Button::new(slot_label(s)).min_size(egui::vec2(100.0, 0.0)))
                         .on_hover_text(format!("{}\nRight click: remove", s.plugin_id));
                     if b.clicked() {
                         edits.push(MixEdit::OpenEffect { insert: i, slot: n });
@@ -344,6 +369,28 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                                     insert: i,
                                     slot: n,
                                     plugin: d.id.clone(),
+                                });
+                                ui.close();
+                            }
+                        }
+                        let external: Vec<_> = las_host::known()
+                            .into_iter()
+                            .filter(las_host::PluginInfo::is_effect)
+                            .collect();
+                        if !external.is_empty() {
+                            ui.label(
+                                RichText::new("External (CLAP)")
+                                    .strong()
+                                    .color(p.accent_text),
+                            );
+                        }
+                        for info in external {
+                            if ui.button(&info.name).on_hover_text(&info.vendor).clicked() {
+                                edits.push(MixEdit::Begin);
+                                edits.push(MixEdit::AddHosted {
+                                    insert: i,
+                                    slot: n,
+                                    plugin: info.id,
                                 });
                                 ui.close();
                             }
@@ -649,6 +696,15 @@ fn short(id: &str) -> String {
     id.strip_prefix("las-").unwrap_or(id).to_string()
 }
 
+/// What a slot's button says: the effect, or the hosted plugin's name.
+fn slot_label(s: &las_project::EffectSlot) -> String {
+    if s.plugin_id == las_host::HOSTED {
+        crate::hosted::name_of(&s.state)
+    } else {
+        short(&s.plugin_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -890,6 +946,41 @@ mod tests {
             },
         );
         assert_eq!(p.mixer[2].slots.iter().filter(|s| s.is_some()).count(), n);
+    }
+
+    #[test]
+    fn a_hosted_plugin_goes_in_a_free_slot_with_its_id_in_the_state() {
+        let mut p = project();
+        let free = p.mixer[2].slots.iter().position(|s| s.is_none()).unwrap();
+        apply(
+            &mut p,
+            &MixEdit::AddHosted {
+                insert: 2,
+                slot: free,
+                plugin: "vendor.plugin".into(),
+            },
+        );
+        let s = p.mixer[2].slots[free].as_ref().unwrap();
+        assert_eq!(s.plugin_id, las_host::HOSTED);
+        assert_eq!(s.state["id"], "vendor.plugin");
+        assert_eq!(
+            slot_label(s),
+            "vendor.plugin",
+            "unknown plugins show their id"
+        );
+        // an occupied slot is left alone
+        apply(
+            &mut p,
+            &MixEdit::AddHosted {
+                insert: 2,
+                slot: free,
+                plugin: "other".into(),
+            },
+        );
+        assert_eq!(
+            p.mixer[2].slots[free].as_ref().unwrap().state["id"],
+            "vendor.plugin"
+        );
     }
 
     #[test]

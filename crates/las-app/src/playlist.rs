@@ -306,7 +306,9 @@ pub fn draw(
     let pl = crate::theme::pal();
     let rows = track_count(project);
     let bar = ticks_per_bar(project.time_sig);
-    let ticks = song_length(project) + bar * 4.0;
+    // like FL Studio's, the playlist runs well past the song: at least 128 bars, and
+    // always eight bars beyond the last clip
+    let ticks = (song_length(project) + bar * 8.0).max(bar * 128.0);
     let width = HEAD + ticks as f32 * state.zoom;
     let height = RULER + rows as f32 * state.row;
     let out = egui::ScrollArea::both()
@@ -382,6 +384,43 @@ pub fn draw(
                     },
                     egui::StrokeKind::Inside,
                 );
+                if c.kind == ClipKind::Pattern {
+                    if let Some(pat) = project.patterns.iter().find(|x| x.id == c.ref_id) {
+                        // the notes of the pattern in small, repeated as often as the clip is long
+                        let plen = pattern_length(Some(pat), project.time_sig).max(1.0);
+                        let keys = pat.notes.values().flatten().map(|n| n.key);
+                        let (lo, hi) =
+                            keys.fold((i32::MAX, i32::MIN), |(a, b), k| (a.min(k), b.max(k)));
+                        if lo <= hi {
+                            let span = (hi - lo).max(7) as f32 + 1.0;
+                            let h = r.height() - 20.0;
+                            let inner = painter.with_clip_rect(r);
+                            let mut base = -c.offset.rem_euclid(plen);
+                            while base < c.length {
+                                for n in pat.notes.values().flatten() {
+                                    let (a, b) = (base + n.pos, base + n.pos + n.len.min(plen));
+                                    if b < 0.0 || a > c.length {
+                                        continue;
+                                    }
+                                    let y = r.bottom() - 4.0 - (n.key - lo) as f32 / span * h;
+                                    inner.rect_filled(
+                                        Rect::from_min_max(
+                                            egui::pos2(x_of(c.start + a.max(0.0)), y - 1.5),
+                                            egui::pos2(
+                                                x_of(c.start + b.min(c.length))
+                                                    .max(x_of(c.start + a.max(0.0)) + 1.5),
+                                                y + 1.0,
+                                            ),
+                                        ),
+                                        0.0,
+                                        Color32::from_black_alpha(150),
+                                    );
+                                }
+                                base += plen;
+                            }
+                        }
+                    }
+                }
                 if c.kind == ClipKind::Automation {
                     if let Some(a) = project.automation.iter().find(|a| a.id == c.ref_id) {
                         let len = a.length.max(1.0);

@@ -29,6 +29,10 @@ impl App {
             ui.label("This slot is empty.");
             return;
         };
+        if s.plugin_id == las_host::HOSTED {
+            self.hosted_effect(ui, insert, slot);
+            return;
+        }
         let Some(desc) = descriptor(&s.plugin_id) else {
             ui.label(format!("{}: not available.", s.plugin_id));
             return;
