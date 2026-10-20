@@ -10,6 +10,58 @@ use eframe::egui::{self, RichText, Ui};
 use las_project::create::{add_channel, default_project, pattern, INSTRUMENTS};
 use las_project::Project;
 
+/// The keyboard shortcuts, by where they work, for the Help window.
+pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Everywhere",
+        &[
+            ("Space", "Play or stop"),
+            ("Ctrl+S", "Save"),
+            ("Ctrl+N / Ctrl+O", "New / open a project"),
+            ("Ctrl+Z", "Undo"),
+            ("Ctrl+Y, Ctrl+Shift+Z", "Redo"),
+            ("F1", "This window"),
+            (
+                "A W S E D F T G Y H U J K",
+                "Play notes on the chosen channel",
+            ),
+        ],
+    ),
+    (
+        "Piano roll (pointer over it)",
+        &[
+            ("Delete", "Delete the selected notes"),
+            ("Ctrl+A", "Select all notes"),
+            ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut, paste"),
+            ("Ctrl+D", "Duplicate the selection after itself"),
+            ("Left / Right", "Nudge the selection"),
+            ("Up / Down", "Transpose the selection"),
+            ("Shift+click", "Add to or remove from the selection"),
+        ],
+    ),
+    (
+        "Playlist (pointer over it)",
+        &[
+            ("Delete", "Delete the selected clips"),
+            (
+                "Ctrl+C / Ctrl+X / Ctrl+V",
+                "Copy, cut, paste at the start marker",
+            ),
+            ("Ctrl+D", "Duplicate the selection after itself"),
+            ("Double-click", "Place the chosen pattern"),
+            ("Right-click", "Markers, loops, clip colour, make unique"),
+            ("Click the ruler", "Move the start marker"),
+        ],
+    ),
+    (
+        "Mixer",
+        &[
+            ("Drag a fader", "Volume (Shift for fine)"),
+            ("Double-click a fader", "Back to 0 dB"),
+        ],
+    ),
+];
+
 /// The demo song of the web version.
 const DEMO: &[u8] = include_bytes!("../../las-project/tests/fixtures/demo.las");
 
@@ -433,6 +485,38 @@ impl App {
         self.shell.open.history = open;
     }
 
+    pub(crate) fn keys_window(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.shell.open.keys = !self.shell.open.keys;
+        }
+        let mut open = self.shell.open.keys;
+        egui::Window::new("Keyboard shortcuts")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(460.0)
+                    .show(ui, |ui| {
+                        for (section, keys) in SHORTCUTS {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(*section).strong());
+                            egui::Grid::new(("keys", *section))
+                                .num_columns(2)
+                                .spacing([16.0, 2.0])
+                                .show(ui, |ui| {
+                                    for (k, what) in *keys {
+                                        ui.monospace(*k);
+                                        ui.label(*what);
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    });
+            });
+        self.shell.open.keys = open;
+    }
+
     pub(crate) fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.shell.open.about;
         egui::Window::new("About")
@@ -621,6 +705,10 @@ impl App {
             });
         });
         ui.menu_button("Help", |ui| {
+            if ui.button("Keyboard shortcuts    F1").clicked() {
+                self.shell.open.keys = true;
+                ui.close();
+            }
             if ui.button("About").clicked() {
                 self.shell.open.about = true;
                 ui.close();

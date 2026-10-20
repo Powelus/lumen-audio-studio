@@ -34,6 +34,8 @@ pub struct Windows {
     pub synth: bool,
     pub export: bool,
     pub about: bool,
+    /// The keyboard shortcuts window.
+    pub keys: bool,
     pub history: bool,
 }
 
@@ -104,6 +106,7 @@ impl Shell {
                 synth: false,
                 export: false,
                 about: false,
+                keys: false,
                 history: false,
             },
             song_mode: true,
@@ -1036,6 +1039,7 @@ impl App {
         }
         self.shell.open = open;
         self.about_window(ctx);
+        self.keys_window(ctx);
         self.history_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
