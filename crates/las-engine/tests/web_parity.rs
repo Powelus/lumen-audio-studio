@@ -5,7 +5,7 @@
 //! The web version builds its mixer from Web Audio nodes, so the two are not
 //! bit for bit; the check is that the error is far below the signal.
 
-use las_engine::{render_mix, Mode, RenderOptions};
+use las_engine::{render_mix, render_mix_with, Mode, RenderOptions};
 use las_project::decode;
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -35,7 +35,7 @@ fn compare(name: &str) -> Diff {
         tail: 0.5,
         mode: Mode::Song,
     };
-    let got = render_mix(&bundle.project, &opts).expect("renders");
+    let got = render_mix_with(&bundle.project, &bundle.samples, &opts).expect("renders");
     let want = floats(&fixture(&format!("{name}.f32")));
     let frames = want.len() / 2;
     let (wl, wr) = want.split_at(frames);
@@ -124,7 +124,8 @@ fn web_audio_effects_match_closely() {
 /// Effect and instrument parameters changed by automation clips: ramps in the worklet effects,
 /// the slot's mix, and state updates on a grid, where Web Audio smooths each change
 /// with a time constant (a biquad filter evaluates its parameters once per channel).
-const AUTOMATED: [&str; 23] = [
+const AUTOMATED: [&str; 24] = [
+    "ipa_usertable",
     "ipa_pad",
     "ipa_polaris",
     "ipa_nebula",
@@ -278,5 +279,45 @@ fn bad_frames() {
                 shown += 1;
             }
         }
+    }
+}
+
+/// Stems: the master and each used insert after its fader, each trimmed by its own
+/// plugin delay (`mixer_stems.f32`, from `render-web.mjs ... stems`).
+#[test]
+fn stems_match_the_web_version() {
+    let bundle = decode(&fixture("mixer.las")).expect("a project");
+    let opts = RenderOptions {
+        sample_rate: 24000.0,
+        tail: 0.5,
+        mode: Mode::Song,
+    };
+    let stems = las_engine::render_stems(&bundle.project, &Default::default(), &opts).unwrap();
+    let names: Vec<&str> = stems.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Master", "01 Insert 1", "02 Insert 2", "03 Reverb"]);
+    let want = floats(&fixture("mixer_stems.f32"));
+    let frames = stems[0].audio.left.len();
+    assert_eq!(want.len(), frames * 2 * stems.len());
+    for (k, stem) in stems.iter().enumerate() {
+        let (mut e2, mut s2) = (0f64, 0f64);
+        for (c, got) in [&stem.audio.left, &stem.audio.right]
+            .into_iter()
+            .enumerate()
+        {
+            let base = (k * 2 + c) * frames;
+            for i in 0..frames {
+                let (g, w) = (f64::from(got[i]), f64::from(want[base + i]));
+                e2 += (g - w) * (g - w);
+                s2 += w * w;
+            }
+        }
+        assert!(s2 > 1e-6, "{}: silent", stem.name);
+        let db = 10.0 * (e2.max(1e-30) / s2).log10();
+        assert!(
+            db < -85.0,
+            "{}: error only {:.1} dB below the signal",
+            stem.name,
+            -db
+        );
     }
 }

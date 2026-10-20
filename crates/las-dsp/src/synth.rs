@@ -747,6 +747,11 @@ impl SynthEngine {
         self.sr
     }
 
+    /// Use these wavetables (with the user ones in them) for patches set from now on.
+    pub fn set_tables(&mut self, lib: TableLibrary) {
+        self.lib = lib;
+    }
+
     /// Add a user wavetable (single-cycle frames). It wins over a built-in
     /// table of the same id the next time a patch is set.
     pub fn register_table(&mut self, id: &str, frames: &[Vec<f32>]) {

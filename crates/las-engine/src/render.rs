@@ -416,6 +416,45 @@ impl Scheduler<'_> {
     }
 }
 
+/// Single-cycle frames of a sample for a wavetable: 2048 samples each, up to 256.
+fn slice_frames(data: &[f32]) -> Vec<Vec<f32>> {
+    const SIZE: usize = 2048;
+    if data.len() < SIZE {
+        return vec![data.to_vec()];
+    }
+    let count = (data.len() / SIZE).clamp(1, 256);
+    (0..count)
+        .map(|i| data[i * SIZE..(i + 1) * SIZE].to_vec())
+        .collect()
+}
+
+/// Build the wavetable for every `user:` id in `value`.
+fn register_user_tables(
+    value: &serde_json::Value,
+    library: &mut Library,
+    tables: &mut TableLibrary,
+) {
+    match value {
+        serde_json::Value::String(id) => {
+            if let Some(sample) = id.strip_prefix("user:") {
+                if let Some(audio) = library.get(sample) {
+                    if let Some(first) = audio.channels.first() {
+                        let table = las_dsp::wavetable::table_from_frames(&slice_frames(first));
+                        tables.register(id, table);
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a
+            .iter()
+            .for_each(|v| register_user_tables(v, library, tables)),
+        serde_json::Value::Object(o) => o
+            .values()
+            .for_each(|v| register_user_tables(v, library, tables)),
+        _ => {}
+    }
+}
+
 /// Render the project's mix offline (the factory samples only).
 pub fn render_mix(project: &Project, opts: &RenderOptions) -> Result<Rendered, String> {
     render_mix_with(project, &BTreeMap::new(), opts)
@@ -427,11 +466,91 @@ pub fn render_mix_with(
     samples: &BTreeMap<String, Sample>,
     opts: &RenderOptions,
 ) -> Result<Rendered, String> {
+    let mut all = render_taps(project, samples, opts, &[None])?;
+    Ok(all.remove(0))
+}
+
+/// One output of the mixer: the master, or an insert after its fader.
+type Tap = Option<usize>;
+
+/// Mixer inserts that receive signal: those a channel plays into and what they
+/// feed (the master excluded).
+pub fn used_inserts(project: &Project) -> Vec<usize> {
+    let n = project.mixer.len();
+    let mut used = vec![false; n];
+    for c in &project.channels {
+        used[c.mixer_track.min(n.saturating_sub(1))] = true;
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for (i, t) in project.mixer.iter().enumerate() {
+            if !used[i] {
+                continue;
+            }
+            let outs = t.output.into_iter().chain(
+                t.sends
+                    .iter()
+                    .filter(|s| !s.sidechain_only)
+                    .map(|s| s.target),
+            );
+            for o in outs.filter(|&o| o < n) {
+                if !used[o] {
+                    used[o] = true;
+                    grew = true;
+                }
+            }
+        }
+    }
+    (1..n).filter(|&i| used[i]).collect()
+}
+
+/// A stem: an insert (or the master) rendered on its own.
+pub struct Stem {
+    pub name: String,
+    pub audio: Rendered,
+}
+
+/// Render the master and each used insert (after its fader) as stems, each trimmed by
+/// its own plugin delay, as the web version does.
+pub fn render_stems(
+    project: &Project,
+    samples: &BTreeMap<String, Sample>,
+    opts: &RenderOptions,
+) -> Result<Vec<Stem>, String> {
+    let inserts = used_inserts(project);
+    let mut taps: Vec<Tap> = vec![None];
+    taps.extend(inserts.iter().map(|&i| Some(i)));
+    let audio = render_taps(project, samples, opts, &taps)?;
+    let mut names = vec!["Master".to_string()];
+    names.extend(
+        inserts
+            .iter()
+            .map(|&i| format!("{i:02} {}", project.mixer[i].name)),
+    );
+    Ok(names
+        .into_iter()
+        .zip(audio)
+        .map(|(name, audio)| Stem { name, audio })
+        .collect())
+}
+
+/// Render the project and return each tap's output, trimmed by its plugin delay.
+fn render_taps(
+    project: &Project,
+    samples: &BTreeMap<String, Sample>,
+    opts: &RenderOptions,
+    taps: &[Tap],
+) -> Result<Vec<Rendered>, String> {
     let sr = opts.sample_rate;
     let mut library = Library::new(sr, samples);
     let mut tables = TableLibrary::new();
     let mut channels = Vec::new();
     let mut index = HashMap::new();
+    // wavetables made from samples (`user:<sample id>` in a patch)
+    for c in &project.channels {
+        register_user_tables(&c.state, &mut library, &mut tables);
+    }
     let last_track = project.mixer.len().saturating_sub(1);
     for c in &project.channels {
         let sample = c.sample_id.as_deref().and_then(|id| library.get(id));
@@ -529,7 +648,10 @@ pub fn render_mix_with(
     } = sched;
 
     let total = length + pad;
-    let (mut out_l, mut out_r) = (Vec::with_capacity(total), Vec::with_capacity(total));
+    let mut outs: Vec<(Vec<f32>, Vec<f32>)> = taps
+        .iter()
+        .map(|_| (Vec::with_capacity(total), Vec::with_capacity(total)))
+        .collect();
     let (mut bl, mut br) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
     let (mut ml, mut mr) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
     let mut gains = [vec![0f32; BLOCK], vec![0f32; BLOCK]];
@@ -580,17 +702,34 @@ pub fn render_mix_with(
             mixer.add_input(ch.track, l, r);
         }
         mixer.process(frame, &mut ml[..n], &mut mr[..n]);
-        out_l.extend_from_slice(&ml[..n]);
-        out_r.extend_from_slice(&mr[..n]);
+        for (tap, (out_l, out_r)) in taps.iter().zip(outs.iter_mut()) {
+            match tap {
+                None => {
+                    out_l.extend_from_slice(&ml[..n]);
+                    out_r.extend_from_slice(&mr[..n]);
+                }
+                Some(i) => {
+                    let (l, r) = mixer.insert_output(*i);
+                    out_l.extend_from_slice(&l[..n]);
+                    out_r.extend_from_slice(&r[..n]);
+                }
+            }
+        }
         frame += n;
     }
     // plugin delay moves the output later: trim it from the start
-    let latency = mixer.output_latency(0).min(MAX_PAD);
-    let off = js_round(latency * sr) as usize;
-    let end = (off + length).min(out_l.len());
-    Ok(Rendered {
-        left: out_l[off.min(end)..end].to_vec(),
-        right: out_r[off.min(end)..end].to_vec(),
-        sample_rate: sr,
-    })
+    Ok(taps
+        .iter()
+        .zip(outs)
+        .map(|(tap, (out_l, out_r))| {
+            let latency = mixer.output_latency(tap.unwrap_or(0)).min(MAX_PAD);
+            let off = js_round(latency * sr) as usize;
+            let end = (off + length).min(out_l.len());
+            Rendered {
+                left: out_l[off.min(end)..end].to_vec(),
+                right: out_r[off.min(end)..end].to_vec(),
+                sample_rate: sr,
+            }
+        })
+        .collect())
 }

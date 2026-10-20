@@ -434,6 +434,12 @@ impl Mixer {
         }
     }
 
+    /// An insert's output after its fader, pan and mute, for the block just processed.
+    pub fn insert_output(&self, index: usize) -> (&[f32], &[f32]) {
+        let t = &self.tracks[index];
+        (&t.out[0], &t.out[1])
+    }
+
     /// Frames the render lasts.
     pub fn length(&self) -> usize {
         self.length
