@@ -3,8 +3,8 @@
 
 use crate::audio::{Audio, Command, Instrument, Source};
 use crate::presets::{self, Entry};
-use crate::widgets::{knob, meter, note_name, piano, ACCENT};
-use eframe::egui::{self, Color32, RichText, Ui};
+use crate::widgets::{knob, note_name, piano};
+use eframe::egui::{self, RichText, Ui};
 use las_dsp::fm::{default_fm_json, ALGORITHMS};
 use las_dsp::mist::default_mist_json;
 use las_dsp::patch::{default_engine_json, merge_patch};
@@ -67,7 +67,6 @@ pub struct FxItem {
 pub enum View {
     Sound,
     Effects,
-    Project,
 }
 
 pub struct App {
@@ -105,6 +104,7 @@ pub struct App {
     pub(crate) bpm: f64,
     /// The open project and its player.
     pub(crate) project: crate::project::ProjectState,
+    pub(crate) shell: crate::shell::Shell,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -163,36 +163,55 @@ impl App {
             clicked: None,
             error: None,
             project: Default::default(),
+            shell: crate::shell::Shell::new(),
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
         }
         // `lumen --mist` or `--facet` start on that instrument (Polaris is the default)
         if std::env::args().any(|a| a == "--mist") {
+            app.shell.open.synth = true;
             app.switch(Instrument::Mist);
         }
         if std::env::args().any(|a| a == "--facet") {
+            app.shell.open.synth = true;
             app.switch(Instrument::Facet);
         }
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
         }
-        // `--roll` starts on the piano roll
-        if std::env::args().any(|a| a == "--roll") {
-            app.project.page = crate::project::Page::Roll;
+        // `--open roll,mixer,synth,export` opens windows at the start
+        if let Some(list) = std::env::args().skip_while(|a| a != "--open").nth(1) {
+            for w in list.split(',') {
+                let o = &mut app.shell.open;
+                match w {
+                    "rack" => o.rack = true,
+                    "playlist" => o.playlist = true,
+                    "roll" => o.roll = true,
+                    "mixer" => o.mixer = true,
+                    "synth" => o.synth = true,
+                    "export" => o.export = true,
+                    _ => {}
+                }
+            }
         }
-        // `--playlist` starts on the playlist
-        if std::env::args().any(|a| a == "--playlist") {
-            app.project.page = crate::project::Page::Playlist;
-        }
-        // `--mixer` starts on the mixer
-        if std::env::args().any(|a| a == "--mixer") {
-            app.project.page = crate::project::Page::Mixer;
+        // `--close playlist` closes one that opens by default
+        if let Some(list) = std::env::args().skip_while(|a| a != "--close").nth(1) {
+            for w in list.split(',') {
+                let o = &mut app.shell.open;
+                match w {
+                    "rack" => o.rack = false,
+                    "playlist" => o.playlist = false,
+                    "browser" => app.shell.browser = false,
+                    _ => {}
+                }
+            }
         }
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
             app.view = View::Effects;
+            app.shell.open.synth = true;
         }
         app
     }
@@ -260,7 +279,7 @@ impl App {
         }
     }
 
-    fn switch(&mut self, inst: Instrument) {
+    pub(crate) fn switch(&mut self, inst: Instrument) {
         if inst != self.inst {
             self.inst = inst;
             self.send(Command::Instrument(inst));
@@ -271,7 +290,7 @@ impl App {
     }
 
     /// A WAV file dropped on the window becomes Mist's source.
-    fn load_wav(&mut self, path: &std::path::Path) -> Result<(), String> {
+    pub(crate) fn load_wav(&mut self, path: &std::path::Path) -> Result<(), String> {
         let mut reader = hound::WavReader::open(path).map_err(|e| e.to_string())?;
         let spec = reader.spec();
         let channels = spec.channels.max(1) as usize;
@@ -426,7 +445,7 @@ impl App {
     }
 
     /// Previous and next buttons and a searchable list of the presets.
-    fn preset_picker(&mut self, ui: &mut Ui) {
+    pub(crate) fn preset_picker(&mut self, ui: &mut Ui) {
         let inst = self.inst;
         let k = index(inst);
         let count = self.entries[k].len();
@@ -454,7 +473,11 @@ impl App {
                         }
                         if e.category != shown_category {
                             shown_category = &e.category;
-                            ui.label(RichText::new(shown_category).strong().color(ACCENT));
+                            ui.label(
+                                RichText::new(shown_category)
+                                    .strong()
+                                    .color(crate::theme::accent()),
+                            );
                         }
                         ui.horizontal(|ui| {
                             if ui.selectable_label(i == current, &e.name).clicked() {
@@ -487,49 +510,6 @@ impl App {
         if let Some(name) = save {
             self.save_preset(&name);
         }
-    }
-
-    fn top_bar(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("Lumen Audio Studio").color(ACCENT));
-            ui.separator();
-            for (inst, name) in [
-                (Instrument::Polaris, "Polaris"),
-                (Instrument::Facet, "Facet"),
-                (Instrument::Mist, "Mist"),
-            ] {
-                if ui.selectable_label(self.inst == inst, name).clicked() {
-                    self.switch(inst);
-                }
-            }
-            ui.separator();
-            self.preset_picker(ui);
-            ui.separator();
-            let mut vol = self.volume;
-            if knob(ui, &mut vol, 0.0..=1.0, 0.8, "Volume", false, &|v| {
-                format!("{:.0}%", v * 100.0)
-            }) {
-                self.volume = vol;
-                self.send(Command::Volume(vol as f32));
-            }
-            if let Some(a) = &self.audio {
-                let (l, r) = a.meters.peaks();
-                meter(ui, l, egui::vec2(8.0, 60.0));
-                meter(ui, r, egui::vec2(8.0, 60.0));
-                ui.separator();
-                let load = a.meters.load();
-                let colour = if load > 0.7 {
-                    Color32::from_rgb(235, 70, 60)
-                } else {
-                    Color32::from_gray(200)
-                };
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(format!("DSP {:.1}%", load * 100.0)).color(colour));
-                    ui.label(format!("Voices {}", a.meters.voices()));
-                    ui.label(format!("Dropouts {}", a.meters.dropouts()));
-                });
-            }
-        });
     }
 
     /// The parts both instruments share: amp envelope, filter and voices.
@@ -593,7 +573,7 @@ impl App {
         changed
     }
 
-    fn synth(&mut self, ui: &mut Ui) {
+    pub(crate) fn synth(&mut self, ui: &mut Ui) {
         let mut changed = false;
         ui.horizontal_top(|ui| {
             ui.group(|ui| {
@@ -630,7 +610,7 @@ impl App {
         }
     }
 
-    fn mist_panel(&mut self, ui: &mut Ui) {
+    pub(crate) fn mist_panel(&mut self, ui: &mut Ui) {
         let mut changed = false;
         let pct = |v: f64| format!("{:.0}%", v * 100.0);
         ui.horizontal_top(|ui| {
@@ -706,7 +686,7 @@ impl App {
         }
     }
 
-    fn polaris_panel(&mut self, ui: &mut Ui) {
+    pub(crate) fn polaris_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             for (tab, name) in [
                 (Tab::Oscillators, "Oscillators"),
@@ -1363,7 +1343,7 @@ impl App {
     /// A key played from the screen or the computer keyboard: the project's selected
     /// channel while its page is open, otherwise the synth on the other pages.
     pub(crate) fn note(&mut self, key: u8, vel: f64, on: bool) {
-        let c = if self.view == View::Project && self.project.has_player {
+        let c = if self.shell.keys_to_project() && self.project.has_player {
             Command::PlayerNote {
                 channel: self.project.channel,
                 key,
@@ -1380,9 +1360,6 @@ impl App {
 
     /// Save and undo, on the Project page.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.view != View::Project {
-            return;
-        }
         let (save, undo, redo) = ctx.input(|i| {
             let c = i.modifiers.command;
             (
@@ -1394,6 +1371,11 @@ impl App {
         });
         if save {
             self.save_project();
+        }
+        let space =
+            ctx.input(|i| i.key_pressed(egui::Key::Space)) && ctx.memory(|m| m.focused().is_none());
+        if space {
+            self.toggle_play();
         }
         if undo {
             self.project.undo();
@@ -1437,7 +1419,7 @@ impl App {
         }
     }
 
-    fn keyboard(&mut self, ui: &mut Ui) {
+    pub(crate) fn keyboard(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label(format!(
                 "Computer keys A to ; play {}. Z and X change octave.",
@@ -1497,83 +1479,42 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("top").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.top_bar(ui);
-            ui.add_space(4.0);
-        });
-        egui::Panel::bottom("keys").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.keyboard(ui);
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if self.audio.is_none() {
-                    ui.label(
-                        RichText::new(format!("No sound: {}", self.status))
-                            .color(Color32::from_rgb(235, 70, 60)),
-                    );
-                } else {
-                    ui.label(RichText::new(&self.status).weak());
-                }
-                if let Some(e) = &self.error {
-                    ui.label(RichText::new(e).color(Color32::from_rgb(235, 70, 60)));
-                }
-            });
-        });
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.view, View::Sound, "Sound");
-                let n = self.fx[index(self.inst)].len();
-                let label = if n == 0 {
-                    "Effects".to_string()
-                } else {
-                    format!("Effects ({n})")
-                };
-                ui.selectable_value(&mut self.view, View::Effects, label);
-                ui.selectable_value(&mut self.view, View::Project, "Project");
-            });
-            ui.separator();
-            if self.view == View::Project {
-                egui::ScrollArea::both().show(ui, |ui| self.project_view(ui));
-                return;
-            }
-            if self.view == View::Effects {
-                egui::ScrollArea::both().show(ui, |ui| self.effects_view(ui));
-                return;
-            }
-            egui::ScrollArea::both().show(ui, |ui| match self.inst {
-                Instrument::Facet => {
-                    ui.label(RichText::new("Facet").size(20.0).strong());
-                    ui.label(RichText::new("Four-operator FM synth").weak());
-                    ui.add_space(6.0);
-                    self.synth(ui);
-                }
-                Instrument::Mist => {
-                    ui.label(RichText::new("Mist").size(20.0).strong());
-                    ui.label(RichText::new("Granular synth").weak());
-                    ui.add_space(6.0);
-                    self.mist_panel(ui);
-                }
-                Instrument::Polaris => {
-                    ui.label(RichText::new("Polaris").size(20.0).strong());
-                    ui.label(RichText::new("Wavetable synth").weak());
-                    ui.add_space(6.0);
-                    self.polaris_panel(ui);
-                }
-            });
-        });
+        let ctx = ui.ctx().clone();
+        self.paint_theme(&ctx);
+        let p = crate::theme::pal();
+        egui::Panel::top("top")
+            .frame(
+                egui::Frame::new()
+                    .fill(p.panel2)
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
+            .show(ui, |ui| self.top_bar(ui));
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
+            )
+            .show(ui, |ui| self.status_bar(ui));
+        if self.shell.browser {
+            egui::Panel::left("browser")
+                .default_size(260.0)
+                .size_range(200.0..=420.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.panel)
+                        .inner_margin(egui::Margin::same(8)),
+                )
+                .show(ui, |ui| self.browser(ui));
+        }
+        let area = egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(p.bg))
+            .show(ui, |ui| ui.max_rect())
+            .inner;
+        self.windows(&ctx, area);
     }
 }
 
 fn style(ctx: &egui::Context) {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = Color32::from_rgb(24, 26, 31);
-    v.window_fill = Color32::from_rgb(30, 33, 39);
-    v.selection.bg_fill = ACCENT;
-    v.selection.stroke.color = Color32::BLACK;
-    v.hyperlink_color = ACCENT;
-    ctx.set_visuals(v);
-    ctx.global_style_mut(|s| {
-        s.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    });
+    crate::theme::apply(ctx, "lumen");
 }

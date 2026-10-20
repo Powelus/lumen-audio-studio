@@ -34,6 +34,7 @@ pub enum Garbage {
     Chain(Box<Vec<FxSlot>>),
     Params(Box<Params>),
     Player(Box<Player>),
+    Preview(Box<Preview>),
 }
 
 /// The instruments the app can play.
@@ -47,6 +48,14 @@ pub enum Instrument {
 /// A source sample for Mist. The buffers are shared with the interface, so
 /// swapping one in or out never frees a large buffer on the audio thread.
 pub struct Source {
+    pub left: Shared<[f32]>,
+    pub right: Shared<[f32]>,
+    pub rate: f64,
+}
+
+/// A sample being auditioned from the browser. The buffers are shared with the
+/// interface so that nothing large is freed on the audio thread.
+pub struct Preview {
     pub left: Shared<[f32]>,
     pub right: Shared<[f32]>,
     pub rate: f64,
@@ -83,6 +92,9 @@ pub enum Command {
     /// Start the player at a tick.
     PlayerPlay(f64),
     PlayerStop,
+    /// Audition a sample (it replaces the one playing).
+    Preview(Box<Preview>),
+    PreviewStop,
     /// A key played live on one of the project's channels.
     PlayerNote {
         channel: usize,
@@ -327,6 +339,8 @@ struct Renderer {
     player: Option<Box<Player>>,
     pl: Vec<f32>,
     pr: Vec<f32>,
+    /// The sample being auditioned and how far it has played (its own frames).
+    preview: Option<(Box<Preview>, f64)>,
     meters: Arc<Meters>,
     load: f32,
 }
@@ -361,6 +375,7 @@ impl Renderer {
             player: None,
             pl: vec![0.0; 8192],
             pr: vec![0.0; 8192],
+            preview: None,
             meters,
             load: 0.0,
         }
@@ -422,6 +437,16 @@ impl Renderer {
             Command::PlayerPlay(from) => {
                 if let Some(p) = &mut self.player {
                     p.play(from);
+                }
+            }
+            Command::Preview(p) => {
+                if let Some((old, _)) = self.preview.replace((p, 0.0)) {
+                    let _ = self.garbage.push(Garbage::Preview(old));
+                }
+            }
+            Command::PreviewStop => {
+                if let Some((old, _)) = self.preview.take() {
+                    let _ = self.garbage.push(Garbage::Preview(old));
                 }
             }
             Command::PlayerStop => {
@@ -504,6 +529,25 @@ impl Renderer {
                 for slot in chain.iter_mut() {
                     slot.unit.set_position(pos);
                     slot.process(l, r, None);
+                }
+            }
+            if let Some((p, pos)) = &mut self.preview {
+                let step = p.rate / self.sr;
+                let len = p.left.len().min(p.right.len());
+                for i in 0..n {
+                    let at = *pos as usize;
+                    if at + 1 >= len {
+                        break;
+                    }
+                    let f = (*pos - at as f64) as f32;
+                    l[i] += p.left[at] + (p.left[at + 1] - p.left[at]) * f;
+                    r[i] += p.right[at] + (p.right[at + 1] - p.right[at]) * f;
+                    *pos += step;
+                }
+                if *pos as usize + 1 >= len {
+                    if let Some((old, _)) = self.preview.take() {
+                        let _ = self.garbage.push(Garbage::Preview(old));
+                    }
                 }
             }
             let (mut pl, mut pr) = (0f32, 0f32);
@@ -794,6 +838,45 @@ mod tests {
             (after - at).abs() < 96.0 * 2.0,
             "the song carried on near {at}, not {after}"
         );
+    }
+
+    #[test]
+    fn a_previewed_sample_plays_once_and_is_handed_back() {
+        let (mut r, mut tx, mut garbage) = renderer();
+        let wave: Shared<[f32]> = Shared::from(
+            (0..4800)
+                .map(|i| (i as f32 * 0.05).sin())
+                .collect::<Vec<_>>(),
+        );
+        tx.push(Command::Preview(Box::new(Preview {
+            left: wave.clone(),
+            right: wave,
+            rate: 48000.0,
+        })))
+        .ok()
+        .unwrap();
+        let mut buf = vec![0f32; 512 * 2];
+        r.fill(&mut buf);
+        assert!(peak(&buf) > 0.1, "the sample is heard");
+        for _ in 0..20 {
+            r.fill(&mut buf);
+        }
+        assert_eq!(peak(&buf), 0.0, "it ends by itself");
+        assert!(matches!(garbage.pop(), Ok(Garbage::Preview(_))));
+        // stopping early hands it back too
+        let wave: Shared<[f32]> = Shared::from(vec![0.5f32; 48000]);
+        tx.push(Command::Preview(Box::new(Preview {
+            left: wave.clone(),
+            right: wave,
+            rate: 48000.0,
+        })))
+        .ok()
+        .unwrap();
+        r.fill(&mut buf);
+        tx.push(Command::PreviewStop).ok().unwrap();
+        r.fill(&mut buf);
+        assert_eq!(peak(&buf), 0.0);
+        assert!(matches!(garbage.pop(), Ok(Garbage::Preview(_))));
     }
 
     #[test]

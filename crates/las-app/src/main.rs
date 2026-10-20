@@ -14,6 +14,9 @@ mod presets;
 mod project;
 mod rack;
 mod roll;
+mod shell;
+mod steps;
+mod theme;
 mod widgets;
 
 fn main() -> eframe::Result {

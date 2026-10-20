@@ -4,7 +4,6 @@
 //! ([`PlEdit`]) and [`apply`] changes the project.
 
 use crate::rack::channel_colour;
-use crate::widgets::ACCENT;
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui};
 use las_engine::timeline::{pattern_length, song_length, ticks_per_bar};
 use las_project::create::uid;
@@ -126,7 +125,7 @@ fn hex(s: &str) -> Color32 {
             return Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
         }
     }
-    ACCENT
+    crate::theme::accent()
 }
 
 /// A pattern clip for the pattern at `index`, starting at `start` on `track`.
@@ -176,6 +175,7 @@ pub fn draw(
     playhead: Option<f64>,
 ) -> Vec<PlEdit> {
     let mut edits = Vec::new();
+    let pl = crate::theme::pal();
     let rows = track_count(project);
     let bar = ticks_per_bar(project.time_sig);
     let ticks = song_length(project) + bar * 4.0;
@@ -200,11 +200,11 @@ pub fn draw(
             // rows
             for r in 0..rows {
                 let y = top + r as f32 * state.row;
-                let shade = if r % 2 == 0 { 30 } else { 26 };
+                let shade = if r % 2 == 0 { pl.bg2 } else { pl.bg };
                 painter.rect_filled(
                     Rect::from_min_size(egui::pos2(left, y), egui::vec2(width - HEAD, state.row)),
                     0.0,
-                    Color32::from_gray(shade),
+                    shade,
                 );
             }
             // bar lines and numbers
@@ -215,14 +215,14 @@ pub fn draw(
                 if x >= vl - 40.0 && x <= vr {
                     painter.line_segment(
                         [egui::pos2(x, o.y + RULER - 6.0), egui::pos2(x, vb)],
-                        Stroke::new(1.0, Color32::from_gray(55)),
+                        Stroke::new(1.0, pl.grid_bar),
                     );
                     painter.text(
                         egui::pos2(x + 3.0, o.y + 4.0),
                         egui::Align2::LEFT_TOP,
                         n.to_string(),
                         egui::FontId::proportional(10.5),
-                        Color32::from_gray(170),
+                        pl.muted,
                     );
                 }
                 t += bar;
@@ -265,7 +265,7 @@ pub fn draw(
                     Stroke::new(w, col),
                 );
             };
-            mark(start, ACCENT, 1.5);
+            mark(start, crate::theme::accent(), 1.5);
             if let Some(t) = playhead {
                 mark(t, Color32::WHITE, 1.5);
             }
@@ -273,11 +273,11 @@ pub fn draw(
             for r in 0..rows {
                 let y = top + r as f32 * state.row;
                 let cell = Rect::from_min_size(egui::pos2(vl, y), egui::vec2(HEAD, state.row));
-                painter.rect_filled(cell, 0.0, Color32::from_gray(38));
+                painter.rect_filled(cell, 0.0, pl.panel2);
                 painter.rect_stroke(
                     cell,
                     0.0,
-                    Stroke::new(1.0, Color32::from_gray(22)),
+                    Stroke::new(1.0, pl.border),
                     egui::StrokeKind::Inside,
                 );
                 let name = project
@@ -292,13 +292,13 @@ pub fn draw(
                     egui::Align2::LEFT_CENTER,
                     name,
                     egui::FontId::proportional(12.0),
-                    Color32::from_gray(200),
+                    pl.text2,
                 );
             }
             painter.rect_filled(
                 Rect::from_min_max(egui::pos2(vl, vt), egui::pos2(vr, o.y + RULER)),
                 0.0,
-                Color32::from_gray(20),
+                pl.well_deep,
             );
             // the ruler again on top (it stays in view)
             let mut t = 0.0;
@@ -311,11 +311,11 @@ pub fn draw(
                         egui::Align2::LEFT_TOP,
                         n.to_string(),
                         egui::FontId::proportional(10.5),
-                        Color32::from_gray(170),
+                        pl.muted,
                     );
                     painter.line_segment(
                         [egui::pos2(x, vt + RULER - 6.0), egui::pos2(x, vt + RULER)],
-                        Stroke::new(1.0, Color32::from_gray(90)),
+                        Stroke::new(1.0, pl.border2),
                     );
                 }
                 t += bar;
@@ -419,7 +419,11 @@ fn mark_ruler(p: &egui::Painter, x: f32, top: f32) {
         egui::pos2(x + 5.0, top),
         egui::pos2(x, top + 9.0),
     ];
-    p.add(egui::Shape::convex_polygon(tri, ACCENT, Stroke::NONE));
+    p.add(egui::Shape::convex_polygon(
+        tri,
+        crate::theme::accent(),
+        Stroke::NONE,
+    ));
 }
 
 #[cfg(test)]
