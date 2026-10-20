@@ -43,6 +43,8 @@ pub struct Export {
     pub format: usize,
     pub normalize: bool,
     pub pattern_only: bool,
+    /// Render only the song loop (when there is one).
+    pub loop_only: bool,
     working: Option<Receiver<Result<String, String>>>,
     pub message: Option<Result<String, String>>,
 }
@@ -122,6 +124,7 @@ impl Shell {
                 format: 0,
                 normalize: false,
                 pattern_only: false,
+                loop_only: false,
                 working: None,
                 message: None,
             },
@@ -1302,6 +1305,17 @@ impl App {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.shell.export.pattern_only, false, "Song");
             ui.selectable_value(&mut self.shell.export.pattern_only, true, "Chosen pattern");
+            let has_loop = self.project.playlist.song_loop.is_some();
+            if !has_loop {
+                self.shell.export.loop_only = false;
+            }
+            ui.add_enabled(
+                has_loop && !self.shell.export.pattern_only,
+                egui::Checkbox::new(&mut self.shell.export.loop_only, "Only the loop"),
+            )
+            .on_hover_text(
+                "Render the stretch the playlist loops (right-click the playlist to set one)",
+            );
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -1340,6 +1354,8 @@ impl App {
                     .map(|p| p.id.clone()),
                 loops: 1,
             }
+        } else if let Some((from, to)) = self.project.playlist.song_loop.filter(|_| e.loop_only) {
+            Mode::Range { from, to }
         } else {
             Mode::Song
         };
