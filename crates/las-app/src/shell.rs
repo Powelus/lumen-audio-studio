@@ -61,6 +61,7 @@ pub struct Shell {
     pub open: Windows,
     /// Song mode plays the playlist; pattern mode loops the chosen pattern.
     pub song_mode: bool,
+    pub metronome: bool,
     pub search: String,
     /// The theme chosen ("system" or an id) and the one painted.
     pub theme: String,
@@ -89,6 +90,7 @@ impl Shell {
                 about: false,
             },
             song_mode: true,
+            metronome: false,
             search: String::new(),
             theme: theme::saved_choice(),
             applied: String::new(),
@@ -214,6 +216,7 @@ fn segmented(ui: &mut Ui, labels: &[&str], active: &[bool]) -> Option<usize> {
 enum Icon {
     Play,
     Stop,
+    Metronome,
 }
 
 fn icon_button(ui: &mut Ui, icon: Icon, active: bool, tip: &str) -> egui::Response {
@@ -246,6 +249,22 @@ fn icon_button(ui: &mut Ui, icon: Icon, active: bool, tip: &str) -> egui::Respon
         Icon::Stop => {
             ui.painter()
                 .rect_filled(Rect::from_center_size(c, vec2(11.0, 11.0)), 2.0, ink);
+        }
+        Icon::Metronome => {
+            // a tall triangle with the pendulum arm across it
+            ui.painter().add(egui::Shape::closed_line(
+                vec![
+                    pos2(c.x - 6.0, c.y + 7.0),
+                    pos2(c.x + 6.0, c.y + 7.0),
+                    pos2(c.x + 2.5, c.y - 7.0),
+                    pos2(c.x - 2.5, c.y - 7.0),
+                ],
+                Stroke::new(1.5, ink),
+            ));
+            ui.painter().line_segment(
+                [pos2(c.x, c.y + 4.0), pos2(c.x + 4.0, c.y - 6.0)],
+                Stroke::new(1.5, ink),
+            );
         }
     }
     resp.on_hover_text(tip)
@@ -346,6 +365,11 @@ impl App {
             if icon_button(ui, Icon::Stop, false, "Stop").clicked() {
                 self.stop_project();
                 self.send(Command::PreviewStop);
+            }
+            let metro = self.shell.metronome;
+            if icon_button(ui, Icon::Metronome, metro, "Metronome").clicked() {
+                self.shell.metronome = !metro;
+                self.send(Command::Metronome(!metro));
             }
             // tempo
             let r = lcd(ui, &format!("{bpm:.2}"), "BPM", 86.0);
@@ -589,6 +613,7 @@ impl App {
         let query = self.shell.search.clone();
         let hits = matching_samples(&query);
         let mut play: Option<&'static str> = None;
+        let mut add: Option<(&'static str, &'static str)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.label(
                 RichText::new("\u{2605} LUMEN FACTORY KIT")
@@ -607,8 +632,12 @@ impl App {
                     .show(ui, |ui| {
                         for s in items {
                             ui.horizontal(|ui| {
-                                let r = ui.selectable_label(false, s.name);
-                                if r.clicked() {
+                                let r = ui.selectable_label(false, s.name).on_hover_text(
+                                    "Click to hear it, double click to add it as a channel",
+                                );
+                                if r.double_clicked() {
+                                    add = Some((s.id, s.name));
+                                } else if r.clicked() {
                                     play = Some(s.id);
                                 }
                                 ui.with_layout(
@@ -633,6 +662,9 @@ impl App {
                     .strong()
                     .color(p.muted),
             );
+            if ui.button("Import files...").clicked() {
+                self.import_dialog();
+            }
             match &self.project.loaded {
                 Some(l) if !l.project.samples.is_empty() => {
                     for s in &l.project.samples {
@@ -649,6 +681,9 @@ impl App {
         });
         if let Some(id) = play {
             self.audition(id);
+        }
+        if let Some((id, name)) = add {
+            self.add_factory_channel(id, name);
         }
     }
 

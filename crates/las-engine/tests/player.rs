@@ -157,3 +157,42 @@ fn the_default_project_renders_a_beat() {
     assert!(peak > 0.05, "the starter beat is audible, peak {peak}");
     assert!(r.seconds() > 1.5, "a bar at 128 bpm is about 1.9 s");
 }
+
+#[test]
+fn the_metronome_clicks_on_the_beats_while_playing() {
+    use las_engine::{PlayMode, Player};
+    use las_project::create::{empty_project, pattern};
+    use las_project::{Clip, ClipKind};
+    use std::sync::Arc;
+    let mut p = empty_project("click");
+    p.bpm = 120.0;
+    let pat = pattern(0, None);
+    p.playlist.clips.push(Clip {
+        id: "c".into(),
+        kind: ClipKind::Pattern,
+        ref_id: pat.id.clone(),
+        length: 384.0,
+        ..Default::default()
+    });
+    p.patterns = vec![pat];
+    let p = Arc::new(p);
+    let run = |on: bool| {
+        let mut pl = Player::new(p.clone(), &Default::default(), 24000.0, PlayMode::Song).unwrap();
+        pl.set_metronome(on);
+        assert!(pl.play(0.0));
+        let mut l = vec![0f32; 24000];
+        let mut r = vec![0f32; 24000];
+        pl.process(&mut l, &mut r);
+        // the loudest stretch near each half second (a beat at 120 bpm), and the gaps
+        let peak = |a: usize, b: usize| l[a..b].iter().fold(0f32, |m, s| m.max(s.abs()));
+        (peak(0, 600), peak(12000, 12600), peak(3000, 9000))
+    };
+    let (first, second, between) = run(true);
+    assert!(
+        first > 0.1 && second > 0.1,
+        "clicks on beats: {first} {second}"
+    );
+    assert!(between < 1e-4, "silence between the beats: {between}");
+    let (a, b, c) = run(false);
+    assert_eq!((a, b, c), (0.0, 0.0, 0.0));
+}

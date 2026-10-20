@@ -1493,6 +1493,14 @@ impl eframe::App for App {
                 self.open_project(&path.to_string_lossy());
                 continue;
             }
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("wave"))
+                && self.project.loaded.is_some()
+            {
+                self.import_path(&path);
+                continue;
+            }
             match self.load_wav(&path) {
                 Ok(()) => {
                     self.error = None;

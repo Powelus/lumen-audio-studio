@@ -45,7 +45,104 @@ pub fn delete_pattern(p: &mut Project, index: usize) -> bool {
     true
 }
 
+/// Add a WAV file to a project as a sampler channel of its own. The file's bytes go
+/// into the project's samples; returns the channel's index.
+pub fn import_wav(
+    p: &mut Project,
+    samples: &mut std::collections::BTreeMap<String, las_project::Sample>,
+    name: &str,
+    bytes: Vec<u8>,
+) -> Result<usize, String> {
+    let audio =
+        las_engine::library::decode_wav(&bytes).ok_or("not a WAV file this app can read")?;
+    let id = las_project::create::uid("smp_");
+    p.samples.push(las_project::SampleRef {
+        id: id.clone(),
+        name: name.to_string(),
+        duration: Some(audio.frames() as f64 / audio.sample_rate),
+        ..las_project::SampleRef::default()
+    });
+    samples.insert(
+        id.clone(),
+        las_project::Sample {
+            name: name.to_string(),
+            mime: "audio/wav".into(),
+            data: bytes,
+        },
+    );
+    let at = add_channel(p, "sampler");
+    p.channels[at].name = name.to_string();
+    p.channels[at].sample_id = Some(id);
+    let insert = p.channels[at].mixer_track;
+    if let Some(t) = p.mixer.get_mut(insert) {
+        t.name = name.to_string();
+    }
+    Ok(at)
+}
+
+/// Add a factory sample as a sampler channel.
+pub fn add_factory(p: &mut Project, id: &str, name: &str) -> usize {
+    if !p.samples.iter().any(|s| s.id == id) {
+        p.samples.push(las_project::SampleRef {
+            id: id.to_string(),
+            name: name.to_string(),
+            factory: Some(true),
+            ..las_project::SampleRef::default()
+        });
+    }
+    let at = add_channel(p, "sampler");
+    p.channels[at].name = name.to_string();
+    p.channels[at].sample_id = Some(id.to_string());
+    let insert = p.channels[at].mixer_track;
+    if let Some(t) = p.mixer.get_mut(insert) {
+        t.name = name.to_string();
+    }
+    at
+}
+
 impl App {
+    /// Pick WAV files and add each as a sampler channel.
+    pub(crate) fn import_dialog(&mut self) {
+        let files = rfd::FileDialog::new()
+            .add_filter("WAV audio", &["wav", "wave"])
+            .set_title("Import samples")
+            .pick_files();
+        for f in files.into_iter().flatten() {
+            self.import_path(&f);
+        }
+    }
+
+    /// Add the WAV file at `path` as a sampler channel.
+    pub(crate) fn import_path(&mut self, path: &std::path::Path) {
+        let name = path
+            .file_stem()
+            .map_or("Sample".to_string(), |s| s.to_string_lossy().into_owned());
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.project.error = Some(format!("{}: {e}", path.display()));
+                return;
+            }
+        };
+        let mut result = Ok(0);
+        self.project.modify_with_samples(true, |p, samples| {
+            result = import_wav(p, samples, &name, bytes);
+        });
+        match result {
+            Ok(at) => {
+                self.project.channel = at;
+                self.project.error = None;
+            }
+            Err(e) => self.project.error = Some(format!("{}: {e}", path.display())),
+        }
+    }
+
+    pub(crate) fn add_factory_channel(&mut self, id: &str, name: &str) {
+        let mut at = 0;
+        self.project.modify(true, |p| at = add_factory(p, id, name));
+        self.project.channel = at;
+    }
+
     /// Run an action, asking first when it would lose changes.
     pub(crate) fn guard(&mut self, a: Action) {
         if self.project.dirty {
@@ -204,6 +301,13 @@ impl App {
             }
             ui.separator();
             if ui
+                .add_enabled(loaded, egui::Button::new("Import samples..."))
+                .clicked()
+            {
+                self.import_dialog();
+                ui.close();
+            }
+            if ui
                 .add_enabled(loaded, egui::Button::new("Export...    Ctrl+R"))
                 .clicked()
             {
@@ -347,6 +451,75 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wav(seconds: f32) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 24000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::new(&mut out, spec).unwrap();
+        for i in 0..(24000.0 * seconds) as usize {
+            let v = (i as f32 * 0.05).sin() * 0.6 * (1.0 - i as f32 / (24000.0 * seconds));
+            w.write_sample((v * 32767.0) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn an_imported_wav_becomes_a_sampler_channel_that_plays() {
+        let mut p = default_project();
+        let mut samples = Default::default();
+        let at = import_wav(&mut p, &mut samples, "My hit", wav(0.5)).unwrap();
+        let c = &p.channels[at];
+        assert_eq!(
+            (c.name.as_str(), c.plugin_id.as_str()),
+            ("My hit", "sampler")
+        );
+        let id = c.sample_id.clone().unwrap();
+        assert!(samples.contains_key(&id));
+        assert!(p.samples.iter().any(|s| s.id == id && s.duration.is_some()));
+        assert_eq!(p.mixer[c.mixer_track].name, "My hit");
+        // it sounds: a note on the new channel in a pattern of its own
+        p.patterns[0].notes.clear();
+        let ch = c.id.clone();
+        p.patterns[0]
+            .notes
+            .insert(ch, vec![las_project::create::step_note(0, 60, 0.9)]);
+        let r = las_engine::render_mix_with(
+            &p,
+            &samples,
+            &las_engine::RenderOptions {
+                sample_rate: 24000.0,
+                tail: 0.3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let peak = r.left.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.05, "the imported sample is heard, peak {peak}");
+        // something that is not a WAV is refused and changes nothing
+        let before = p.channels.len();
+        assert!(import_wav(&mut p, &mut samples, "x", b"nope".to_vec()).is_err());
+        assert_eq!(p.channels.len(), before);
+    }
+
+    #[test]
+    fn a_factory_sample_is_added_once_as_a_reference() {
+        let mut p = default_project();
+        let n = p.samples.len();
+        let a = add_factory(&mut p, "factory:kick-deep", "Kick Deep");
+        let b = add_factory(&mut p, "factory:kick-deep", "Kick Deep");
+        assert_eq!(p.samples.len(), n + 1);
+        assert_ne!(a, b);
+        assert_eq!(
+            p.channels[b].sample_id.as_deref(),
+            Some("factory:kick-deep")
+        );
+    }
 
     #[test]
     fn the_demo_song_is_a_project() {

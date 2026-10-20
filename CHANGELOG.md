@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.25
+
+More of an FL Studio workflow.
+
+- Import your own samples: File > Import samples..., the Import button in the browser, or drop WAV files on the window. Each becomes a sampler channel with its own insert, and the file is stored in the project. Double click a factory sample in the browser to add it as a channel (a single click still plays it).
+- Metronome: a button next to Stop; a click on every beat (higher on the first of the bar) while the project plays.
+- Piano roll: a velocity lane under the grid; drag in it to set the velocity of the notes above.
+- Mixer routing: choose what an insert plays to, and add sends with their own level and a sidechain-only switch. Loops are refused.
+
 ## 0.2.0-alpha.24
 
 Menus, new and demo projects, and FL Studio style tools.

@@ -92,6 +92,8 @@ pub enum Command {
     /// Start the player at a tick.
     PlayerPlay(f64),
     PlayerStop,
+    /// The metronome clicks on the beats while the project plays.
+    Metronome(bool),
     /// Audition a sample (it replaces the one playing).
     Preview(Box<Preview>),
     PreviewStop,
@@ -341,6 +343,7 @@ struct Renderer {
     pr: Vec<f32>,
     /// The sample being auditioned and how far it has played (its own frames).
     preview: Option<(Box<Preview>, f64)>,
+    metronome: bool,
     meters: Arc<Meters>,
     load: f32,
 }
@@ -376,6 +379,7 @@ impl Renderer {
             pl: vec![0.0; 8192],
             pr: vec![0.0; 8192],
             preview: None,
+            metronome: false,
             meters,
             load: 0.0,
         }
@@ -428,7 +432,14 @@ impl Renderer {
                 }
             }
             Command::Tempo(bpm) => self.bpm = bpm,
-            Command::SetPlayer(p) => {
+            Command::Metronome(on) => {
+                self.metronome = on;
+                if let Some(p) = &mut self.player {
+                    p.set_metronome(on);
+                }
+            }
+            Command::SetPlayer(mut p) => {
+                p.set_metronome(self.metronome);
                 // the old player goes back to be freed off this thread
                 if let Some(old) = self.player.replace(p) {
                     let _ = self.garbage.push(Garbage::Player(old));

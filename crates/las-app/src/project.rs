@@ -226,6 +226,26 @@ impl ProjectState {
         }
     }
 
+    /// Change the project and its samples together (undo covers the project; a sample
+    /// that no channel uses any more is harmless).
+    pub fn modify_with_samples(
+        &mut self,
+        begin: bool,
+        f: impl FnOnce(&mut Project, &mut BTreeMap<String, Sample>),
+    ) {
+        let Some(l) = &mut self.loaded else { return };
+        if begin {
+            self.undo.push(l.project.clone());
+            if self.undo.len() > 200 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        f(Arc::make_mut(&mut l.project), Arc::make_mut(&mut l.samples));
+        self.dirty = true;
+        self.stale = true;
+    }
+
     /// Change the project, starting an undo step only when this is a different kind of
     /// change from the last one or more than a moment after it: a knob drag is one step.
     pub fn modify_coalesced(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
@@ -503,6 +523,9 @@ impl App {
             Ok(p) => {
                 if let Some(a) = &mut self.audio {
                     a.set_player(p);
+                    // a new player does not know about the metronome switch
+                    let metro = self.shell.metronome;
+                    a.send(Command::Metronome(metro));
                     match from {
                         Start::Ready => {}
                         Start::At(t) => a.send(Command::PlayerPlay(t)),
