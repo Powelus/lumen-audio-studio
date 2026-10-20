@@ -178,6 +178,14 @@ impl App {
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
         }
+        // `--roll` starts on the piano roll
+        if std::env::args().any(|a| a == "--roll") {
+            app.project.page = crate::project::Page::Roll;
+        }
+        // `--playlist` starts on the playlist
+        if std::env::args().any(|a| a == "--playlist") {
+            app.project.page = crate::project::Page::Playlist;
+        }
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
             app.view = View::Effects;

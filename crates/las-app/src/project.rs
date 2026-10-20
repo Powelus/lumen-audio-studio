@@ -5,6 +5,7 @@
 
 use crate::app::App;
 use crate::audio::Command;
+use crate::playlist::{self, PlEdit, PlaylistState};
 use crate::roll::{self, Edit, RollState};
 use crate::widgets::ACCENT;
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -47,6 +48,9 @@ pub struct ProjectState {
     /// Rack or piano roll.
     pub page: Page,
     pub roll: RollState,
+    pub playlist: PlaylistState,
+    /// Where "Play song" starts, in ticks.
+    pub start_tick: f64,
     /// Earlier and later states of the project, for undo and redo.
     undo: Vec<Arc<Project>>,
     redo: Vec<Arc<Project>>,
@@ -61,6 +65,7 @@ pub enum Page {
     #[default]
     Rack,
     Roll,
+    Playlist,
 }
 
 impl ProjectState {
@@ -75,6 +80,7 @@ impl ProjectState {
         });
         self.pattern = 0;
         self.channel = 0;
+        self.start_tick = 0.0;
         self.has_player = false;
         self.building = None;
         self.undo.clear();
@@ -103,6 +109,28 @@ impl ProjectState {
                 Edit::Audition { .. } => {}
                 _ => {
                     roll::apply(Arc::make_mut(&mut l.project), pattern, &id, e);
+                    self.dirty = true;
+                    self.stale = true;
+                }
+            }
+        }
+    }
+
+    /// Carry out the playlist edits of one frame.
+    pub fn edit_playlist(&mut self, edits: &[PlEdit]) {
+        let Some(l) = &mut self.loaded else { return };
+        for e in edits {
+            match e {
+                PlEdit::Begin => {
+                    self.undo.push(l.project.clone());
+                    if self.undo.len() > 200 {
+                        self.undo.remove(0);
+                    }
+                    self.redo.clear();
+                }
+                PlEdit::Seek(t) => self.start_tick = *t,
+                _ => {
+                    playlist::apply(Arc::make_mut(&mut l.project), e);
                     self.dirty = true;
                     self.stale = true;
                 }
@@ -181,6 +209,7 @@ impl App {
     /// Open a project and tell the player side about it.
     pub(crate) fn open_project(&mut self, path: &str) {
         self.stop_project();
+        self.project.path = path.to_string();
         match self.project.open(path) {
             Ok(()) => {
                 self.project.error = None;
@@ -199,6 +228,30 @@ impl App {
             Ok(()) => self.project.error = None,
             Err(e) => self.project.error = Some(e),
         }
+    }
+
+    fn playlist(&mut self, ui: &mut Ui, playhead: Option<f64>) {
+        let Some(l) = &self.project.loaded else {
+            return;
+        };
+        let project = l.project.clone();
+        ui.label(
+            RichText::new(
+                "Double click to place the chosen pattern, drag to move, drag an edge to resize, \
+                 right click to delete, click the ruler to set where the song starts.",
+            )
+            .weak(),
+        );
+        let edits = playlist::draw(
+            ui,
+            &project,
+            self.project.pattern,
+            self.project.start_tick,
+            &mut self.project.playlist,
+            playhead,
+        );
+        drop(project);
+        self.project.edit_playlist(&edits);
     }
 
     fn roll(&mut self, ui: &mut Ui, playhead: Option<f64>) {
@@ -330,7 +383,8 @@ impl App {
                 .add_enabled(!busy, egui::Button::new("Play song"))
                 .clicked()
             {
-                self.play_project(PlayMode::Song, 0.0);
+                let from = self.project.start_tick;
+                self.play_project(PlayMode::Song, from);
             }
             if ui
                 .add_enabled(
@@ -373,6 +427,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.project.page, Page::Rack, "Channel rack");
             ui.selectable_value(&mut self.project.page, Page::Roll, "Piano roll");
+            ui.selectable_value(&mut self.project.page, Page::Playlist, "Playlist");
             ui.separator();
             if self.project.page == Page::Roll {
                 ui.label("Snap");
@@ -406,6 +461,10 @@ impl App {
         match self.project.page {
             Page::Rack => self.rack(ui, head),
             Page::Roll => self.roll(ui, head),
+            Page::Playlist => {
+                let song_head = (playing && !self.project.looping).then_some(pos);
+                self.playlist(ui, song_head);
+            }
         }
     }
 }

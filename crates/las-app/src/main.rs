@@ -8,6 +8,7 @@ mod app;
 mod audio;
 mod fxui;
 mod midi;
+mod playlist;
 mod presets;
 mod project;
 mod rack;

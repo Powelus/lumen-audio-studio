@@ -2,6 +2,13 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.18 - 2026-10-20
+
+The playlist.
+
+- A playlist page lays the song out in tracks of clips (patterns, audio and automation, each with its name and colour). Double click places the chosen pattern on the bar, drag moves a clip in time and between tracks, drag an edge resizes, right click deletes, and a click on the ruler sets where "Play song" starts. Edits join the same undo, redo and save as the piano roll.
+- `lumen song.las --roll` and `--playlist` start on those pages; a project opened from the command line fills in the path box.
+
 ## 0.2.0-alpha.17 - 2026-10-20
 
 The piano roll, and saving.
