@@ -2148,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "las-app"
-version = "0.2.0-alpha.31"
+version = "0.2.0-alpha.32"
 dependencies = [
  "cpal",
  "eframe",
@@ -2157,6 +2157,7 @@ dependencies = [
  "las-engine",
  "las-host",
  "las-project",
+ "memory-stats",
  "midir",
  "rfd",
  "rtrb",
@@ -2165,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "las-cli"
-version = "0.2.0-alpha.31"
+version = "0.2.0-alpha.32"
 dependencies = [
  "hound",
  "las-dsp",
@@ -2176,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "las-dsp"
-version = "0.2.0-alpha.31"
+version = "0.2.0-alpha.32"
 dependencies = [
  "serde",
  "serde_json",
@@ -2184,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "las-engine"
-version = "0.2.0-alpha.31"
+version = "0.2.0-alpha.32"
 dependencies = [
  "claxon",
  "flacenc",
@@ -2196,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "las-host"
-version = "0.2.0-alpha.31"
+version = "0.2.0-alpha.32"
 dependencies = [
  "clack-extensions",
  "clack-host",
@@ -2210,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "las-project"
-version = "0.2.0-alpha.31"
+version = "0.2.0-alpha.32"
 dependencies = [
  "aes-gcm",
  "crc32fast",
@@ -2223,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "las-testplug"
-version = "0.2.0-alpha.31"
+version = "0.2.0-alpha.32"
 dependencies = [
  "clack-extensions",
  "clack-plugin",
@@ -2231,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "las-testvst3"
-version = "0.2.0-alpha.31"
+version = "0.2.0-alpha.32"
 dependencies = [
  "vst3",
 ]
@@ -2363,6 +2364,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "memory-stats"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c73f5c649995a115e1a0220b35e4df0a1294500477f97a91d0660fb5abeb574a"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

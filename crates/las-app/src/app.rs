@@ -1492,6 +1492,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.keys(ctx);
         self.shortcuts(ctx);
+        let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1514,7 +1515,19 @@ impl eframe::App for App {
                 .is_some_and(|e| e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("wave"))
                 && self.project.loaded.is_some()
             {
-                self.import_path(&path);
+                // on the playlist a file becomes an audio clip, elsewhere a sampler channel
+                let place = self
+                    .shell
+                    .open
+                    .playlist
+                    .then_some(())
+                    .and(self.project.playlist.area)
+                    .zip(drop_at)
+                    .and_then(|(a, pos)| a.place(pos));
+                match place {
+                    Some((tick, track)) => self.import_clip_path(&path, tick, track),
+                    None => self.import_path(&path),
+                }
                 continue;
             }
             match self.load_wav(&path) {

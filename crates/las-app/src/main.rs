@@ -18,6 +18,7 @@ mod playlist;
 mod presets;
 mod project;
 mod rack;
+mod record;
 mod roll;
 mod samplerui;
 mod shell;

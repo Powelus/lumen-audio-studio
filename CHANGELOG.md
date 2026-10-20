@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.32
+
+Audio clips, recording, and a CPU and memory display.
+
+- Drop a WAV file on the playlist and it becomes an audio clip where it lands (on the snap, on that track), the way FL Studio does it. Dropped anywhere else it is still a sampler channel. Audio clips show the outline of their sound.
+- Recording: arm the red record button and press play. The default audio input is captured while the song plays. On stop, the take becomes an audio clip where recording started, on the first free track.
+- The top bar shows the CPU and memory use, as in FL Studio: a bar graph and percentage of how much of each audio buffer's time the engine takes (red when it nears the limit), and the memory in use in MB.
+- The top bar is tighter, so it all fits in a 1280 pixel wide window.
+
 ## 0.2.0-alpha.31
 
 VST3 plugins, and automation of hosted plugins.

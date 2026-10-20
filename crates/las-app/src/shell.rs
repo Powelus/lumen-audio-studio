@@ -62,6 +62,13 @@ pub struct Shell {
     /// Song mode plays the playlist; pattern mode loops the chosen pattern.
     pub song_mode: bool,
     pub metronome: bool,
+    /// Record is armed: playing captures the input.
+    pub record: bool,
+    pub recorder: Option<crate::record::Recorder>,
+    /// Where the take being recorded starts, ticks.
+    pub record_from: f64,
+    /// The memory the app uses, megabytes, and when it was last read.
+    ram: (Option<Instant>, f64),
     pub search: String,
     /// The theme chosen ("system" or an id) and the one painted.
     pub theme: String,
@@ -91,6 +98,10 @@ impl Shell {
             },
             song_mode: true,
             metronome: false,
+            record: false,
+            recorder: None,
+            record_from: 0.0,
+            ram: (None, 0.0),
             search: String::new(),
             theme: theme::saved_choice(),
             applied: String::new(),
@@ -216,6 +227,7 @@ fn segmented(ui: &mut Ui, labels: &[&str], active: &[bool]) -> Option<usize> {
 enum Icon {
     Play,
     Stop,
+    Record,
     Metronome,
 }
 
@@ -250,6 +262,10 @@ fn icon_button(ui: &mut Ui, icon: Icon, active: bool, tip: &str) -> egui::Respon
             ui.painter()
                 .rect_filled(Rect::from_center_size(c, vec2(11.0, 11.0)), 2.0, ink);
         }
+        Icon::Record => {
+            ui.painter()
+                .circle_filled(c, 6.0, Color32::from_rgb(235, 70, 60));
+        }
         Icon::Metronome => {
             // a tall triangle with the pendulum arm across it
             ui.painter().add(egui::Shape::closed_line(
@@ -268,6 +284,61 @@ fn icon_button(ui: &mut Ui, icon: Icon, active: bool, tip: &str) -> egui::Respon
         }
     }
     resp.on_hover_text(tip)
+}
+
+/// The memory this program uses, megabytes (0 where the system does not say).
+pub fn ram_mb() -> f64 {
+    memory_stats::memory_stats().map_or(0.0, |m| m.physical_mem as f64 / (1024.0 * 1024.0))
+}
+
+/// The CPU and memory panel of FL Studio's top bar: how much of each audio buffer's
+/// time the engine takes, as a bar graph and a number, and the memory in use.
+fn cpu_ram(ui: &mut Ui, load: f32, ram: f64) -> egui::Response {
+    let p = pal();
+    let (r, resp) = ui.allocate_exact_size(vec2(112.0, 30.0), Sense::hover());
+    let paint = ui.painter();
+    paint.rect_filled(r, 3.0, p.well_deep);
+    let load = load.clamp(0.0, 1.0);
+    let hot = load > 0.7;
+    // the bar graph: twelve segments, as in FL
+    let bars = Rect::from_min_size(r.min + vec2(5.0, 6.0), vec2(44.0, 18.0));
+    let lit = (load * 12.0).ceil() as usize;
+    for i in 0..12 {
+        let x = bars.left() + i as f32 * (bars.width() / 12.0);
+        let h = bars.height() * (0.35 + 0.65 * i as f32 / 11.0);
+        let seg = Rect::from_min_max(
+            pos2(x, bars.bottom() - h),
+            pos2(x + bars.width() / 12.0 - 1.0, bars.bottom()),
+        );
+        let on = i < lit;
+        let col = if !on {
+            p.lcd.gamma_multiply(0.15)
+        } else if i >= 9 {
+            p.hot
+        } else {
+            p.lcd
+        };
+        paint.rect_filled(seg, 0.0, col);
+    }
+    let text = |pos: egui::Pos2, s: String, size: f32, c: Color32| {
+        paint.text(pos, Align2::LEFT_TOP, s, FontId::monospace(size), c);
+    };
+    text(
+        pos2(r.left() + 54.0, r.top() + 3.0),
+        format!("{:>3.0}%", load * 100.0),
+        12.0,
+        if hot { p.hot } else { p.lcd },
+    );
+    text(
+        pos2(r.left() + 54.0, r.top() + 16.0),
+        format!("{ram:>4.0} MB"),
+        10.5,
+        p.lcd.gamma_multiply(0.8),
+    );
+    resp.on_hover_text(format!(
+        "CPU: the engine takes {:.0}% of the time of each audio buffer\nRAM: {ram:.0} MB in use",
+        load * 100.0
+    ))
 }
 
 /// A display like the web version's LCD: a dark well with lit digits and a caption.
@@ -347,9 +418,8 @@ impl App {
             .map_or(120.0, |l| l.project.bpm);
         let busy = self.project.is_building();
         ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
+            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
             logo(ui);
-            ui.label(RichText::new("LAS").strong().size(17.0));
             ui.menu_button(RichText::new("\u{2630}").size(16.0), |ui| {
                 ui.horizontal(|ui| self.main_menu(ui));
             });
@@ -365,6 +435,17 @@ impl App {
             if icon_button(ui, Icon::Stop, false, "Stop").clicked() {
                 self.stop_project();
                 self.send(Command::PreviewStop);
+            }
+            let rec = self.shell.record;
+            if icon_button(
+                ui,
+                Icon::Record,
+                rec,
+                "Record: play to capture the audio input",
+            )
+            .clicked()
+            {
+                self.shell.record = !rec;
             }
             let metro = self.shell.metronome;
             if icon_button(ui, Icon::Metronome, metro, "Metronome").clicked() {
@@ -401,7 +482,18 @@ impl App {
                 }
             }
             let shown = if playing { pos } else { 0.0 };
-            lcd(ui, &bar_beat_step(shown, sig), "BAR:BEAT:STEP", 104.0);
+            lcd(ui, &bar_beat_step(shown, sig), "BAR:BEAT:STEP", 96.0);
+            // the memory use is read once a second
+            let stale = self
+                .shell
+                .ram
+                .0
+                .is_none_or(|t| t.elapsed().as_secs_f32() > 1.0);
+            if stale {
+                self.shell.ram = (Some(Instant::now()), ram_mb());
+            }
+            let load = self.audio.as_ref().map_or(0.0, |a| a.meters.load());
+            cpu_ram(ui, load, self.shell.ram.1);
             // pattern
             if let Some(l) = &self.project.loaded {
                 let project = l.project.clone();
@@ -411,7 +503,7 @@ impl App {
                     .map_or("-".to_string(), |x| x.name.clone());
                 egui::ComboBox::from_id_salt("pattern")
                     .selected_text(name)
-                    .width(110.0)
+                    .width(96.0)
                     .show_ui(ui, |ui| {
                         for (i, x) in project.patterns.iter().enumerate() {
                             ui.selectable_value(&mut self.project.pattern, i, &x.name);

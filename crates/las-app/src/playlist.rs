@@ -108,9 +108,81 @@ pub struct PlaylistState {
     /// The clips selected (by id) and the ones copied (starts relative to the first).
     pub selected: HashSet<String>,
     pub clipboard: Vec<Clip>,
+    /// The waveforms of the samples audio clips play, by sample id.
+    pub waves: std::collections::HashMap<String, std::sync::Arc<Wave>>,
+    /// Where the clips were drawn last (to place files dropped on the playlist).
+    pub area: Option<Area>,
     marquee: Option<(egui::Pos2, egui::Pos2)>,
     group_last: Option<(f64, usize)>,
     drag: Option<Drag>,
+}
+
+/// A sample's outline: the loudest level in each stretch of `step` seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave {
+    pub peaks: Vec<f32>,
+    pub step: f64,
+}
+
+impl Wave {
+    /// The outline of some audio (any number of channels).
+    pub fn of(channels: &[Vec<f32>], sample_rate: f64) -> Self {
+        const FRAMES: usize = 256;
+        let n = channels.iter().map(Vec::len).max().unwrap_or(0);
+        let peaks = (0..n.div_ceil(FRAMES))
+            .map(|b| {
+                let (a, z) = (b * FRAMES, ((b + 1) * FRAMES).min(n));
+                channels
+                    .iter()
+                    .flat_map(|c| c.get(a..z.min(c.len())).unwrap_or(&[]))
+                    .fold(0f32, |m, v| m.max(v.abs()))
+            })
+            .collect();
+        Self {
+            peaks,
+            step: FRAMES as f64 / sample_rate.max(1.0),
+        }
+    }
+
+    /// The level at `t` seconds into the sample.
+    pub fn at(&self, t: f64) -> f32 {
+        if t < 0.0 {
+            return 0.0;
+        }
+        self.peaks
+            .get((t / self.step) as usize)
+            .copied()
+            .unwrap_or(0.0)
+    }
+}
+
+/// The geometry of the clip area as last drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Area {
+    pub rect: Rect,
+    pub left: f32,
+    pub top: f32,
+    pub zoom: f32,
+    pub row: f32,
+    pub rows: usize,
+    pub snap: f64,
+}
+
+impl Area {
+    /// The tick (on the snap) and the track a point of the screen falls on.
+    pub fn place(&self, pos: egui::Pos2) -> Option<(f64, usize)> {
+        if !self.rect.contains(pos) || pos.x < self.left || pos.y < self.top {
+            return None;
+        }
+        let tick = f64::from((pos.x - self.left) / self.zoom).max(0.0);
+        let tick = if self.snap > 1.0 {
+            (tick / self.snap).floor() * self.snap
+        } else {
+            tick
+        };
+        let track = (((pos.y - self.top) / self.row) as usize).min(self.rows.saturating_sub(1));
+        Some((tick, track))
+    }
 }
 
 impl Default for PlaylistState {
@@ -122,6 +194,8 @@ impl Default for PlaylistState {
             tool: Tool::Draw,
             selected: HashSet::new(),
             clipboard: Vec::new(),
+            waves: Default::default(),
+            area: None,
             marquee: None,
             group_last: None,
             drag: None,
@@ -311,6 +385,7 @@ pub fn draw(
     let ticks = (song_length(project) + bar * 8.0).max(bar * 128.0);
     let width = HEAD + ticks as f32 * state.zoom;
     let height = RULER + rows as f32 * state.row;
+    let mut drawn = None;
     let out = egui::ScrollArea::both()
         .auto_shrink([false, false])
         .id_salt("playlist")
@@ -326,6 +401,15 @@ pub fn draw(
                 |y: f32| (((y - top) / state.row).floor().max(0.0) as usize).min(rows - 1);
             let (vl, vr) = (o.x + viewport.min.x, o.x + viewport.max.x);
             let (vt, vb) = (o.y + viewport.min.y, o.y + viewport.max.y);
+            drawn = Some(Area {
+                rect: Rect::from_min_max(egui::pos2(vl, vt), egui::pos2(vr, vb)),
+                left,
+                top,
+                zoom: state.zoom,
+                row: state.row,
+                rows,
+                snap: state.snap,
+            });
 
             // rows
             for r in 0..rows {
@@ -418,6 +502,36 @@ pub fn draw(
                                 }
                                 base += plen;
                             }
+                        }
+                    }
+                }
+                if c.kind == ClipKind::Audio {
+                    let wave = project
+                        .channels
+                        .iter()
+                        .find(|x| x.id == c.ref_id)
+                        .and_then(|x| x.sample_id.as_ref())
+                        .and_then(|id| state.waves.get(id));
+                    if let Some(w) = wave {
+                        // the outline of the sound, at the project's tempo
+                        let sec_per_tick = 60.0 / project.bpm.max(1.0) / f64::from(PPQ);
+                        let mid = r.top() + 14.0 + (r.height() - 16.0) / 2.0;
+                        let half = (r.height() - 18.0) / 2.0;
+                        let inner = painter.with_clip_rect(
+                            r.intersect(Rect::from_x_y_ranges(vl..=vr, r.y_range())),
+                        );
+                        let (a, b) = (r.left().max(vl), r.right().min(vr));
+                        let mut x = a;
+                        while x < b {
+                            let t = (c.offset + tick_at(x) - c.start) * sec_per_tick;
+                            let v = w.at(t).min(1.0) * half;
+                            if v > 0.3 {
+                                inner.line_segment(
+                                    [egui::pos2(x, mid - v), egui::pos2(x, mid + v)],
+                                    Stroke::new(1.0, Color32::from_black_alpha(170)),
+                                );
+                            }
+                            x += 1.0;
                         }
                     }
                 }
@@ -752,6 +866,7 @@ pub fn draw(
             }
         });
     keyboard(ui, out.inner_rect, project, start, state, &mut edits);
+    state.area = drawn;
     edits
 }
 
@@ -851,6 +966,36 @@ fn mark_ruler(p: &egui::Painter, x: f32, top: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wave_keeps_the_loudest_level_of_each_stretch() {
+        let mut c = vec![0.0f32; 1000];
+        c[300] = -0.8;
+        c[700] = 0.4;
+        let w = Wave::of(&[c], 256.0);
+        assert_eq!(w.peaks.len(), 4);
+        assert_eq!(w.step, 1.0);
+        assert_eq!((w.at(0.5), w.at(1.5), w.at(2.5)), (0.0, 0.8, 0.4));
+        assert_eq!((w.at(-1.0), w.at(99.0)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_drop_lands_on_the_snap_and_the_track_under_it() {
+        let a = Area {
+            rect: Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 400.0)),
+            left: 100.0,
+            top: 20.0,
+            zoom: 0.1,
+            row: 40.0,
+            rows: 5,
+            snap: 96.0,
+        };
+        // 150 points right of the start is tick 1500, on the beat grid 1440
+        assert_eq!(a.place(egui::pos2(250.0, 20.0 + 85.0)), Some((1440.0, 2)));
+        assert_eq!(a.place(egui::pos2(50.0, 100.0)), None, "the track names");
+        assert_eq!(a.place(egui::pos2(900.0, 100.0)), None, "outside");
+        assert_eq!(a.place(egui::pos2(300.0, 399.0)).unwrap().1, 4);
+    }
 
     fn project() -> Project {
         let bytes = include_bytes!("../../las-engine/tests/fixtures/engines.las");

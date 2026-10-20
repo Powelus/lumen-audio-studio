@@ -448,6 +448,27 @@ impl App {
             return;
         };
         let project = l.project.clone();
+        // the outlines of the samples audio clips play, made once
+        let missing: Vec<String> = project
+            .channels
+            .iter()
+            .filter(|c| c.plugin_id == "audioclip")
+            .filter_map(|c| c.sample_id.clone())
+            .filter(|id| !self.project.playlist.waves.contains_key(id))
+            .collect();
+        if !missing.is_empty() {
+            let mut lib = las_engine::library::Library::new(22_050.0, &l.samples);
+            for id in missing {
+                let wave = lib.get(&id).map_or_else(
+                    || playlist::Wave {
+                        peaks: Vec::new(),
+                        step: 1.0,
+                    },
+                    |a| playlist::Wave::of(&a.channels, a.sample_rate),
+                );
+                self.project.playlist.waves.insert(id, Arc::new(wave));
+            }
+        }
         ui.horizontal(|ui| {
             for (t, name) in [
                 (playlist::Tool::Draw, "Draw"),
@@ -471,7 +492,7 @@ impl App {
             ui.label("Zoom");
             ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false));
             ui.label(
-                RichText::new("Double click places the pattern, drag moves, right click deletes, click the ruler to set the start.")
+                RichText::new("Double click places the pattern, drag moves, right click deletes, click the ruler to set the start. Drop a WAV file here for an audio clip.")
                     .weak()
                     .size(11.0),
             );
@@ -552,11 +573,56 @@ impl App {
         self.stop_project();
         self.project.looping = matches!(mode, PlayMode::Pattern(_));
         self.project.start(mode, Start::At(from), rate);
+        if self.shell.record {
+            if self.shell.recorder.is_none() {
+                match crate::record::Recorder::open() {
+                    Ok(r) => self.shell.recorder = Some(r),
+                    Err(e) => self.project.error = Some(format!("Recording: {e}")),
+                }
+            }
+            if let Some(r) = &mut self.shell.recorder {
+                r.begin();
+                self.shell.record_from = if self.project.looping { 0.0 } else { from };
+                self.shell.status = "Recording...".into();
+            }
+        }
     }
 
     pub(crate) fn stop_project(&mut self) {
         if self.project.has_player {
             self.send(Command::PlayerStop);
+        }
+        let take = self
+            .shell
+            .recorder
+            .as_mut()
+            .filter(|r| r.is_capturing())
+            .and_then(|r| r.end());
+        if let Some(wav) = take {
+            let at = self.shell.record_from;
+            let n = self.project.loaded.as_ref().map_or(0, |l| {
+                l.project
+                    .channels
+                    .iter()
+                    .filter(|c| c.plugin_id == "audioclip")
+                    .count()
+            });
+            let mut result = Ok(0);
+            self.project.modify_with_samples(true, |p, samples| {
+                let track = crate::record::free_track(p, at);
+                result = crate::menus::import_audio_clip(
+                    p,
+                    samples,
+                    &format!("Take {}", n + 1),
+                    wav,
+                    at,
+                    track,
+                );
+            });
+            match result {
+                Ok(_) => self.shell.status = "The take is in the playlist.".into(),
+                Err(e) => self.project.error = Some(format!("Recording: {e}")),
+            }
         }
     }
 
@@ -564,6 +630,9 @@ impl App {
     pub(crate) fn poll_project(&mut self, ctx: &egui::Context) {
         // an edit takes effect once the pointer is up: a player is built for the edited
         // project, and if the song is playing it carries on from where it is
+        if let Some(r) = &mut self.shell.recorder {
+            r.drain();
+        }
         let quiet = !ctx.input(|i| i.pointer.any_down());
         if self.project.stale && quiet && self.project.building.is_none() {
             self.project.stale = false;
