@@ -2,6 +2,13 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.19 - 2026-10-20
+
+The mixer, and a tighter project page.
+
+- A mixer page with a strip for the master and every insert that is in use: fader (with dB), pan, mute and solo, and the effects in its slots, each of which can be switched on or off with a click. Edits join the same undo, redo and save as the other editors.
+- The project page header is two rows instead of five, which leaves the room to the editors. `lumen song.las --mixer` starts on the mixer.
+
 ## 0.2.0-alpha.18 - 2026-10-20
 
 The playlist.
