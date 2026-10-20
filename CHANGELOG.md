@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.20 - 2026-10-20
+
+Editing while the song plays.
+
+- An edit made while a song or pattern plays now takes effect: a player for the edited project is built in the background (once the pointer is up) and takes over from the position the old one had reached. The sounds still ringing from the old player stop at the swap.
+
 ## 0.2.0-alpha.19 - 2026-10-20
 
 The mixer, and a tighter project page.
