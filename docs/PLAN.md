@@ -23,7 +23,7 @@ Each stage ships and keeps the tests green.
    stems). Command-line renderer first, so the sound can be checked without an
    interface. Done: project model, `.las` reader and writer, migration and repair
    (`las-project`), scheduler, mixer and offline render with the synths, the sampler and the
-   factory samples, audio clips and automation of the mixer, channels and effects (`las-engine`). Next: instrument automation, LumaPad, then
+   factory samples, audio clips and automation of the mixer, channels and effects (`las-engine`). Next: user wavetables, the metronome and frozen channels, then
    export.
 3. **Audio output and MIDI.** Native audio output and MIDI input, with a live
    engine that follows the project.

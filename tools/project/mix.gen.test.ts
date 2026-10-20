@@ -404,6 +404,25 @@ ipa('ipa_clip', (p) => {
   return mono.id;
 }, [['gain', 'gain', 0, 8]]);
 
+ipa('ipa_pad', (p) => {
+  const pad = (name: string, sampleId: string, key: number, extra: Record<string, unknown> = {}) => ({ name, sampleId, key, level: 0.85, pan: 0, tune: 0, cut: 0, ...extra });
+  const ch = createChannel('lumapad', {
+    name: 'Pads',
+    mixerTrack: 1,
+    state: { pads: [pad('K', 'factory:kick-punch', 36), pad('S', 'factory:snare-fat', 38, { pan: 0.2 }), pad('H', 'factory:hat-closed', 42, { cut: 1 }), pad('O', 'factory:hat-open', 46, { cut: 1, tune: 2 })], fx: [], arp: { on: false } },
+  });
+  p.channels.push(ch);
+  p.samples.push({ id: 'factory:kick-punch', name: 'k', factory: true }, { id: 'factory:snare-fat', name: 's', factory: true }, { id: 'factory:hat-closed', name: 'h', factory: true }, { id: 'factory:hat-open', name: 'o', factory: true });
+  p.patterns[0].notes[ch.id] = [
+    ...[0, 2, 4, 6].map((b) => note(36, b, 0.25, 1)),
+    ...[1, 3, 5, 7].map((b) => note(38, b, 0.25, 0.8)),
+    ...[0.5, 1.5, 2.5, 4.5, 5.5, 6.5].map((b) => note(42, b, 0.25, 0.6)),
+    ...[3.5, 7.5].map((b) => note(46, b, 0.25, 0.7)),
+    note(42, 3.75, 0.25, 0.9),
+  ];
+  return ch.id;
+}, [['lv', 'pads.0.level', 0, 8], ['pn', 'pads.1.pan', 2, 4], ['tu', 'pads.3.tune', 0, 8]]);
+
 it('writes the mix projects', async () => {
   mkdirSync(out, { recursive: true });
   for (const [name, make] of Object.entries(cases)) {

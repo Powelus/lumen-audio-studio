@@ -103,8 +103,133 @@ pub struct Voice {
     gain: Param,
     pan: f64,
     key: i32,
+    /// The choke group of a pad voice.
+    group: i32,
     started: bool,
     done: bool,
+}
+
+/// How a one-shot voice starts (the web version's `startVoice`).
+pub struct VoiceSpec {
+    pub key: i32,
+    pub time: f64,
+    pub rate: f64,
+    pub gain: f64,
+    pub pan: f64,
+    pub attack: f64,
+    pub decay: f64,
+    pub sustain: f64,
+    pub release: f64,
+    pub duration: Option<f64>,
+    pub start: f64,
+    pub end: f64,
+    pub looped: bool,
+}
+
+fn make_voice(buf: &Arc<Audio>, sr: f64, v: VoiceSpec) -> Voice {
+    let VoiceSpec {
+        key,
+        time: t,
+        rate,
+        gain,
+        pan,
+        attack,
+        decay,
+        sustain,
+        release,
+        duration,
+        start,
+        end,
+        looped,
+    } = v;
+    let dur = buf.frames() as f64 / buf.sample_rate;
+    let start_sec = 0f64.max((dur - 0.001).min(start * dur));
+    let end_sec = (start_sec + 0.001).max(end * dur);
+    let mut g = Param::new(0.0);
+    g.set_value_at_time(0.0, t);
+    g.linear_ramp_to_value_at_time(gain, t + attack.max(0.001));
+    g.set_target_at_time(
+        gain * sustain,
+        t + attack.max(0.001),
+        decay.max(0.001) / 3.0,
+    );
+    let natural = (end_sec - start_sec) / rate;
+    let mut stop = None;
+    if let Some(d) = duration {
+        let rel = t + d.max(0.005);
+        g.cancel_scheduled_values(rel);
+        g.set_target_at_time(0.0, rel, release.max(0.002) / 4.0);
+        stop = Some(rel + release.max(0.01) * 1.5 + 0.05);
+    } else if !looped {
+        stop = Some(t + natural + 0.01);
+    }
+    if !looped && end < 1.0 {
+        stop = Some(t + natural);
+    }
+    let bsr = buf.sample_rate;
+    Voice {
+        src: SourcePlayback {
+            buf: buf.clone(),
+            start: t,
+            offset: round(start_sec * bsr),
+            rate: rate * bsr / sr,
+            stop,
+            loop_points: looped.then_some((start_sec * bsr, end_sec * bsr)),
+        },
+        gain: g,
+        pan,
+        key,
+        group: 0,
+        started: false,
+        done: false,
+    }
+}
+
+/// Add the sounding voices to `l` and `r` for frames `f0..f0 + l.len()`.
+fn mix_voices(
+    voices: &mut Vec<Voice>,
+    f0: usize,
+    l: &mut [f32],
+    r: &mut [f32],
+    sr: f64,
+    gain_buf: &mut Vec<f32>,
+) {
+    let n = l.len();
+    gain_buf.resize(n, 0.0);
+    for v in voices.iter_mut() {
+        if v.done {
+            continue;
+        }
+        let first = v.src.first_frame(sr);
+        if f0 + n <= first {
+            continue;
+        }
+        let from = f0.max(first);
+        let count = f0 + n - from;
+        v.started = true;
+        let gains = &mut gain_buf[..count];
+        v.gain.fill(from, gains, sr);
+        let stereo = v.src.buf.channels.len() > 1;
+        for k in 0..count {
+            let frame = from + k;
+            let Some(s) = v.src.read(frame, sr) else {
+                v.done = true;
+                break;
+            };
+            let g = gains[k];
+            let (a, b) = (s[0] * g, s[1] * g);
+            let (pl, pr) = if stereo {
+                let (mut x, mut y) = ([a], [b]);
+                stereo_pan(&mut x, &mut y, v.pan);
+                (x[0], y[0])
+            } else {
+                mono_pan(a, v.pan)
+            };
+            l[from - f0 + k] += pl;
+            r[from - f0 + k] += pr;
+        }
+    }
+    voices.retain(|v| !v.done);
 }
 
 pub struct Sampler {
@@ -119,7 +244,6 @@ pub struct Sampler {
     made: [(f32, f32); 2],
     /// Automation of what is read when a note starts.
     timeline: BTreeMap<String, Timeline>,
-    tmp: [Vec<f32>; 2],
     gain_buf: Vec<f32>,
 }
 
@@ -160,7 +284,6 @@ impl Sampler {
             g,
             made: [(f32::NAN, 0.0); 2],
             timeline: BTreeMap::new(),
-            tmp: [Vec::new(), Vec::new()],
             gain_buf: Vec::new(),
         }
     }
@@ -237,48 +360,25 @@ impl Sampler {
             n("release", 0.08),
         );
         let (start, end) = (n("start", 0.0), n("end", 1.0));
-        let sr = self.sr;
-        let dur = buf.frames() as f64 / buf.sample_rate;
-        let start_sec = 0f64.max((dur - 0.001).min(start * dur));
-        let end_sec = (start_sec + 0.001).max(end * dur);
-        let t = time;
-        let mut g = Param::new(0.0);
-        g.set_value_at_time(0.0, t);
-        g.linear_ramp_to_value_at_time(gain, t + attack.max(0.001));
-        g.set_target_at_time(
-            gain * sustain,
-            t + attack.max(0.001),
-            decay.max(0.001) / 3.0,
-        );
-        let natural = (end_sec - start_sec) / rate;
-        let mut stop = None;
-        if let Some(d) = duration {
-            let rel = t + d.max(0.005);
-            g.cancel_scheduled_values(rel);
-            g.set_target_at_time(0.0, rel, release.max(0.002) / 4.0);
-            stop = Some(rel + release.max(0.01) * 1.5 + 0.05);
-        } else if !looped {
-            stop = Some(t + natural + 0.01);
-        }
-        if !looped && end < 1.0 {
-            stop = Some(t + natural);
-        }
-        let bsr = buf.sample_rate;
-        self.voices.push(Voice {
-            src: SourcePlayback {
-                buf: buf.clone(),
-                start: t,
-                offset: round(start_sec * bsr),
-                rate: rate * bsr / sr,
-                stop,
-                loop_points: looped.then_some((start_sec * bsr, end_sec * bsr)),
+        self.voices.push(make_voice(
+            &buf,
+            self.sr,
+            VoiceSpec {
+                key,
+                time,
+                rate,
+                gain,
+                pan,
+                attack,
+                decay,
+                sustain,
+                release,
+                duration,
+                start,
+                end,
+                looped,
             },
-            gain: g,
-            pan,
-            key,
-            started: false,
-            done: false,
-        });
+        ));
     }
 
     /// Whether the sampler loops its sample.
@@ -296,44 +396,7 @@ impl Sampler {
         let sr = self.sr;
         l.fill(0.0);
         r.fill(0.0);
-        for t in &mut self.tmp {
-            t.resize(n, 0.0);
-        }
-        self.gain_buf.resize(n, 0.0);
-        for v in &mut self.voices {
-            if v.done {
-                continue;
-            }
-            let first = v.src.first_frame(sr);
-            if f0 + n <= first {
-                continue;
-            }
-            let from = f0.max(first);
-            let count = f0 + n - from;
-            v.started = true;
-            let gains = &mut self.gain_buf[..count];
-            v.gain.fill(from, gains, sr);
-            let stereo = v.src.buf.channels.len() > 1;
-            for k in 0..count {
-                let frame = from + k;
-                let Some(s) = v.src.read(frame, sr) else {
-                    v.done = true;
-                    break;
-                };
-                let g = gains[k];
-                let (a, b) = (s[0] * g, s[1] * g);
-                let (pl, pr) = if stereo {
-                    let (mut x, mut y) = ([a], [b]);
-                    stereo_pan(&mut x, &mut y, v.pan);
-                    (x[0], y[0])
-                } else {
-                    mono_pan(a, v.pan)
-                };
-                l[from - f0 + k] += pl;
-                r[from - f0 + k] += pr;
-            }
-        }
-        self.voices.retain(|v| !v.done);
+        mix_voices(&mut self.voices, f0, l, r, sr, &mut self.gain_buf);
         // the shared filter and boost
         self.g.fill(f0, n, sr);
         for i in 0..n {
@@ -354,6 +417,131 @@ impl Sampler {
                 *x = (self.filter[ch].run(f64::from(*x)) as f32) * boost;
             }
         }
+    }
+}
+
+/// One pad of the pad instrument.
+struct Pad {
+    key: i32,
+    level: f64,
+    pan: f64,
+    tune: f64,
+    cut: i32,
+    sample: Option<Arc<Audio>>,
+}
+
+/// The 16-pad drum sampler with choke groups (LumaPad).
+pub struct PadBank {
+    sr: f64,
+    pads: Vec<Pad>,
+    voices: Vec<Voice>,
+    timeline: BTreeMap<String, Timeline>,
+    gain_buf: Vec<f32>,
+}
+
+impl PadBank {
+    /// `samples` holds each pad's sample, in the order of the state's pads.
+    pub fn new(state: &Value, samples: Vec<Option<Arc<Audio>>>, sr: f64) -> Self {
+        let pads = state
+            .get("pads")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .enumerate()
+                    .map(|(i, p)| Pad {
+                        key: num(p.get("key"), 0.0) as i32,
+                        level: num(p.get("level"), 0.85),
+                        pan: num(p.get("pan"), 0.0),
+                        tune: num(p.get("tune"), 0.0),
+                        cut: num(p.get("cut"), 0.0) as i32,
+                        sample: samples.get(i).cloned().flatten(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            sr,
+            pads,
+            voices: Vec::new(),
+            timeline: BTreeMap::new(),
+            gain_buf: Vec::new(),
+        }
+    }
+
+    /// Automate `pads.N.level`, `.pan` or `.tune`.
+    pub fn automate(&mut self, path: &str, points: &[(f64, f64)], first: bool) -> bool {
+        let ok = path.strip_prefix("pads.").is_some_and(|rest| {
+            rest.split_once('.').is_some_and(|(i, what)| {
+                i.parse::<usize>().is_ok() && matches!(what, "level" | "pan" | "tune")
+            })
+        });
+        if ok {
+            self.timeline
+                .entry(path.to_string())
+                .or_default()
+                .set(points, first);
+        }
+        ok
+    }
+
+    /// The pad with this key plays.
+    pub fn play_note(&mut self, key: i32, vel: f64, time: f64, fine: f64) {
+        let Some(i) = self.pads.iter().position(|p| p.key == key) else {
+            return;
+        };
+        let pad = &self.pads[i];
+        let Some(buf) = pad.sample.clone() else {
+            return;
+        };
+        let at = |k: &str, d: f64| {
+            self.timeline
+                .get(&format!("pads.{i}.{k}"))
+                .map_or(d, |t| t.get(time, d))
+        };
+        let (tune, level, pan) = (
+            at("tune", pad.tune),
+            at("level", pad.level),
+            at("pan", pad.pan),
+        );
+        let cut = pad.cut;
+        if cut != 0 {
+            for v in &mut self.voices {
+                if v.group == cut {
+                    v.gain.cancel_scheduled_values(time);
+                    v.gain.set_target_at_time(0.0, time, 0.004);
+                    v.src.stop = Some(time + 0.04);
+                }
+            }
+        }
+        let semis = tune + fine / 100.0;
+        let mut v = make_voice(
+            &buf,
+            self.sr,
+            VoiceSpec {
+                key,
+                time,
+                rate: f64::from(2f64.powf(semis / 12.0) as f32),
+                gain: level * (0.3 + 0.7 * vel),
+                pan,
+                attack: 0.001,
+                decay: 1.0,
+                sustain: 1.0,
+                release: 0.05,
+                duration: None,
+                start: 0.0,
+                end: 1.0,
+                looped: false,
+            },
+        );
+        v.group = cut;
+        self.voices.push(v);
+    }
+
+    /// Render frames `f0..f0 + l.len()` (overwriting `l` and `r`).
+    pub fn render(&mut self, f0: usize, l: &mut [f32], r: &mut [f32]) {
+        l.fill(0.0);
+        r.fill(0.0);
+        mix_voices(&mut self.voices, f0, l, r, self.sr, &mut self.gain_buf);
     }
 }
 

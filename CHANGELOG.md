@@ -12,7 +12,9 @@ Automation of effect and instrument parameters.
 - A reverb whose response does not change keeps its tail when a setting moves.
 - Checked against the web render: ramps and the slot mix exact to rounding; the other automated effects 98 to 125 dB below the signal (`web_parity.rs`).
 - Instrument parameters can be automated too: the synths' patch values (filter, envelopes, levels, LFOs and the rest, read every 32 frames as in the browser), Facet and Mist, Nebula's macros, master, layer level, pan and layer patches, the effects in an instrument's own rack (including their mix), the sampler (cutoff, Q and boost as parameter ramps, tuning and envelope read when a note starts) and an audio clip channel's gain. Checked against the web render: Polaris, Facet and Mist exact, the others 111 to 130 dB below the signal.
-- Not yet: automation of the maximizer and of LumaPad.
+- LumaPad plays: 16 pads with their own samples, level, pan and tune, choke groups, and their automation. The sampler's voices are shared with it.
+- The whole demo song renders (`las render-project demo.las`). Against the browser, the drums, Facet lead, riser, crash and impact agree to 100 dB; the Polaris and Zenith parts agree in level to 1% (the browser's unison and random phase are not reproducible, so they cannot be compared sample by sample).
+- Not yet: automation of the maximizer.
 
 ## 0.2.0-alpha.11 - 2026-10-16
 

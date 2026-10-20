@@ -9,7 +9,7 @@ use crate::factory::Audio;
 use crate::fxauto::{densify, map_automation, SlotAuto};
 use crate::param::Param;
 use crate::pluginparams::plugin_param_def;
-use crate::sampler::Sampler;
+use crate::sampler::{PadBank, Sampler};
 use las_dsp::engine::{prepare_patch, Event, PatchError};
 use las_dsp::fm::{fm_engine, Fm, FmEngine};
 use las_dsp::fx::registry::{full_state, parse_params, EffectUnit, FxSlot};
@@ -101,6 +101,7 @@ enum Core {
     Facet(Box<FmEngine>),
     Mist(Box<MistEngine>),
     Sampler(Box<Sampler>),
+    Pads(Box<PadBank>),
     AudioClip(Box<AudioClipper>),
     /// An instrument that makes no sound here (yet).
     Silent,
@@ -208,6 +209,7 @@ impl Instrument {
         sr: f64,
         tables: &mut TableLibrary,
         sample: Option<Arc<Audio>>,
+        pad_samples: Vec<Option<Arc<Audio>>>,
     ) -> Result<Self, PatchError> {
         let core = match plugin_id {
             "facet" => {
@@ -250,6 +252,7 @@ impl Instrument {
                 Core::Layers(layers)
             }
             "sampler" => Core::Sampler(Box::new(Sampler::new(state, sample, sr))),
+            "lumapad" => Core::Pads(Box::new(PadBank::new(state, pad_samples, sr))),
             "audioclip" => Core::AudioClip(Box::new(AudioClipper::new(state, sample, sr))),
             _ => Core::Silent,
         };
@@ -334,7 +337,7 @@ impl Instrument {
             }
             Core::Facet(e) => e.set_bpm(bpm),
             Core::Mist(e) => e.set_bpm(bpm),
-            Core::Sampler(_) | Core::AudioClip(_) | Core::Silent => {}
+            Core::Sampler(_) | Core::Pads(_) | Core::AudioClip(_) | Core::Silent => {}
         }
     }
 
@@ -374,7 +377,7 @@ impl Instrument {
             }
             Core::Facet(e) => e.queue(evs),
             Core::Mist(e) => e.queue(evs),
-            Core::Sampler(_) | Core::AudioClip(_) | Core::Silent => {}
+            Core::Sampler(_) | Core::Pads(_) | Core::AudioClip(_) | Core::Silent => {}
         }
     }
 
@@ -401,6 +404,10 @@ impl Instrument {
                 fine,
                 pan,
             );
+            return;
+        }
+        if let Core::Pads(p) = &mut self.core {
+            p.play_note(key as i32, vel, time, fine);
             return;
         }
         if let Core::AudioClip(c) = &mut self.core {
@@ -517,6 +524,7 @@ impl Instrument {
             Core::Facet(e) => e.process(l, r, t0),
             Core::Mist(e) => e.process(l, r, t0),
             Core::Sampler(s) => s.render((t0 * self.sr).round() as usize, l, r),
+            Core::Pads(p) => p.render((t0 * self.sr).round() as usize, l, r),
             Core::AudioClip(c) => c.render((t0 * self.sr).round() as usize, l, r),
             Core::Silent => {}
         }
@@ -654,6 +662,7 @@ impl Instrument {
                 true
             }),
             Core::Sampler(sm) => sm.automate(path, points, first),
+            Core::Pads(p) => p.automate(path, points, first),
             Core::AudioClip(c) => {
                 if path == "gain" {
                     c.automate_gain(points, first);

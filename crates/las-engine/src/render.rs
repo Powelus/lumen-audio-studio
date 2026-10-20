@@ -435,7 +435,26 @@ pub fn render_mix_with(
     let last_track = project.mixer.len().saturating_sub(1);
     for c in &project.channels {
         let sample = c.sample_id.as_deref().and_then(|id| library.get(id));
-        let inst = Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample)
+        // each pad of a pad instrument has its own sample
+        let pad_samples: Vec<Option<std::sync::Arc<crate::factory::Audio>>> =
+            if c.plugin_id == "lumapad" {
+                c.state
+                    .get("pads")
+                    .and_then(|p| p.as_array())
+                    .map(|pads| {
+                        pads.iter()
+                            .map(|p| {
+                                p.get("sampleId")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|id| library.get(id))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+        let inst = Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample, pad_samples)
             .map_err(|e| format!("{}: {}", c.name, e.0))?;
         index.insert(c.id.clone(), channels.len());
         channels.push(ChannelRt {

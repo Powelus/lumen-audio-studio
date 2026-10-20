@@ -124,7 +124,8 @@ fn web_audio_effects_match_closely() {
 /// Effect and instrument parameters changed by automation clips: ramps in the worklet effects,
 /// the slot's mix, and state updates on a grid, where Web Audio smooths each change
 /// with a time constant (a biquad filter evaluates its parameters once per channel).
-const AUTOMATED: [&str; 22] = [
+const AUTOMATED: [&str; 23] = [
+    "ipa_pad",
     "ipa_polaris",
     "ipa_nebula",
     "ipa_facet",
