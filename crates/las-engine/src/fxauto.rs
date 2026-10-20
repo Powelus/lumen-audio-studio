@@ -236,7 +236,22 @@ impl SlotAuto {
     /// Automate `path` through `points` (normalised, in seconds). `ramped` points are
     /// the same, already mapped; `first` jumps to the first value.
     pub fn automate(&mut self, path: &str, points: &[(f64, f64)], first: bool, length: usize) {
-        let def = effect_param_def(&self.plugin_id, path);
+        self.automate_with(path, points, first, length, None);
+    }
+
+    /// As [`SlotAuto::automate`], with the parameter's range given (a rack effect in an
+    /// instrument uses the ranges of the instrument's controls).
+    pub fn automate_with(
+        &mut self,
+        path: &str,
+        points: &[(f64, f64)],
+        first: bool,
+        length: usize,
+        def: Option<&ParamDef>,
+    ) {
+        let def = def
+            .cloned()
+            .or_else(|| effect_param_def(&self.plugin_id, path));
         if path == "mix" {
             if self.enabled {
                 let clamp = |v: f64| v.clamp(0.0, 1.0);

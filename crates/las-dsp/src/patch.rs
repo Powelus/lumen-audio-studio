@@ -189,3 +189,85 @@ mod tests {
         assert_eq!(p.voice.poly, 8.0);
     }
 }
+
+/// Set `path` (dotted, array indices as numbers) in `v` if every step but the last
+/// exists, as the web version's `setPath` does.
+pub fn set_path(v: &mut Value, path: &str, value: Value) {
+    fn child<'a>(v: &'a mut Value, key: &str) -> Option<&'a mut Value> {
+        match v {
+            Value::Array(a) => key.parse::<usize>().ok().and_then(move |i| a.get_mut(i)),
+            Value::Object(o) => o.get_mut(key),
+            _ => None,
+        }
+    }
+    let parts: Vec<&str> = path.split('.').collect();
+    let Some((last, init)) = parts.split_last() else {
+        return;
+    };
+    let mut cur = v;
+    for part in init {
+        match child(cur, part) {
+            Some(n) if !n.is_null() => cur = n,
+            _ => return,
+        }
+    }
+    match cur {
+        Value::Object(o) => {
+            o.insert((*last).to_string(), value);
+        }
+        Value::Array(_) => {
+            if let Some(slot) = child(cur, last) {
+                *slot = value;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Timed parameter ramps for a synth, one line per patch path, read at the start of
+/// each control block (the web version's `ramp` messages).
+#[derive(Default)]
+pub struct Ramps {
+    lines: std::collections::BTreeMap<String, crate::param::Timeline>,
+    last: std::collections::HashMap<String, f64>,
+}
+
+impl Ramps {
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Merge points (time, value) into a path's line; `jump` steps to the first.
+    pub fn ramp(&mut self, path: &str, points: &[(f64, f64)], jump: bool) {
+        self.lines
+            .entry(path.to_string())
+            .or_default()
+            .set(points, jump);
+    }
+
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.last.clear();
+    }
+
+    /// Re-apply the automated values over a new patch.
+    pub fn forget(&mut self) {
+        self.last.clear();
+    }
+
+    /// The paths whose value at `time` differs from the one last applied.
+    pub fn due(&mut self, time: f64) -> Vec<(String, f64)> {
+        let mut out = Vec::new();
+        for (path, line) in &self.lines {
+            let Some(v) = line.value_at(time) else {
+                continue;
+            };
+            if self.last.get(path) == Some(&v) {
+                continue;
+            }
+            self.last.insert(path.clone(), v);
+            out.push((path.clone(), v));
+        }
+        out
+    }
+}

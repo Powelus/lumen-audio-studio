@@ -21,7 +21,9 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::engine::{js_round, Cc, Env, Event, PatchError, Playable, Rng};
-use crate::patch::{merge_patch, EnvPatch, LfoPatch, LfoShape, ModSlot, VoicePatch};
+use crate::patch::{
+    merge_patch, set_path, EnvPatch, LfoPatch, LfoShape, ModSlot, Ramps, VoicePatch,
+};
 use crate::wavetable::{max_harmonics, Table, TableLibrary, MIP_LEVELS};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -252,6 +254,7 @@ pub fn default_synth_json() -> Value {
 /// A patch parsed, checked and given its wavetables, ready for
 /// [`SynthEngine::apply_patch`].
 pub struct PreparedSynthPatch {
+    json: Value,
     patch: SynthPatch,
     tables: [Arc<Table>; 4],
     sub_table: Arc<Table>,
@@ -268,7 +271,7 @@ pub fn prepare_synth_patch(
 ) -> Result<PreparedSynthPatch, PatchError> {
     let merged = merge_patch(&default_synth_json(), over);
     let patch: SynthPatch =
-        serde_json::from_value(merged).map_err(|e| PatchError(e.to_string()))?;
+        serde_json::from_value(merged.clone()).map_err(|e| PatchError(e.to_string()))?;
     if patch.osc.len() < 4 || patch.filters.len() < 2 || patch.env.len() < 4 || patch.lfo.len() < 4
     {
         return Err(PatchError(
@@ -296,6 +299,7 @@ pub fn prepare_synth_patch(
     });
     let sub_table = lib.get(if patch.sub.on { &patch.sub.wave } else { "saw" });
     Ok(PreparedSynthPatch {
+        json: merged,
         patch,
         tables,
         sub_table,
@@ -652,6 +656,8 @@ fn lfo_shape(
 /// The polyphonic wavetable synth.
 pub struct SynthEngine {
     patch: SynthPatch,
+    patch_json: Value,
+    ramps: Ramps,
     tables: [Arc<Table>; 4],
     sub_table: Arc<Table>,
     lib: TableLibrary,
@@ -708,6 +714,8 @@ impl SynthEngine {
         let mut first = prepare_synth_patch(&mut lib, &json!({})).expect("the defaults are valid");
         let mut e = Self {
             patch: first.patch.clone(),
+            patch_json: first.json.clone(),
+            ramps: Ramps::default(),
             tables: first.tables.clone(),
             sub_table: first.sub_table.clone(),
             lib,
@@ -751,7 +759,38 @@ impl SynthEngine {
     pub fn set_patch(&mut self, over: &Value) -> Result<(), PatchError> {
         let mut p = prepare_synth_patch(&mut self.lib, over)?;
         self.apply_patch(&mut p);
+        // automated values go over the new patch
+        self.ramps.forget();
         Ok(())
+    }
+
+    /// Automate a patch path (for example `filters.0.cutoff`) through `points`
+    /// (time, value); `jump` steps to the first point. Values are read at the start
+    /// of every control block.
+    pub fn ramp(&mut self, path: &str, points: &[(f64, f64)], jump: bool) {
+        self.ramps.ramp(path, points, jump);
+    }
+
+    /// Drop all automation.
+    pub fn clear_ramps(&mut self) {
+        self.ramps.clear();
+    }
+
+    fn apply_ramps(&mut self, time: f64) {
+        if self.ramps.is_empty() {
+            return;
+        }
+        let due = self.ramps.due(time);
+        if due.is_empty() {
+            return;
+        }
+        let mut json = self.patch_json.clone();
+        for (path, v) in due {
+            set_path(&mut json, &path, v.into());
+        }
+        if let Ok(mut p) = prepare_synth_patch(&mut self.lib, &json) {
+            self.apply_patch(&mut p);
+        }
     }
 
     /// Switch to a patch made by [`prepare_synth_patch`]. Does no parsing, no
@@ -760,6 +799,7 @@ impl SynthEngine {
     /// for the caller to drop elsewhere (or to switch back to).
     pub fn apply_patch(&mut self, p: &mut PreparedSynthPatch) {
         std::mem::swap(&mut self.patch, &mut p.patch);
+        std::mem::swap(&mut self.patch_json, &mut p.json);
         std::mem::swap(&mut self.tables, &mut p.tables);
         std::mem::swap(&mut self.sub_table, &mut p.sub_table);
         std::mem::swap(&mut self.mod_src, &mut p.mod_src);
@@ -1430,6 +1470,7 @@ impl SynthEngine {
                     },
                 }
             }
+            self.apply_ramps(t0 + pos as f64 / sr);
             let mut n = CONTROL.min(frames - pos);
             if let Some(e) = self.events.first() {
                 let ef = js_round((e.time() - t0) * sr);

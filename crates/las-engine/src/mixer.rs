@@ -434,6 +434,11 @@ impl Mixer {
         }
     }
 
+    /// Frames the render lasts.
+    pub fn length(&self) -> usize {
+        self.length
+    }
+
     /// Frames the render lasts, for the state updates that fall after it.
     pub fn set_length(&mut self, frames: usize) {
         self.length = frames;

@@ -149,7 +149,8 @@ impl ParamDef {
             _ => min + (max - min) * n,
         };
         if let Some(step) = self.step {
-            v = (v / step).round() * step;
+            // JavaScript's `Math.round`: halves go up
+            v = ((v / step) + 0.5).floor() * step;
         }
         v
     }

@@ -7,9 +7,11 @@
 
 use crate::factory::Audio;
 use crate::instrument::stereo_pan;
-use crate::param::Param;
+use crate::param::{Param, Timeline};
 use las_dsp::fx::native::WebBiquad;
+use las_dsp::param::Glides;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
 
@@ -112,9 +114,11 @@ pub struct Sampler {
     voices: Vec<Voice>,
     filter: [WebBiquad; 2],
     filter_kind: String,
-    cutoff: f64,
-    res: f64,
-    boost: f32,
+    /// Cutoff and Q (each read once per channel), and the boost gain.
+    g: Glides,
+    made: [(f32, f32); 2],
+    /// Automation of what is read when a note starts.
+    timeline: BTreeMap<String, Timeline>,
     tmp: [Vec<f32>; 2],
     gain_buf: Vec<f32>,
 }
@@ -144,24 +148,46 @@ impl Sampler {
             .to_string();
         let cutoff = num(state.get("cutoff"), 20000.0);
         let res = num(state.get("res"), 0.7);
-        let mut filter = [WebBiquad::default(); 2];
-        for f in &mut filter {
-            f.set(&filter_kind, cutoff, res, 0.0, sr);
-        }
-        let boost = 10f64.powf(num(state.get("boost"), 0.0) / 20.0) as f32;
+        let boost = 10f64.powf(num(state.get("boost"), 0.0) / 20.0);
+        let g = Glides::with_channels(&[cutoff, res, boost], &[2, 2, 1]);
         Self {
             sr,
             state: state.clone(),
             sample,
             voices: Vec::new(),
-            filter,
+            filter: [WebBiquad::default(); 2],
             filter_kind,
-            cutoff,
-            res,
-            boost,
+            g,
+            made: [(f32::NAN, 0.0); 2],
+            timeline: BTreeMap::new(),
             tmp: [Vec::new(), Vec::new()],
             gain_buf: Vec::new(),
         }
+    }
+
+    /// Automate a parameter through `points` (time, value). Returns whether the
+    /// sampler has it.
+    pub fn automate(&mut self, path: &str, points: &[(f64, f64)], first: bool) -> bool {
+        match path {
+            "cutoff" => self.g.param_mut(0).ramp(points, first),
+            "res" => self.g.param_mut(1).ramp(points, first),
+            "boost" => {
+                let pts: Vec<(f64, f64)> = points
+                    .iter()
+                    .map(|&(t, db)| (t, 10f64.powf(db / 20.0)))
+                    .collect();
+                self.g.param_mut(2).ramp(&pts, first);
+            }
+            "tune" | "fine" | "velToVol" | "attack" | "decay" | "sustain" | "release" | "start"
+            | "end" => {
+                self.timeline
+                    .entry(path.to_string())
+                    .or_default()
+                    .set(points, first);
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Swap the voices' remaining envelope for a quick fade at `time`.
@@ -188,7 +214,12 @@ impl Sampler {
         };
         let state = self.state.clone();
         let s = &state;
-        let n = |k: &str, d: f64| num(s.get(k), d);
+        // automation of a parameter is read as the note starts
+        let timeline = self.timeline.clone();
+        let n = move |k: &str, d: f64| {
+            let base = num(s.get(k), d);
+            timeline.get(k).map_or(base, |t| t.get(time, base))
+        };
         let looped = s.get("loop").is_some_and(|v| v.as_bool() == Some(true));
         if s.get("cut").is_some_and(truthy) {
             self.cut_voices(time);
@@ -304,11 +335,25 @@ impl Sampler {
         }
         self.voices.retain(|v| !v.done);
         // the shared filter and boost
+        self.g.fill(f0, n, sr);
         for i in 0..n {
-            l[i] = (self.filter[0].run(f64::from(l[i])) as f32) * self.boost;
-            r[i] = (self.filter[1].run(f64::from(r[i])) as f32) * self.boost;
+            let boost = self.g.buf(2)[i];
+            for ch in 0..2 {
+                let now = (self.g.chan(0, ch)[i], self.g.chan(1, ch)[i]);
+                if now != self.made[ch] {
+                    self.made[ch] = now;
+                    self.filter[ch].set(
+                        &self.filter_kind,
+                        f64::from(now.0),
+                        f64::from(now.1),
+                        0.0,
+                        sr,
+                    );
+                }
+                let x = if ch == 0 { &mut l[i] } else { &mut r[i] };
+                *x = (self.filter[ch].run(f64::from(*x)) as f32) * boost;
+            }
         }
-        let _ = (&self.filter_kind, self.cutoff, self.res);
     }
 }
 

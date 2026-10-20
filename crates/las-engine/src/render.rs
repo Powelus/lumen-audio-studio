@@ -202,6 +202,15 @@ impl Scheduler<'_> {
                 .automate_effect(*track, slot_id, param, &pts, first);
             return;
         }
+        if let AutomationTarget::Plugin { channel_id, param } = target {
+            let length = self.mixer.length();
+            if let Some(&ci) = self.index.get(channel_id) {
+                self.channels[ci]
+                    .inst
+                    .automate(param, points, first, length);
+            }
+            return;
+        }
         let Some((lo, hi)) = target_range(target) else {
             return;
         };

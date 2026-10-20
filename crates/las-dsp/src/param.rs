@@ -410,18 +410,18 @@ impl Timeline {
         if time == first.0 {
             return Some(first.1);
         }
-        for w in self.points.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            if time <= b.0 {
-                let span = b.0 - a.0;
-                return Some(if span <= 0.0 {
-                    b.1
-                } else {
-                    a.1 + ((b.1 - a.1) * (time - a.0)) / span
-                });
-            }
-        }
-        self.points.last().map(|p| p.1)
+        // the first point at or after `time`
+        let i = self.points.partition_point(|p| p.0 < time);
+        let Some(&b) = self.points.get(i) else {
+            return self.points.last().map(|p| p.1);
+        };
+        let a = self.points[i - 1];
+        let span = b.0 - a.0;
+        Some(if span <= 0.0 {
+            b.1
+        } else {
+            a.1 + ((b.1 - a.1) * (time - a.0)) / span
+        })
     }
 
     /// The automated value at `time`, or `fallback` when there is none.

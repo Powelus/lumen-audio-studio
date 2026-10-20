@@ -324,6 +324,86 @@ const SPLIT: [string, [string, Record<string, unknown>], string, number, number]
 for (const [name, effect, param, start, length] of SPLIT) {
   cases[`fxs_${name}`] = () => fxAuto(`fxs_${name}`, [effect], [[name, param, ramp3(0.2, 0.9, 0.4), start, length, 0]]);
 }
+// instrument parameter automation
+const pauto = (p: Project, id: string, channelId: string, param: string, points: { t: number; v: number }[], start: number, length: number, track: number) =>
+  auto(p, id, { kind: 'plugin', channelId, param }, points, start, length, 0, track);
+const ipa = (name: string, make: (p: Project) => string, params: [string, string, number, number][]) => {
+  cases[name] = () => {
+    const p = base(name, 120);
+    const id = make(p);
+    place(p, 8);
+    params.forEach(([key, param, start, length], i) => pauto(p, `${key}${i}`, id, param, ramp3(0.2, 0.9, 0.4), start, length, 2 + i));
+    return p;
+  };
+};
+ipa('ipa_polaris', (p) => {
+  const ch = createChannel('polaris', { name: 'Saw', mixerTrack: 1, state: { patch: patch('saw', { env: [{ a: 0.005, h: 0, d: 0.2, s: 1, r: 0.15 }], filters: [{ on: true, type: 'lp24', cutoff: 1500, res: 0.3 }] }), fx: [], arp: { on: false } } });
+  p.channels.push(ch);
+  p.patterns[0].notes[ch.id] = [note(48, 0, 2, 0.9), note(55, 2, 2, 0.8), note(60, 4, 3, 1)];
+  return ch.id;
+}, [['cut', 'patch.filters.0.cutoff', 0, 4], ['res', 'patch.filters.0.res', 2, 4], ['lvl', 'patch.level', 4, 4], ['att', 'patch.env.0.r', 0, 8]]);
+ipa('ipa_nebula', (p) => {
+  const n = createChannel('nebula', {
+    name: 'Nebula',
+    mixerTrack: 1,
+    state: {
+      layers: [
+        { on: true, name: 'A', level: 0.7, pan: -0.3, transpose: 0, patch: patch('saw', { env: [{ a: 0.005, h: 0, d: 0.2, s: 1, r: 0.15 }], filters: [{ on: true, type: 'lp12', cutoff: 2000, res: 0.1 }] }) },
+        { on: false, name: 'X', level: 1, pan: 0, transpose: 0, patch: patch('saw') },
+        { on: true, name: 'B', level: 0.5, pan: 0.4, transpose: 12, patch: patch('sine') },
+      ],
+      macros: { cutoff: 0.7, res: 0.1, attack: 0.3, release: 0.6 },
+      master: 0.7,
+      fx: [],
+      arp: { on: false },
+    },
+  });
+  p.channels.push(n);
+  p.patterns[0].notes[n.id] = [note(57, 0, 2), note(60, 0, 2), note(55, 2, 2), note(62, 4, 3)];
+  return n.id;
+}, [['mc', 'macros.cutoff', 0, 4], ['mr', 'macros.res', 2, 4], ['ma', 'macros.attack', 0, 4], ['mm', 'master', 4, 4], ['l0', 'layers.0.level', 0, 4], ['l2', 'layers.2.pan', 2, 4], ['l1', 'layers.1.level', 0, 4], ['lp', 'layers.0.patch.filters.0.cutoff', 4, 4]]);
+ipa('ipa_facet', (p) => {
+  const f = createChannel('facet', { name: 'Facet', mixerTrack: 1, state: { patch: {}, fx: [], arp: { on: false } } });
+  p.channels.push(f);
+  p.patterns[0].notes[f.id] = [note(60, 0, 2), note(64, 2, 2), note(67, 4, 3)];
+  return f.id;
+}, [['cut', 'patch.filter.cutoff', 0, 4], ['op', 'patch.ops.1.level', 2, 4], ['fb', 'patch.feedback', 4, 4], ['rt', 'patch.ops.1.ratio', 0, 8]]);
+ipa('ipa_mist', (p) => {
+  const m = createChannel('mist', { name: 'Mist', mixerTrack: 1, state: { patch: {}, fx: [], arp: { on: false } } });
+  p.channels.push(m);
+  p.patterns[0].notes[m.id] = [note(48, 0, 3, 0.9), note(55, 4, 3, 0.9)];
+  return m.id;
+}, [['pos', 'patch.grain.position', 0, 4], ['size', 'patch.grain.size', 2, 4], ['den', 'patch.grain.density', 4, 4]]);
+ipa('ipa_rack', (p) => {
+  const f = createChannel('facet', { name: 'Facet', mixerTrack: 1, state: { patch: {}, fx: [{ type: 'las-filter', on: true, state: { type: 'lowpass', cutoff: 1500, res: 0.5, lfoRate: 0, lfoDepth: 0 } }, { type: 'las-hall', on: true, state: { decay: 1.2, wet: 0.4 } }, { type: 'las-comp', on: true, state: { threshold: -30, ratio: 6 } }], arp: { on: false } } });
+  p.channels.push(f);
+  p.patterns[0].notes[f.id] = [note(60, 0, 2), note(64, 2, 2), note(67, 4, 3)];
+  return f.id;
+}, [['cut', 'fx.0.state.cutoff', 0, 4], ['wet', 'fx.1.state.wet', 0, 4], ['thr', 'fx.2.state.threshold', 2, 4], ['mix', 'fx.1.state.mix', 4, 4]]);
+
+ipa('ipa_sampler', (p) => {
+  const hat = createChannel('sampler', { name: 'Loop', mixerTrack: 1, sampleId: 'factory:808-c', state: { root: 36, tune: 0, fine: 0, attack: 0.005, decay: 0.3, sustain: 1, release: 0.2, reverse: false, loop: true, start: 0.1, end: 0.3, cut: false, filterType: 'lowpass', cutoff: 3000, res: 1, velToVol: 0.7, boost: 0 } });
+  const hit = createChannel('sampler', { name: 'Hit', mixerTrack: 2, sampleId: 'factory:snare-fat', state: { root: 60, tune: 0, fine: 0, attack: 0.002, decay: 0.2, sustain: 0.6, release: 0.1, reverse: false, loop: false, start: 0, end: 1, cut: false, filterType: 'lowpass', cutoff: 20000, res: 0.7, velToVol: 0.5, boost: 0 } });
+  p.channels.push(hat, hit);
+  p.samples.push({ id: 'factory:808-c', name: '808', factory: true }, { id: 'factory:snare-fat', name: 'Snare', factory: true });
+  p.patterns[0].notes[hat.id] = [note(36, 0, 2, 0.9), note(43, 2, 2, 0.7), note(36, 4, 3, 0.9)];
+  p.patterns[0].notes[hit.id] = [0, 1, 2, 3, 4, 5, 6, 7].map((b) => note(60, b, 0.5, 0.8));
+  pauto(p, 'hcut', hat.id, 'cutoff', ramp3(0.2, 0.9, 0.4), 0, 4, 2);
+  pauto(p, 'hres', hat.id, 'res', ramp3(0.2, 0.9, 0.4), 2, 4, 3);
+  pauto(p, 'hbo', hat.id, 'boost', ramp3(0.2, 0.9, 0.4), 4, 4, 4);
+  pauto(p, 'stu', hit.id, 'tune', ramp3(0.2, 0.9, 0.4), 0, 8, 5);
+  pauto(p, 'sre', hit.id, 'release', ramp3(0.2, 0.9, 0.4), 0, 8, 6);
+  pauto(p, 'sst', hit.id, 'start', ramp3(0.1, 0.5, 0.2), 0, 8, 7);
+  return hat.id;
+}, []);
+ipa('ipa_clip', (p) => {
+  const mono = createChannel('audioclip', { name: 'Mono', mixerTrack: 1, sampleId: 'factory:ride', state: { gain: -2 } });
+  p.channels.push(mono);
+  p.samples.push({ id: 'factory:ride', name: 'Ride', factory: true });
+  p.playlist.clips.push({ id: 'm1', kind: 'audio', refId: mono.id, track: 0, start: 0, length: 6 * BEAT, offset: 0 } as never);
+  return mono.id;
+}, [['gain', 'gain', 0, 8]]);
+
 it('writes the mix projects', async () => {
   mkdirSync(out, { recursive: true });
   for (const [name, make] of Object.entries(cases)) {

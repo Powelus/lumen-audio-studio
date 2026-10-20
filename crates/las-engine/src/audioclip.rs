@@ -264,8 +264,9 @@ pub struct AudioClipper {
     sr: f64,
     sample: Option<Arc<Audio>>,
     voices: Vec<ClipVoice>,
-    gain: f32,
+    gain: Param,
     gain_buf: Vec<f32>,
+    out_buf: Vec<f32>,
 }
 
 fn num(v: Option<&Value>, d: f64) -> f64 {
@@ -280,9 +281,19 @@ impl AudioClipper {
             sr,
             sample,
             voices: Vec::new(),
-            gain: 10f64.powf(num(state.get("gain"), 0.0) / 20.0) as f32,
+            gain: Param::new(10f64.powf(num(state.get("gain"), 0.0) / 20.0)),
             gain_buf: Vec::new(),
+            out_buf: Vec::new(),
         }
+    }
+
+    /// Automate the output gain through `points` (time, dB).
+    pub fn automate_gain(&mut self, points: &[(f64, f64)], first: bool) {
+        let pts: Vec<(f64, f64)> = points
+            .iter()
+            .map(|&(t, db)| (t, 10f64.powf(db / 20.0)))
+            .collect();
+        self.gain.ramp(&pts, first);
     }
 
     /// Whether the clips are mono (the channel then pans them with the mono law).
@@ -376,10 +387,12 @@ impl AudioClipper {
             }
         }
         self.voices.retain(|v| !v.done);
-        if self.gain != 1.0 {
+        self.out_buf.resize(n, 0.0);
+        self.gain.fill(f0, &mut self.out_buf, sr);
+        if self.out_buf.iter().any(|&g| g != 1.0) {
             for i in 0..n {
-                l[i] *= self.gain;
-                r[i] *= self.gain;
+                l[i] *= self.out_buf[i];
+                r[i] *= self.out_buf[i];
             }
         }
     }

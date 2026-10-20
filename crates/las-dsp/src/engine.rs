@@ -12,7 +12,9 @@
 //!
 //! Not ported yet: parameter ramps (automation) and tempo changes over time.
 
-use crate::patch::{default_engine_json, merge_patch, EnginePatch, EnvPatch, FilterKind, LfoShape};
+use crate::patch::{
+    default_engine_json, merge_patch, set_path, EnginePatch, EnvPatch, FilterKind, LfoShape, Ramps,
+};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::f64::consts::PI;
@@ -488,6 +490,7 @@ pub struct VoiceEngine<S: Sound> {
     pub sound: S,
     pub patch: EnginePatch,
     patch_json: Value,
+    ramps: Ramps,
     voices: Vec<Voice<S::Voice>>,
     dests: Vec<DestDef>,
     sr: f64,
@@ -519,6 +522,7 @@ impl<S: Sound> VoiceEngine<S> {
             sound,
             patch: serde_json::from_value(default.clone()).expect("default engine patch"),
             patch_json: default,
+            ramps: Ramps::default(),
             voices: Vec::new(),
             dests,
             sr: sample_rate,
@@ -558,7 +562,38 @@ impl<S: Sound> VoiceEngine<S> {
     pub fn set_patch(&mut self, over: &Value) -> Result<(), PatchError> {
         let mut prepared = prepare_patch::<S>(over)?;
         self.apply_patch(&mut prepared);
+        // automated values go over the new patch
+        self.ramps.forget();
         Ok(())
+    }
+
+    /// Automate a patch path (for example `filters.0.cutoff`) through `points`
+    /// (time, value); `jump` steps to the first point. Values are read at the start
+    /// of every control block.
+    pub fn ramp(&mut self, path: &str, points: &[(f64, f64)], jump: bool) {
+        self.ramps.ramp(path, points, jump);
+    }
+
+    /// Drop all automation.
+    pub fn clear_ramps(&mut self) {
+        self.ramps.clear();
+    }
+
+    fn apply_ramps(&mut self, time: f64) {
+        if self.ramps.is_empty() {
+            return;
+        }
+        let due = self.ramps.due(time);
+        if due.is_empty() {
+            return;
+        }
+        let mut json = self.patch_json.clone();
+        for (path, v) in due {
+            set_path(&mut json, &path, v.into());
+        }
+        if let Ok(mut p) = prepare_patch::<S>(&json) {
+            self.apply_patch(&mut p);
+        }
     }
 
     /// Switch to a patch made by [`prepare_patch`]. Does no parsing and, once
@@ -943,6 +978,7 @@ impl<S: Sound> VoiceEngine<S> {
                     },
                 }
             }
+            self.apply_ramps(t0 + pos as f64 / sr);
             let mut n = CONTROL.min(frames - pos);
             if let Some(e) = self.events.first() {
                 let ef = js_round((e.time() - t0) * sr);
