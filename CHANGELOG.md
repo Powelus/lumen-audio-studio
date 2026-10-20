@@ -2,6 +2,13 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.16 - 2026-10-20
+
+The channel rack.
+
+- The Project page draws every channel with its notes in the chosen pattern: step notes as cells, other notes as bars placed by key and sized by length and velocity, with beat and bar lines.
+- While a pattern plays, a playhead moves across the strips. Click a channel to choose the one the keys play.
+
 ## 0.2.0-alpha.15 - 2026-10-20
 
 The app opens and plays a project.

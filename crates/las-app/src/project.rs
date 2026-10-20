@@ -37,6 +37,8 @@ pub struct ProjectState {
     pub pattern: usize,
     /// The channel that live keys play.
     pub channel: usize,
+    /// Whether the pattern (not the song) is what plays, for the playhead.
+    pub looping: bool,
     pub error: Option<String>,
     /// Whether a player has been handed to the audio thread (so Stop has something).
     pub has_player: bool,
@@ -108,6 +110,7 @@ impl App {
             return;
         };
         self.stop_project();
+        self.project.looping = matches!(mode, PlayMode::Pattern(_));
         self.project.start(mode, Some(from), rate);
     }
 
@@ -235,16 +238,8 @@ impl App {
             }
         });
         ui.add_space(8.0);
-        ui.label(RichText::new("Channels").strong());
-        ui.label(RichText::new("Pick one to play it with the keys below.").weak());
-        for (i, c) in project.channels.iter().enumerate() {
-            let name = format!("{}   ({})", c.name, c.plugin_id);
-            if ui
-                .selectable_label(self.project.channel == i, name)
-                .clicked()
-            {
-                self.project.channel = i;
-            }
-        }
+        ui.label(RichText::new("Pick a channel to play it with the keys below.").weak());
+        let head = (playing && self.project.looping).then_some(pos);
+        self.rack(ui, head);
     }
 }
