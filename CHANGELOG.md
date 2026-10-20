@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.31
+
+VST3 plugins, and automation of hosted plugins.
+
+- VST3 hosting next to CLAP: `.vst3` bundles (and Windows single-file plugins) are found in the usual VST3 folders and in `VST3_PATH`, and run as instruments or effects with sample accurate notes, parameters (0 to 1, as VST3 has them) and the component's state, which the plugin's controller follows. The browser lists both kinds and says which is which.
+- Automation clips for hosted plugins: right click a parameter's slider in a plugin's window and pick "Create automation clip". It works for a channel's plugin and for a plugin in a mixer slot, in the live player, renders and exports.
+- `las-testvst3` is a small VST3 plugin made for the tests (a gain, a sine from notes, state). The tests load it as a real library: scanning, effect and instrument processing, note offsets, parameters, state, and whole projects with it as an instrument, an effect and automated. The same automation tests run on the CLAP test plugin.
+- Not yet: the plugins' own windows, and running plugins in a separate process. On macOS, VST3 plugins are loaded without the bundle entry call (most plugins do not need it).
+
 ## 0.2.0-alpha.30
 
 Plugin hosting: CLAP plugins load as instruments and as effects.

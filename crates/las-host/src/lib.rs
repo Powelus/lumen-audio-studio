@@ -13,8 +13,17 @@ use clack_extensions::params::{ParamInfoBuffer, PluginParams};
 use clack_extensions::state::PluginState;
 use clack_host::events::event_types::{NoteOffEvent, NoteOnEvent, ParamValueEvent};
 use clack_host::prelude::*;
+pub mod vst3;
+
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
+
+/// The kind of a plugin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Clap,
+    Vst3,
+}
 
 /// What a scan learns about a plugin without starting it.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,8 +34,9 @@ pub struct PluginInfo {
     pub id: String,
     pub name: String,
     pub vendor: String,
-    /// The CLAP features the plugin declares ("instrument", "audio-effect", ...).
+    /// What the plugin declares it is ("instrument", "audio-effect", ...).
     pub features: Vec<String>,
+    pub format: Format,
 }
 
 impl PluginInfo {
@@ -43,6 +53,38 @@ impl PluginInfo {
     fn has(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
     }
+}
+
+/// The folders VST3 plugins are looked for in: `VST3_PATH`, then the standard places.
+pub fn vst3_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(v) = std::env::var_os("VST3_PATH") {
+        paths.extend(std::env::split_paths(&v));
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if cfg!(target_os = "linux") {
+        paths.extend(home.iter().map(|h| h.join(".vst3")));
+        paths.push("/usr/lib/vst3".into());
+        paths.push("/usr/local/lib/vst3".into());
+    } else if cfg!(target_os = "macos") {
+        paths.extend(home.iter().map(|h| h.join("Library/Audio/Plug-Ins/VST3")));
+        paths.push("/Library/Audio/Plug-Ins/VST3".into());
+    } else if cfg!(windows) {
+        if let Some(p) = std::env::var_os("COMMONPROGRAMFILES") {
+            paths.push(PathBuf::from(p).join("VST3"));
+        }
+        if let Some(p) = std::env::var_os("LOCALAPPDATA") {
+            paths.push(PathBuf::from(p).join("Programs/Common/VST3"));
+        }
+    }
+    paths
+}
+
+/// Every place plugins of any kind are looked for.
+pub fn all_search_paths() -> Vec<PathBuf> {
+    let mut p = search_paths();
+    p.extend(vst3_search_paths());
+    p
 }
 
 /// The folders CLAP plugins are looked for in: `CLAP_PATH`, then the standard places of
@@ -80,7 +122,7 @@ pub fn scan(dirs: &[PathBuf]) -> Vec<PluginInfo> {
     }
     files.sort();
     files.dedup();
-    files.iter().flat_map(|f| describe(f)).collect()
+    files.iter().flat_map(|f| describe_any(f)).collect()
 }
 
 fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -89,7 +131,7 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     };
     for e in read.flatten() {
         let p = e.path();
-        if p.extension().is_some_and(|x| x == "clap") {
+        if p.extension().is_some_and(|x| x == "clap" || x == "vst3") {
             out.push(p);
         } else if depth < 1 && p.is_dir() {
             collect(&p, depth + 1, out);
@@ -97,7 +139,16 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The plugins in one library.
+/// The plugins in one library of either kind (by its extension).
+pub fn describe_any(path: &Path) -> Vec<PluginInfo> {
+    if path.extension().is_some_and(|x| x == "vst3") {
+        vst3::describe(path)
+    } else {
+        describe(path)
+    }
+}
+
+/// The plugins in one CLAP library.
 pub fn describe(path: &Path) -> Vec<PluginInfo> {
     // SAFETY: loading a plugin library runs its initialisation code; that is what a host does
     let Ok(entry) = (unsafe { PluginEntry::load(path) }) else {
@@ -125,6 +176,7 @@ pub fn describe(path: &Path) -> Vec<PluginInfo> {
                     .features()
                     .map(|f| f.to_string_lossy().into_owned())
                     .collect(),
+                format: Format::Clap,
                 id,
             })
         })
@@ -435,11 +487,93 @@ impl Drop for Clap {
 }
 
 // ---------------------------------------------------------------------------
+// A plugin of either kind
+// ---------------------------------------------------------------------------
+
+/// A running plugin, CLAP or VST3.
+pub enum Plugin {
+    Clap(Clap),
+    Vst3(vst3::Vst3),
+}
+
+impl Plugin {
+    pub fn load(info: &PluginInfo, sample_rate: f64) -> Result<Self, String> {
+        match info.format {
+            Format::Clap => Clap::load(info, sample_rate).map(Self::Clap),
+            Format::Vst3 => vst3::Vst3::load(info, sample_rate).map(Self::Vst3),
+        }
+    }
+
+    pub fn info(&self) -> &PluginInfo {
+        match self {
+            Self::Clap(p) => p.info(),
+            Self::Vst3(p) => p.info(),
+        }
+    }
+
+    /// The parameters; a VST3 plugin's go from 0 to 1.
+    pub fn params(&self) -> &[Param] {
+        match self {
+            Self::Clap(p) => p.params(),
+            Self::Vst3(p) => p.params(),
+        }
+    }
+
+    pub fn param_value(&mut self, id: u32) -> Option<f64> {
+        match self {
+            Self::Clap(p) => p.param_value(id),
+            Self::Vst3(p) => p.param_value(id),
+        }
+    }
+
+    pub fn set_param(&mut self, id: u32, value: f64) {
+        match self {
+            Self::Clap(p) => p.set_param(id, value),
+            Self::Vst3(p) => p.set_param(id, value),
+        }
+    }
+
+    pub fn save_state(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Self::Clap(p) => p.save_state(),
+            Self::Vst3(p) => p.save_state(),
+        }
+    }
+
+    pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Clap(p) => p.load_state(bytes),
+            Self::Vst3(p) => p.load_state(bytes),
+        }
+    }
+
+    pub fn takes_audio(&self) -> bool {
+        match self {
+            Self::Clap(p) => p.takes_audio(),
+            Self::Vst3(p) => p.takes_audio(),
+        }
+    }
+
+    pub fn process(
+        &mut self,
+        input: Option<(&[f32], &[f32])>,
+        notes: &[NoteMsg],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) {
+        match self {
+            Self::Clap(p) => p.process(input, notes, out_l, out_r),
+            Self::Vst3(p) => p.process(input, notes, out_l, out_r),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The plugins this program knows, and the engine's use of them
 // ---------------------------------------------------------------------------
 
 use las_dsp::fx::registry::External;
-use las_engine::external::{set_plugin_host, Instrument, Note, PluginHost, PLUGIN_ID};
+use las_engine::external::{set_plugin_host, Instrument, Note, ParamLines, PluginHost, PLUGIN_ID};
 use serde_json::{json, Value};
 use std::sync::{Arc, RwLock};
 
@@ -478,9 +612,9 @@ pub fn install() {
 }
 
 /// The plugin a state names, loaded and set to the parameters the state holds.
-fn open(state: &Value, sr: f64) -> Option<Clap> {
+fn open(state: &Value, sr: f64) -> Option<Plugin> {
     let info = find(state.get("id")?.as_str()?)?;
-    let mut clap = Clap::load(&info, sr).ok()?;
+    let mut clap = Plugin::load(&info, sr).ok()?;
     if let Some(ps) = state.get("params").and_then(Value::as_object) {
         for (k, v) in ps {
             if let (Ok(id), Some(v)) = (k.parse::<u32>(), v.as_f64()) {
@@ -495,16 +629,48 @@ struct Hosting;
 
 impl PluginHost for Hosting {
     fn instrument(&self, state: &Value, sr: f64) -> Option<Box<dyn Instrument>> {
-        open(state, sr).map(|c| Box::new(c) as Box<dyn Instrument>)
+        open(state, sr).map(|p| Box::new(Automated::new(p, sr)) as Box<dyn Instrument>)
     }
 
     fn effect(&self, state: &Value, sr: f64) -> Option<Box<dyn External>> {
-        open(state, sr).map(|c| Box::new(c) as Box<dyn External>)
+        open(state, sr).map(|p| Box::new(Automated::new(p, sr)) as Box<dyn External>)
     }
 }
 
-impl Instrument for Clap {
-    fn process(&mut self, notes: &[Note], l: &mut [f32], r: &mut [f32]) {
+/// A hosted plugin with the automation lines of its parameters.
+struct Automated {
+    plugin: Plugin,
+    lines: ParamLines,
+    sr: f64,
+}
+
+impl Automated {
+    fn new(plugin: Plugin, sr: f64) -> Self {
+        Self {
+            plugin,
+            lines: ParamLines::default(),
+            sr,
+        }
+    }
+
+    fn has(&self, id: u32) -> bool {
+        self.plugin.params().iter().any(|p| p.id == id)
+    }
+
+    /// Send the parameters whose lines moved, at `t` seconds.
+    fn follow(&mut self, t: f64) {
+        for (id, v) in self.lines.due(t) {
+            if let Some(p) = self.plugin.params().iter().find(|p| p.id == id) {
+                let plain = p.min + v.clamp(0.0, 1.0) * (p.max - p.min);
+                self.plugin.set_param(id, plain);
+            }
+        }
+    }
+}
+
+impl Instrument for Automated {
+    fn process(&mut self, t0: f64, notes: &[Note], l: &mut [f32], r: &mut [f32]) {
+        self.follow(t0);
         let msgs: Vec<NoteMsg> = notes
             .iter()
             .map(|n| match *n {
@@ -512,11 +678,19 @@ impl Instrument for Clap {
                 Note::Off { offset, key } => NoteMsg::Off { offset, key },
             })
             .collect();
-        Clap::process(self, None, &msgs, l, r);
+        self.plugin.process(None, &msgs, l, r);
+    }
+
+    fn automate(&mut self, id: u32, points: &[(f64, f64)], first: bool) -> bool {
+        if !self.has(id) {
+            return false;
+        }
+        self.lines.automate(id, points, first);
+        true
     }
 }
 
-impl External for Clap {
+impl External for Automated {
     fn process(
         &mut self,
         in_l: &[f32],
@@ -525,7 +699,19 @@ impl External for Clap {
         out_r: &mut [f32],
         _sidechain: Option<(&[f32], &[f32])>,
     ) {
-        Clap::process(self, Some((in_l, in_r)), &[], out_l, out_r);
+        self.plugin.process(Some((in_l, in_r)), &[], out_l, out_r);
+    }
+
+    fn set_time(&mut self, frame: usize) {
+        let t = frame as f64 / self.sr;
+        self.follow(t);
+    }
+
+    fn automate(&mut self, path: &str, points: &[(f64, f64)], first: bool) -> bool {
+        let Some(id) = path.strip_prefix("p.").and_then(|i| i.parse::<u32>().ok()) else {
+            return false;
+        };
+        Instrument::automate(self, id, points, first)
     }
 }
 
@@ -543,7 +729,7 @@ pub fn params_of(id: &str) -> Arc<Vec<Param>> {
     }
     drop(cached);
     let list = find(id)
-        .and_then(|info| Clap::load(&info, 44_100.0).ok())
+        .and_then(|info| Plugin::load(&info, 44_100.0).ok())
         .map(|c| c.params().to_vec())
         .unwrap_or_default();
     let list = Arc::new(list);

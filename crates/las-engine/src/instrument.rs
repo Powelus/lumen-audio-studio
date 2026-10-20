@@ -620,6 +620,12 @@ impl Instrument {
         first: bool,
         length: usize,
     ) -> bool {
+        if let Core::Hosted(h) = &mut self.core {
+            return path
+                .strip_prefix("p.")
+                .and_then(|id| id.parse::<u32>().ok())
+                .is_some_and(|id| h.automate(id, normalised, first));
+        }
         let def = plugin_param_def(&self.plugin_id, path);
         let mapped = map_automation(Some(&def), normalised);
         let points = &mapped[..];
