@@ -47,6 +47,8 @@ pub struct Player {
     metronome: bool,
     /// The click sounding: frames left and the frequency.
     click: Option<(usize, f32)>,
+    /// In song mode, a stretch (ticks) that plays over and over.
+    song_loop: Option<(f64, f64)>,
 }
 
 impl Player {
@@ -82,7 +84,20 @@ impl Player {
             used: false,
             metronome: false,
             click: None,
+            song_loop: None,
         })
+    }
+
+    /// In song mode, play the stretch from `a` to `b` (ticks) over and over. Set before
+    /// [`Player::play`]; a stretch shorter than a sixteenth is ignored.
+    pub fn set_song_loop(&mut self, range: Option<(f64, f64)>) {
+        if self.mode != PlayMode::Song || self.used {
+            return;
+        }
+        self.song_loop = range.filter(|(a, b)| *a >= 0.0 && b - a >= PPQ_F / 4.0);
+        if let Some((_, b)) = self.song_loop {
+            self.end_tick = b;
+        }
     }
 
     pub fn project(&self) -> &Arc<Project> {
@@ -224,6 +239,11 @@ impl Player {
                         self.engine.begin_run(0.0, at);
                     }
                     PlayMode::Song => {
+                        if let Some((a, _)) = self.song_loop {
+                            let at = self.engine.cursor_time();
+                            self.engine.begin_run(a, at);
+                            continue;
+                        }
                         self.scheduled_all = true;
                         break;
                     }

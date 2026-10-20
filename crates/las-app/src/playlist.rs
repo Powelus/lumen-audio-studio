@@ -45,6 +45,8 @@ pub enum PlEdit {
     },
     /// Switch a track's mute on or off.
     TrackMute(usize),
+    /// Play a stretch of the song (ticks) over and over, or the whole song again.
+    SongLoop(Option<(f64, f64)>),
     /// Put a song marker at a tick.
     AddMarker(f64),
     DeleteMarker(String),
@@ -106,6 +108,8 @@ enum Drag {
 pub struct PlaylistState {
     /// Where the last right click landed (tick) and the marker under it, for its menu.
     pub menu_at: Option<(f64, Option<String>)>,
+    /// The stretch of the song that plays over and over (ticks), if any.
+    pub song_loop: Option<(f64, f64)>,
     /// Points per tick.
     pub zoom: f32,
     pub row: f32,
@@ -207,6 +211,7 @@ impl Default for PlaylistState {
             group_last: None,
             drag: None,
             menu_at: None,
+            song_loop: None,
         }
     }
 }
@@ -283,6 +288,22 @@ pub fn new_pattern_clip(p: &Project, index: usize, start: f64, track: usize) -> 
     })
 }
 
+/// The stretch between the markers on either side of `t`: from the last marker at or
+/// before it to the next one after it.
+pub fn loop_around(marks: &[f64], t: f64) -> Option<(f64, f64)> {
+    let a = marks
+        .iter()
+        .copied()
+        .filter(|&m| m <= t + 1e-6)
+        .fold(None, |b: Option<f64>, m| Some(b.map_or(m, |b| b.max(m))))?;
+    let b = marks
+        .iter()
+        .copied()
+        .filter(|&m| m > a + 1e-6)
+        .fold(None, |b: Option<f64>, m| Some(b.map_or(m, |b| b.min(m))))?;
+    Some((a, b))
+}
+
 /// Carry out one edit on a project.
 pub fn apply(project: &mut Project, edit: &PlEdit) {
     let rows = track_count(project);
@@ -292,7 +313,8 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
         | PlEdit::Seek(_)
         | PlEdit::OpenAuto(_)
         | PlEdit::AskRenameTrack(_)
-        | PlEdit::AskRenameMarker(_) => {}
+        | PlEdit::AskRenameMarker(_)
+        | PlEdit::SongLoop(_) => {}
         PlEdit::AddMarker(t) => {
             let list = project.markers.get_or_insert_with(Vec::new);
             let name = format!("Marker {}", list.len() + 1);
@@ -699,6 +721,16 @@ pub fn draw(
                 t += bar;
                 n += 1;
             }
+            // the song loop: a band over the ruler
+            if let Some((a, b)) = state.song_loop {
+                let band = Rect::from_min_max(
+                    egui::pos2(x_of(a).max(vl + HEAD), vt + RULER - 5.0),
+                    egui::pos2(x_of(b).min(vr), vt + RULER),
+                );
+                if band.width() > 0.0 {
+                    painter.rect_filled(band, 0.0, pl.accent.gamma_multiply(0.7));
+                }
+            }
             // song markers: a flag and a name on the ruler; a click jumps to one
             let mut near_marker = None;
             let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -753,6 +785,27 @@ pub fn draw(
                         edits.push(PlEdit::DeleteMarker(id));
                         ui.close();
                     }
+                }
+                let marks: Vec<f64> = project.markers.iter().flatten().map(|m| m.tick).collect();
+                if let Some((a, b)) = loop_around(&marks, t) {
+                    if ui.button("Loop between these markers").clicked() {
+                        edits.push(PlEdit::SongLoop(Some((a, b))));
+                        ui.close();
+                    }
+                }
+                let bar = ticks_per_bar(project.time_sig);
+                let from = (t / bar).floor() * bar;
+                if ui.button("Loop this bar").clicked() {
+                    edits.push(PlEdit::SongLoop(Some((from, from + bar))));
+                    ui.close();
+                }
+                if ui.button("Loop four bars from here").clicked() {
+                    edits.push(PlEdit::SongLoop(Some((from, from + bar * 4.0))));
+                    ui.close();
+                }
+                if state.song_loop.is_some() && ui.button("Stop looping").clicked() {
+                    edits.push(PlEdit::SongLoop(None));
+                    ui.close();
                 }
                 ui.separator();
                 for m in project.markers.iter().flatten() {
@@ -1128,6 +1181,15 @@ mod tests {
         );
         apply(&mut p, &PlEdit::Delete { id });
         assert_eq!(p.playlist.clips.len(), before);
+    }
+
+    #[test]
+    fn a_loop_spans_the_markers_around_a_tick() {
+        let m = [0.0, 384.0, 1536.0];
+        assert_eq!(loop_around(&m, 500.0), Some((384.0, 1536.0)));
+        assert_eq!(loop_around(&m, 384.0), Some((384.0, 1536.0)));
+        assert_eq!(loop_around(&m, 2000.0), None);
+        assert_eq!(loop_around(&[], 10.0), None);
     }
 
     #[test]
