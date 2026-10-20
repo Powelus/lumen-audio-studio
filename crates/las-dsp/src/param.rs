@@ -106,6 +106,12 @@ impl Param {
     /// Remove every event at or after `time`.
     pub fn cancel_scheduled_values(&mut self, time: f64) {
         self.events.retain(|e| e.time < time);
+        // the event in force may have been one of those
+        if let Some(c) = self.cur {
+            if c >= self.events.len() {
+                self.cur = self.events.len().checked_sub(1);
+            }
+        }
     }
 
     /// Automate through `points` (time, value): a jump to the first when
@@ -127,6 +133,18 @@ impl Param {
 
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
+    }
+
+    /// Forget the events that have passed, keeping the one in force. A parameter that
+    /// plays for hours would otherwise keep every event ever put on it.
+    pub fn compact(&mut self) {
+        const KEEP: usize = 32;
+        if let Some(c) = self.cur {
+            if c > KEEP {
+                self.events.drain(..c);
+                self.cur = Some(0);
+            }
+        }
     }
 
     /// Time of the last event.
@@ -165,15 +183,21 @@ impl Param {
                 self.finished = finished;
                 self.carried = Some(self.next_value);
             }
-            self.fill(start, out, sample_rate);
+            self.fill_events(start, out, sample_rate);
             self.carried = None;
         }
+        self.compact();
     }
 
     /// Fill `out` with the values of frames `start..start + out.len()`. Calls
     /// must follow each other without gaps (a param that is not asked for does
     /// not move).
     pub fn fill(&mut self, start: usize, out: &mut [f32], sample_rate: f64) {
+        self.fill_events(start, out, sample_rate);
+        self.compact();
+    }
+
+    fn fill_events(&mut self, start: usize, out: &mut [f32], sample_rate: f64) {
         if self.events.is_empty() {
             out.fill(self.default as f32);
             return;
@@ -431,6 +455,14 @@ impl Timeline {
 
     pub fn is_empty(&self) -> bool {
         self.points.is_empty()
+    }
+
+    /// Drop the points before `time`, keeping the last of them (the value in force).
+    pub fn prune(&mut self, time: f64) {
+        let i = self.points.partition_point(|p| p.0 <= time);
+        if i > 1 {
+            self.points.drain(..i - 1);
+        }
     }
 }
 

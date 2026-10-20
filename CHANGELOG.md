@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.14 - 2026-10-20
+
+A live player.
+
+- `Player` in `las-engine` plays a project in real time: it schedules a short way ahead, renders 128 frame blocks, and takes live notes on any channel. It shares its scheduler and block renderer with the offline render (`Engine`), so a project sounds the same played or rendered.
+- Time is reckoned from the start of the song rather than from each chunk, so the tempo cells, ramps and envelopes land on the same frames however the song is cut up.
+- Checked in `tests/player.rs`: every parity fixture, played in blocks, matches its offline render (to rounding for most; the LumaPad choke case is left out, because the browser's offline render also chokes later pads that are already scheduled, which a lookahead player cannot do).
+- Not yet: the player allocates while rendering, and a project edited while playing needs a new player.
+
 ## 0.2.0-alpha.13 - 2026-10-20
 
 Export, and wavetables made from samples.

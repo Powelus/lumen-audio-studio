@@ -440,6 +440,15 @@ impl Mixer {
         (&t.out[0], &t.out[1])
     }
 
+    /// Forget the automation that has passed.
+    pub fn compact(&mut self) {
+        self.master.compact();
+        for t in &mut self.tracks {
+            t.fader.compact();
+            t.pan.compact();
+        }
+    }
+
     /// Frames the render lasts.
     pub fn length(&self) -> usize {
         self.length
