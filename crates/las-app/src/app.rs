@@ -195,6 +195,13 @@ impl App {
         {
             app.open_channel(n);
         }
+        // `--effect 1,0` opens the window of the effect in slot 0 of insert 1
+        if let Some(v) = std::env::args().skip_while(|a| a != "--effect").nth(1) {
+            let mut it = v.split(',').filter_map(|n| n.parse::<usize>().ok());
+            if let (Some(i), Some(s)) = (it.next(), it.next()) {
+                app.project.open_effect = Some((i, s));
+            }
+        }
         // `--open roll,mixer,synth,export` opens windows at the start
         if let Some(list) = std::env::args().skip_while(|a| a != "--open").nth(1) {
             for w in list.split(',') {

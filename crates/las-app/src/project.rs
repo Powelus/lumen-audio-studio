@@ -65,6 +65,8 @@ pub struct ProjectState {
     redo: Vec<Arc<Project>>,
     /// Changed since it was opened or saved.
     pub dirty: bool,
+    /// The mixer effect whose window is open: (insert, slot).
+    pub open_effect: Option<(usize, usize)>,
     /// The kind and time of the last coalesced edit.
     last_edit: Option<(String, std::time::Instant)>,
     /// The player no longer matches the project and is rebuilt when things are quiet.
@@ -151,7 +153,9 @@ impl ProjectState {
     pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
         let Some(l) = &mut self.loaded else { return };
         for e in edits {
-            if *e == MixEdit::Begin {
+            if let MixEdit::OpenEffect { insert, slot } = e {
+                self.open_effect = Some((*insert, *slot));
+            } else if *e == MixEdit::Begin {
                 self.undo.push(l.project.clone());
                 if self.undo.len() > 200 {
                     self.undo.remove(0);

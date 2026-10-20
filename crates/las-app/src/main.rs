@@ -8,6 +8,7 @@ mod app;
 mod audio;
 mod fxui;
 mod inst;
+mod mfx;
 mod midi;
 mod mixer;
 mod playlist;

@@ -894,6 +894,15 @@ impl App {
                     _ => self.synth_window(ui),
                 });
         }
+        if let Some((insert, slot)) = self.project.open_effect {
+            let mut keep = true;
+            win("Effect", a.min + vec2(260.0, 120.0), vec2(620.0, 420.0))
+                .open(&mut keep)
+                .show(ctx, |ui| self.effect_window(ui, insert, slot));
+            if !keep {
+                self.project.open_effect = None;
+            }
+        }
         if open.export {
             egui::Window::new("Export audio")
                 .open(&mut open.export)
