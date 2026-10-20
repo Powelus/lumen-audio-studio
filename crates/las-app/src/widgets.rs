@@ -244,3 +244,11 @@ pub fn note_name(key: u8) -> String {
     ];
     format!("{}{}", NAMES[(key % 12) as usize], key as i32 / 12 - 1)
 }
+
+/// Run one frame of `ui` headless, for tests. The frame's output is dropped the way
+/// egui wants (debug builds panic on unapplied texture changes).
+#[cfg(test)]
+pub fn run_frame(ctx: &egui::Context, input: egui::RawInput, f: impl FnMut(&mut egui::Ui)) {
+    let mut out = ctx.run_ui(input, f);
+    out.textures_delta.clear();
+}
