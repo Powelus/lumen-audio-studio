@@ -361,3 +361,60 @@ mod tests {
         assert_eq!(got[2001], -got[2000]);
     }
 }
+
+/// An MP3 file (constant bit rate, `kbps` 128 to 320) of a stereo or mono render.
+pub fn encode_mp3(channels: &[&[f32]], sample_rate: u32, kbps: u32) -> Result<Vec<u8>, String> {
+    use mp3lame_encoder::{Bitrate, Builder, DualPcm, FlushNoGap, Quality};
+    let left = channels.first().ok_or("nothing to encode")?;
+    let right = channels.get(1).unwrap_or(left);
+    let mut b = Builder::new().ok_or("the MP3 encoder could not start")?;
+    let rate = match kbps {
+        0..=128 => Bitrate::Kbps128,
+        129..=192 => Bitrate::Kbps192,
+        193..=256 => Bitrate::Kbps256,
+        _ => Bitrate::Kbps320,
+    };
+    b.set_num_channels(2).map_err(|e| format!("{e:?}"))?;
+    b.set_sample_rate(sample_rate)
+        .map_err(|e| format!("{e:?}"))?;
+    b.set_brate(rate).map_err(|e| format!("{e:?}"))?;
+    b.set_quality(Quality::Best).map_err(|e| format!("{e:?}"))?;
+    let mut enc = b.build().map_err(|e| format!("{e:?}"))?;
+    let mut out = Vec::new();
+    // in pieces, so the output buffer stays small
+    for start in (0..left.len()).step_by(1 << 16) {
+        let end = (start + (1 << 16)).min(left.len());
+        let pcm = DualPcm {
+            left: &left[start..end],
+            right: &right[start..end.min(right.len())],
+        };
+        out.reserve(mp3lame_encoder::max_required_buffer_size(end - start));
+        enc.encode_to_vec(pcm, &mut out)
+            .map_err(|e| format!("{e:?}"))?;
+    }
+    out.reserve(7200);
+    enc.flush_to_vec::<FlushNoGap>(&mut out)
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod mp3_tests {
+    use super::*;
+
+    #[test]
+    fn an_mp3_has_frames_and_is_about_the_size_its_bit_rate_says() {
+        let sr = 44_100;
+        let l: Vec<f32> = (0..sr * 2)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / sr as f32).sin() * 0.5)
+            .collect();
+        let bytes = encode_mp3(&[&l, &l], sr as u32, 192).unwrap();
+        // an MPEG audio frame starts with eleven set bits
+        let sync = bytes
+            .windows(2)
+            .position(|w| w[0] == 0xFF && w[1] & 0xE0 == 0xE0);
+        assert!(sync.is_some(), "no MPEG frame");
+        // two seconds at 192 kbit/s is about 48 kB
+        assert!((40_000..60_000).contains(&bytes.len()), "{}", bytes.len());
+    }
+}

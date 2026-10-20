@@ -282,7 +282,7 @@ pub fn draw(ui: &mut Ui, project: &Project, state: &mut MixerState, peaks: &[f32
         egui::ScrollArea::horizontal()
             .auto_shrink([false, false])
             .id_salt("mixer")
-            .max_width((avail - panel_w - 12.0).max(200.0))
+            .max_width((avail - panel_w - 28.0).max(200.0))
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -308,7 +308,7 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
     let t = &project.mixer[i];
     let mut name = t.name.clone();
     if ui
-        .add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY))
+        .add(egui::TextEdit::singleline(&mut name).desired_width(170.0))
         .changed()
     {
         edits.push(MixEdit::Begin);

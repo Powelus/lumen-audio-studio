@@ -207,6 +207,12 @@ impl App {
                 },
             ]);
         }
+        // `--add vortex` adds a channel with that instrument and opens its window
+        if let Some(id) = std::env::args().skip_while(|a| a != "--add").nth(1) {
+            app.add_channel(&id);
+            let at = app.project.channel;
+            app.open_channel(at);
+        }
         // `--channel 1` opens that channel's instrument window
         if let Some(n) = std::env::args()
             .skip_while(|a| a != "--channel")
@@ -557,13 +563,13 @@ impl App {
     /// The parts both instruments share: amp envelope, filter and voices.
     fn common(&mut self, ui: &mut Ui) -> bool {
         let mut changed = false;
-        ui.group(|ui| {
+        crate::skin::group(ui, |ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new("Amp envelope").strong());
                 ui.horizontal(|ui| changed |= self.envelope(ui, "/env/0"));
             });
         });
-        ui.group(|ui| {
+        crate::skin::group(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     changed |= self.toggle(ui, "/filter/on", "Filter");
@@ -593,7 +599,7 @@ impl App {
                 });
             });
         });
-        ui.group(|ui| {
+        crate::skin::group(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     changed |= self.toggle(ui, "/voice/mono", "Mono");
@@ -618,7 +624,7 @@ impl App {
     pub(crate) fn synth(&mut self, ui: &mut Ui) {
         let mut changed = false;
         ui.horizontal_top(|ui| {
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Algorithm").strong());
                     let mut algo = self.num("/algo").round() as usize;
@@ -642,9 +648,12 @@ impl App {
             changed |= self.common(ui);
         });
         ui.add_space(6.0);
-        ui.horizontal_top(|ui| {
+        egui::Grid::new("fm-ops").num_columns(2).show(ui, |ui| {
             for i in 0..4 {
                 changed |= self.operator(ui, i);
+                if i % 2 == 1 {
+                    ui.end_row();
+                }
             }
         });
         if changed {
@@ -655,8 +664,18 @@ impl App {
     pub(crate) fn mist_panel(&mut self, ui: &mut Ui) {
         let mut changed = false;
         let pct = |v: f64| format!("{:.0}%", v * 100.0);
+        let w = ui.available_width().min(860.0);
+        crate::skin::grain_cloud(
+            ui,
+            egui::vec2(w, 90.0),
+            self.num("/grain/position") as f32,
+            self.num("/grain/spray") as f32,
+            self.num("/grain/size") as f32,
+            self.num("/grain/density") as f32,
+        );
+        ui.add_space(4.0);
         ui.horizontal_top(|ui| {
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Source").strong());
                     ui.label(RichText::new(&self.source_name).weak());
@@ -670,7 +689,7 @@ impl App {
                         });
                 });
             });
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Where").strong());
                     ui.horizontal(|ui| {
@@ -685,7 +704,7 @@ impl App {
                     });
                 });
             });
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Grains").strong());
                     ui.horizontal(|ui| {
@@ -702,7 +721,7 @@ impl App {
                     });
                 });
             });
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Pitch and stereo").strong());
                     ui.horizontal(|ui| {
@@ -779,7 +798,7 @@ impl App {
         egui::Grid::new("oscs").num_columns(2).show(ui, |ui| {
             for o in 0..4 {
                 let base = format!("/osc/{o}");
-                ui.group(|ui| {
+                crate::skin::group(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             changed |= self.toggle(
@@ -806,6 +825,7 @@ impl App {
                                 &routes,
                             );
                         });
+                        self.osc_screen(ui, o);
                         ui.horizontal(|ui| {
                             changed |= self.knob(
                                 ui,
@@ -922,7 +942,7 @@ impl App {
             }
         });
         ui.horizontal_top(|ui| {
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         changed |= self.toggle(ui, "/sub/on", "Sub");
@@ -947,7 +967,7 @@ impl App {
                     });
                 });
             });
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         changed |= self.toggle(ui, "/noise/on", "Noise");
@@ -964,6 +984,55 @@ impl App {
             });
         });
         changed
+    }
+
+    /// The screen of an oscillator: its wavetable at the current position (the whole
+    /// table in 3D on Vortex).
+    fn osc_screen(&mut self, ui: &mut Ui, o: usize) {
+        let k = index(self.inst);
+        let osc = self.patches[k].pointer(&format!("/osc/{o}")).cloned();
+        let table = osc
+            .as_ref()
+            .and_then(|v| v.get("table"))
+            .and_then(Value::as_str)
+            .unwrap_or("saw")
+            .to_string();
+        let pos = osc
+            .as_ref()
+            .and_then(|v| v.get("pos"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let on = osc
+            .as_ref()
+            .and_then(|v| v.get("on"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let frames = crate::skin_tables::frames(&table);
+        let w = ui.available_width().min(352.0);
+        if self.face_id() == "vortex" {
+            crate::skin::table_3d(ui, egui::vec2(w, 132.0), &frames, pos as f32);
+        } else {
+            let f = frames
+                .get(((pos * (frames.len().max(1) - 1) as f64).round()) as usize)
+                .cloned()
+                .unwrap_or_default();
+            crate::skin::wave_screen(ui, egui::vec2(w, 64.0), &f, on);
+        }
+    }
+
+    /// The plugin id whose face the synth window wears.
+    pub(crate) fn face_id(&self) -> String {
+        if let (Some(b), Some(l)) = (self.bound, &self.project.loaded) {
+            if let Some(c) = l.project.channels.get(b.channel()) {
+                return c.plugin_id.clone();
+            }
+        }
+        match self.inst {
+            Instrument::Facet => "facet",
+            Instrument::Mist => "mist",
+            Instrument::Polaris => "polaris",
+        }
+        .to_string()
     }
 
     fn filters(&mut self, ui: &mut Ui) -> bool {
@@ -993,7 +1062,7 @@ impl App {
         });
         for f in 0..2 {
             let base = format!("/filters/{f}");
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         changed |=
@@ -1076,7 +1145,7 @@ impl App {
         ui.horizontal_top(|ui| {
             for e in 0..4 {
                 let base = format!("/env/{e}");
-                ui.group(|ui| {
+                crate::skin::group(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.label(["Amp (env 1)", "Filter (env 2)", "Env 3", "Env 4"][e]);
                         ui.horizontal(|ui| {
@@ -1139,7 +1208,7 @@ impl App {
         ui.horizontal_top(|ui| {
             for l in 0..4 {
                 let base = format!("/lfo/{l}");
-                ui.group(|ui| {
+                crate::skin::group(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(format!("LFO {}", l + 1));
@@ -1251,7 +1320,7 @@ impl App {
         let mut changed = false;
         let pct = |v: f64| format!("{:.0}%", v * 100.0);
         ui.horizontal_top(|ui| {
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         changed |= self.toggle(ui, "/voice/mono", "Mono");
@@ -1278,7 +1347,7 @@ impl App {
                     });
                 });
             });
-            ui.group(|ui| {
+            crate::skin::group(ui, |ui| {
                 ui.horizontal(|ui| {
                     changed |= self.knob(ui, "/level", "Level", 0.0..=1.0, false, &pct);
                     changed |= self.knob(ui, "/tune", "Tune", -12.0..=12.0, false, &|v| {
@@ -1307,7 +1376,7 @@ impl App {
     fn operator(&mut self, ui: &mut Ui, i: usize) -> bool {
         let base = format!("/ops/{i}");
         let mut changed = false;
-        ui.group(|ui| {
+        crate::skin::group(ui, |ui| {
             ui.set_width(250.0);
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {

@@ -20,6 +20,32 @@ struct Changes {
 }
 
 impl App {
+    /// The name an effect window's face shows (leaked once per effect kind: there are
+    /// few, and a face holds static text).
+    pub(crate) fn effect_title(&self, insert: usize, slot: usize) -> &'static str {
+        let s = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.mixer.get(insert))
+            .and_then(|t| t.slots.get(slot))
+            .and_then(Option::as_ref);
+        let name = match s {
+            Some(s) if s.plugin_id == las_host::HOSTED => crate::hosted::name_of(&s.state),
+            Some(s) => descriptor(&s.plugin_id).map_or(s.plugin_id.clone(), |d| d.name.clone()),
+            None => "Effect".into(),
+        }
+        .to_uppercase();
+        static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+        let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = names.iter().find(|n| **n == name) {
+            return n;
+        }
+        let leaked: &'static str = Box::leak(name.into_boxed_str());
+        names.push(leaked);
+        leaked
+    }
+
     pub(crate) fn effect_window(&mut self, ui: &mut Ui, insert: usize, slot: usize) {
         let Some(l) = &self.project.loaded else {
             return;

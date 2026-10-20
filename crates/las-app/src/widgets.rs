@@ -60,6 +60,7 @@ pub fn knob_mapped(
     label: &str,
     show: &dyn Fn(f64) -> String,
 ) -> bool {
+    let skin = crate::skin::current();
     let size = vec2(54.0, 76.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut changed = false;
@@ -76,7 +77,31 @@ pub fn knob_mapped(
     let painter = ui.painter_at(rect);
     let centre = pos2(rect.center().x, rect.top() + 24.0);
     let radius = 18.0;
-    painter.circle_filled(centre, radius + 3.0, crate::theme::pal().well_deep);
+    let (body, track, accent, text) = match skin {
+        Some(s) => (s.knob, s.track, s.accent, s.dim),
+        None => (
+            crate::theme::pal().well_deep,
+            crate::theme::pal().raised2,
+            crate::theme::accent(),
+            crate::theme::pal().text2,
+        ),
+    };
+    if skin.is_some() {
+        // a raised cap with a soft shadow, like a hardware knob
+        painter.circle_filled(
+            centre + vec2(0.0, 2.0),
+            radius + 3.0,
+            Color32::from_black_alpha(90),
+        );
+        painter.circle_filled(centre, radius - 3.0, body);
+        painter.circle_stroke(
+            centre,
+            radius - 3.0,
+            Stroke::new(1.0, Color32::from_white_alpha(28)),
+        );
+    } else {
+        painter.circle_filled(centre, radius + 3.0, body);
+    }
     let (a0, sweep) = (PI * 0.75, PI * 1.5);
     let arc = |t0: f32, t1: f32, r: f32| -> Vec<Pos2> {
         let steps = 28;
@@ -87,17 +112,21 @@ pub fn knob_mapped(
             })
             .collect()
     };
-    painter.add(Shape::line(
-        arc(0.0, 1.0, radius),
-        Stroke::new(3.0, crate::theme::pal().raised2),
-    ));
+    painter.add(Shape::line(arc(0.0, 1.0, radius), Stroke::new(3.0, track)));
     let t = to_norm(*value).clamp(0.0, 1.0) as f32;
     if t > 0.002 {
         let lit = if resp.hovered() || resp.dragged() {
-            Color32::from_rgb(255, 170, 80)
+            accent.gamma_multiply(1.3)
         } else {
-            crate::theme::accent()
+            accent
         };
+        if skin.is_some() {
+            // the lit arc glows on a plugin face
+            painter.add(Shape::line(
+                arc(0.0, t, radius),
+                Stroke::new(7.0, lit.gamma_multiply(0.2)),
+            ));
+        }
         painter.add(Shape::line(arc(0.0, t, radius), Stroke::new(3.0, lit)));
     }
     let a = a0 + sweep * t;
@@ -116,14 +145,14 @@ pub fn knob_mapped(
         Align2::CENTER_CENTER,
         show(*value),
         FontId::proportional(11.0),
-        crate::theme::pal().text2,
+        text,
     );
     painter.text(
         pos2(rect.center().x, rect.top() + 64.0),
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(11.0),
-        crate::theme::pal().muted,
+        skin.map_or(crate::theme::pal().muted, |s| s.text),
     );
     resp.on_hover_text(format!(
         "{label}: {}\nDrag, Shift for fine, double-click to reset",

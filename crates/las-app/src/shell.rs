@@ -47,12 +47,15 @@ pub struct Export {
 }
 
 /// The formats the export window offers: label, FLAC, bits.
-pub const FORMATS: [(&str, bool, u32); 5] = [
-    ("WAV 16 bit", false, 16),
-    ("WAV 24 bit", false, 24),
-    ("WAV 32 bit float", false, 32),
-    ("FLAC 16 bit", true, 16),
-    ("FLAC 24 bit", true, 24),
+/// Export formats: name, kind (the file extension) and bits (kbit/s for MP3).
+pub const FORMATS: [(&str, &str, u32); 7] = [
+    ("WAV 16 bit", "wav", 16),
+    ("WAV 24 bit", "wav", 24),
+    ("WAV 32 bit float", "wav", 32),
+    ("FLAC 16 bit", "flac", 16),
+    ("FLAC 24 bit", "flac", 24),
+    ("MP3 320 kbit/s", "mp3", 320),
+    ("MP3 192 kbit/s", "mp3", 192),
 ];
 
 pub struct Shell {
@@ -67,6 +70,9 @@ pub struct Shell {
     pub recorder: Option<crate::record::Recorder>,
     /// Where the take being recorded starts, ticks.
     pub record_from: f64,
+    /// LumaPad: the selected pad, and whether one is held.
+    pub pad: usize,
+    pub pad_held: Option<u8>,
     /// The memory the app uses, megabytes, and when it was last read.
     ram: (Option<Instant>, f64),
     pub search: String,
@@ -101,6 +107,8 @@ impl Shell {
             record: false,
             recorder: None,
             record_from: 0.0,
+            pad: 0,
+            pad_held: None,
             ram: (None, 0.0),
             search: String::new(),
             theme: theme::saved_choice(),
@@ -805,31 +813,26 @@ impl App {
                     .strong()
                     .color(p.muted),
             );
-            for (name, inst, what) in [
-                ("Polaris", Some(Instrument::Polaris), "Wavetable synth"),
-                ("Facet", Some(Instrument::Facet), "Four-operator FM synth"),
-                ("Mist", Some(Instrument::Mist), "Granular synth"),
-                ("Vortex", None, "Wavetable synth with a 3D view"),
-                ("Monolith", None, "Subtractive synth"),
-                ("Zenith", None, "Supersaw and pads"),
-                ("TriOsc", None, "Three oscillator synth"),
-                ("Nebula", None, "Layered macro instrument"),
-                ("Sampler", None, "Plays a sample across the keys"),
-                ("LumaPad", None, "16 pads with choke groups"),
+            for (name, id, what) in [
+                ("Polaris", "polaris", "Wavetable synth"),
+                ("Facet", "facet", "Four-operator FM synth"),
+                ("Mist", "mist", "Granular synth"),
+                ("Vortex", "vortex", "Wavetable synth with a 3D view"),
+                ("Monolith", "monolith", "Subtractive synth"),
+                ("Zenith", "zenith", "Supersaw and pads"),
+                ("TriOsc", "triosc", "Three oscillator synth"),
+                ("Nebula", "nebula", "Layered macro instrument"),
+                ("Sampler", "sampler", "Plays a sample across the keys"),
+                ("LumaPad", "lumapad", "16 pads with choke groups"),
             ] {
                 ui.horizontal(|ui| {
-                    let enabled = inst.is_some();
                     let r = ui
-                        .add_enabled(enabled, egui::Button::new(name).min_size(vec2(90.0, 0.0)))
-                        .on_disabled_hover_text(
-                            "The engine plays it; its window is not in the native app yet.",
-                        );
-                    if r.clicked() {
-                        if let Some(i) = inst {
-                            self.bound = None;
-                            self.switch(i);
-                            self.shell.open.synth = true;
-                        }
+                        .add(egui::Button::new(name).min_size(vec2(90.0, 0.0)))
+                        .on_hover_text("Add as a channel and open its window");
+                    if r.clicked() && self.project.loaded.is_some() {
+                        self.add_channel(id);
+                        let at = self.project.channel;
+                        self.open_channel(at);
                     }
                     ui.label(RichText::new(what).size(11.0).color(p.muted));
                 });
@@ -974,12 +977,26 @@ impl App {
             });
         }
         if open.synth {
-            win("Synth", a.min + vec2(200.0, 30.0), vec2(860.0, 640.0))
+            win("Synth", a.min + vec2(160.0, 30.0), vec2(900.0, 680.0))
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
                     Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
                     Some(crate::inst::Bound::Hosted(c)) => self.hosted_channel(ui, c),
-                    Some(crate::inst::Bound::Sampler(c)) => self.sampler_window(ui, c),
+                    Some(crate::inst::Bound::Nebula(c)) => {
+                        crate::skin::face(ui, crate::skin::skin_for("nebula"), |ui| {
+                            self.nebula_window(ui, c)
+                        })
+                    }
+                    Some(crate::inst::Bound::Pads(c)) => {
+                        crate::skin::face(ui, crate::skin::skin_for("lumapad"), |ui| {
+                            self.pads_window(ui, c)
+                        })
+                    }
+                    Some(crate::inst::Bound::Sampler(c)) => {
+                        crate::skin::face(ui, crate::skin::skin_for("sampler"), |ui| {
+                            self.sampler_window(ui, c)
+                        })
+                    }
                     _ => self.synth_window(ui),
                 });
         }
@@ -987,7 +1004,11 @@ impl App {
             let mut keep = true;
             win("Effect", a.min + vec2(260.0, 120.0), vec2(620.0, 420.0))
                 .open(&mut keep)
-                .show(ctx, |ui| self.effect_window(ui, insert, slot));
+                .show(ctx, |ui| {
+                    let mut skin = crate::skin::skin_for("fx");
+                    skin.name = self.effect_title(insert, slot);
+                    crate::skin::face(ui, skin, |ui| self.effect_window(ui, insert, slot))
+                });
             if !keep {
                 self.project.open_effect = None;
             }
@@ -1179,29 +1200,34 @@ impl App {
     }
 
     fn synth_window(&mut self, ui: &mut Ui) {
+        let skin = crate::skin::skin_for(&self.face_id());
+        crate::skin::face(ui, skin, |ui| self.synth_window_inner(ui));
+    }
+
+    fn synth_window_inner(&mut self, ui: &mut Ui) {
         if let (Some(b), Some(l)) = (self.bound, &self.project.loaded) {
             if let Some(c) = l.project.channels.get(b.channel()) {
-                ui.label(
-                    RichText::new(format!("{}  ({})", c.name, c.plugin_id))
-                        .strong()
-                        .size(15.0)
-                        .color(pal().accent_text),
-                );
+                ui.label(RichText::new(&c.name).strong().size(15.0));
             }
         } else {
             ui.label(RichText::new("Stand-alone synth (not part of the project)").weak());
         }
+        let bound = self.bound.is_some();
         ui.horizontal(|ui| {
-            for (inst, name) in [
-                (Instrument::Polaris, "Polaris"),
-                (Instrument::Facet, "Facet"),
-                (Instrument::Mist, "Mist"),
-            ] {
-                if ui.selectable_label(self.inst == inst, name).clicked() {
-                    self.switch(inst);
+            // a project channel keeps its instrument; the stand-alone synth can switch
+            if !bound {
+                for (inst, name) in [
+                    (Instrument::Polaris, "Polaris"),
+                    (Instrument::Facet, "Facet"),
+                    (Instrument::Mist, "Mist"),
+                ] {
+                    if ui.selectable_label(self.inst == inst, name).clicked() {
+                        self.switch(inst);
+                    }
                 }
+                ui.separator();
             }
-            ui.separator();
+            ui.label("Preset");
             self.preset_picker(ui);
         });
         ui.horizontal(|ui| {
@@ -1256,8 +1282,16 @@ impl App {
             egui::ComboBox::from_id_salt("export-format")
                 .selected_text(FORMATS[f].0)
                 .show_ui(ui, |ui| {
-                    for (i, (name, _, _)) in FORMATS.iter().enumerate() {
-                        ui.selectable_value(&mut self.shell.export.format, i, *name);
+                    for (i, (name, kind, _)) in FORMATS.iter().enumerate() {
+                        if ui
+                            .selectable_value(&mut self.shell.export.format, i, *name)
+                            .clicked()
+                        {
+                            // the file name follows the format
+                            let path = std::path::Path::new(&self.shell.export.path);
+                            self.shell.export.path =
+                                path.with_extension(kind).to_string_lossy().into_owned();
+                        }
                     }
                 });
             ui.checkbox(&mut self.shell.export.normalize, "Normalize to -0.3 dB");
@@ -1294,7 +1328,7 @@ impl App {
         let (project, samples) = (l.project.clone(), l.samples.clone());
         let e = &self.shell.export;
         let (path, normalize) = (e.path.trim().to_string(), e.normalize);
-        let (_, flac, bits) = FORMATS[e.format];
+        let (_, kind, bits) = FORMATS[e.format];
         let mode = if e.pattern_only {
             Mode::Pattern {
                 id: project
@@ -1324,8 +1358,10 @@ impl App {
                     chans
                 };
                 let rate = r.sample_rate as u32;
-                let bytes = if flac {
+                let bytes = if kind == "flac" {
                     las_engine::export::encode_flac(&chans, rate, bits)?
+                } else if kind == "mp3" {
+                    las_engine::export::encode_mp3(&chans, rate, bits)?
                 } else {
                     let depth = las_engine::export::BitDepth::from_bits(bits).ok_or("bad depth")?;
                     las_engine::export::encode_wav(&chans, rate, depth, bits == 16)
@@ -1381,10 +1417,12 @@ mod tests {
     }
 
     #[test]
-    fn exports_offer_wav_and_flac() {
-        assert!(FORMATS.iter().any(|f| f.1) && FORMATS.iter().any(|f| !f.1));
+    fn exports_offer_wav_flac_and_mp3() {
+        for kind in ["wav", "flac", "mp3"] {
+            assert!(FORMATS.iter().any(|f| f.1 == kind), "{kind}");
+        }
         assert!(
-            FORMATS.iter().all(|f| !(f.1 && f.2 == 32)),
+            FORMATS.iter().all(|f| !(f.1 == "flac" && f.2 == 32)),
             "no 32 bit flac"
         );
     }
