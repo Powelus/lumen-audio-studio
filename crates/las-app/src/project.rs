@@ -8,9 +8,8 @@ use crate::audio::Command;
 use crate::mixer::{self, MixEdit};
 use crate::playlist::{self, PlEdit, PlaylistState};
 use crate::roll::{self, Edit, RollState};
-use crate::widgets::ACCENT;
-use eframe::egui::{self, Color32, RichText, Ui};
-use las_engine::timeline::PPQ_F;
+use crate::steps::{self, ChanEdit};
+use eframe::egui::{self, RichText, Ui};
 use las_engine::{PlayMode, Player};
 use las_project::{decode, encode, Project, Sample};
 use std::collections::BTreeMap;
@@ -57,8 +56,6 @@ pub struct ProjectState {
     pub error: Option<String>,
     /// Whether a player has been handed to the audio thread (so Stop has something).
     pub has_player: bool,
-    /// Rack or piano roll.
-    pub page: Page,
     pub roll: RollState,
     pub playlist: PlaylistState,
     /// Where "Play song" starts, in ticks.
@@ -70,15 +67,6 @@ pub struct ProjectState {
     pub dirty: bool,
     /// The player no longer matches the project and is rebuilt when things are quiet.
     stale: bool,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub enum Page {
-    #[default]
-    Rack,
-    Roll,
-    Playlist,
-    Mixer,
 }
 
 impl ProjectState {
@@ -105,7 +93,12 @@ impl ProjectState {
 
     /// Carry out the edits of one frame on the open project.
     pub fn edit(&mut self, edits: &[Edit]) {
-        let (pattern, channel) = (self.pattern, self.channel);
+        self.edit_channel(self.channel, edits);
+    }
+
+    /// Carry out edits on a channel's notes in the chosen pattern.
+    pub fn edit_channel(&mut self, channel: usize, edits: &[Edit]) {
+        let pattern = self.pattern;
         let Some(l) = &mut self.loaded else { return };
         let Some(id) = l.project.channels.get(channel).map(|c| c.id.clone()) else {
             return;
@@ -169,6 +162,39 @@ impl ProjectState {
         }
     }
 
+    /// Change the project in some other way (`begin` starts an undo step).
+    pub fn modify(&mut self, begin: bool, f: impl FnOnce(&mut Project)) {
+        let Some(l) = &mut self.loaded else { return };
+        if begin {
+            self.undo.push(l.project.clone());
+            if self.undo.len() > 200 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        f(Arc::make_mut(&mut l.project));
+        self.dirty = true;
+        self.stale = true;
+    }
+
+    /// Carry out channel setting edits (level, pan, mute, swing).
+    pub fn edit_chans(&mut self, edits: &[ChanEdit]) {
+        let Some(l) = &mut self.loaded else { return };
+        for e in edits {
+            if *e == ChanEdit::Begin {
+                self.undo.push(l.project.clone());
+                if self.undo.len() > 200 {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            } else {
+                steps::apply(Arc::make_mut(&mut l.project), e);
+                self.dirty = true;
+                self.stale = true;
+            }
+        }
+    }
+
     pub fn undo(&mut self) {
         if let (Some(l), Some(prev)) = (&mut self.loaded, self.undo.pop()) {
             self.redo.push(std::mem::replace(&mut l.project, prev));
@@ -215,7 +241,16 @@ impl ProjectState {
     }
 }
 
-fn snap_name(ticks: f64) -> &'static str {
+fn playlist_snap_name(ticks: f64) -> &'static str {
+    match ticks as u32 {
+        384 => "Bar",
+        96 => "Beat",
+        24 => "1/4 beat",
+        _ => "Off",
+    }
+}
+
+pub(crate) fn snap_name(ticks: f64) -> &'static str {
     match ticks as u32 {
         96 => "Beat",
         48 => "1/2 beat",
@@ -223,17 +258,6 @@ fn snap_name(ticks: f64) -> &'static str {
         12 => "1/8 beat",
         _ => "Off",
     }
-}
-
-/// Bars, beats and ticks (all counted from 1 for bars and beats) of a tick position.
-pub fn bar_beat(tick: f64, sig: (u32, u32)) -> String {
-    let beat_ticks = PPQ_F * 4.0 / f64::from(sig.1.max(1));
-    let bar_ticks = beat_ticks * f64::from(sig.0.max(1));
-    let bar = (tick / bar_ticks).floor();
-    let rest = tick - bar * bar_ticks;
-    let beat = (rest / beat_ticks).floor();
-    let sub = rest - beat * beat_ticks;
-    format!("{}:{}:{:03}", bar as i64 + 1, beat as i64 + 1, sub as i64)
 }
 
 impl App {
@@ -244,7 +268,6 @@ impl App {
         match self.project.open(path) {
             Ok(()) => {
                 self.project.error = None;
-                self.view = crate::app::View::Project;
                 // ready for keys played live
                 if let Some(rate) = self.audio.as_ref().map(|a| a.sample_rate as f64) {
                     self.project.start(PlayMode::Song, Start::Ready, rate);
@@ -261,11 +284,29 @@ impl App {
         }
     }
 
-    fn playlist(&mut self, ui: &mut Ui, playhead: Option<f64>) {
+    pub(crate) fn playlist(&mut self, ui: &mut Ui, playhead: Option<f64>) {
         let Some(l) = &self.project.loaded else {
             return;
         };
         let project = l.project.clone();
+        ui.horizontal(|ui| {
+            ui.label("Snap");
+            let snap = &mut self.project.playlist.snap;
+            egui::ComboBox::from_id_salt("playlist-snap")
+                .selected_text(playlist_snap_name(*snap))
+                .show_ui(ui, |ui| {
+                    for v in [384.0, 96.0, 24.0, 1.0] {
+                        ui.selectable_value(snap, v, playlist_snap_name(v));
+                    }
+                });
+            ui.label("Zoom");
+            ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false));
+            ui.label(
+                RichText::new("Double click places the pattern, drag moves, right click deletes, click the ruler to set the start.")
+                    .weak()
+                    .size(11.0),
+            );
+        });
         let edits = playlist::draw(
             ui,
             &project,
@@ -278,16 +319,28 @@ impl App {
         self.project.edit_playlist(&edits);
     }
 
-    fn roll(&mut self, ui: &mut Ui, playhead: Option<f64>) {
+    pub(crate) fn roll(&mut self, ui: &mut Ui, playhead: Option<f64>) {
         let Some(l) = &self.project.loaded else {
             return;
         };
         let project = l.project.clone();
-        // the channels to pick from sit above the roll
+        // the channels to pick from, and the snap and zoom, sit above the roll
         ui.horizontal_wrapped(|ui| {
             for (i, c) in project.channels.iter().enumerate() {
                 ui.selectable_value(&mut self.project.channel, i, &c.name);
             }
+            ui.separator();
+            ui.label("Snap");
+            let snap = &mut self.project.roll.snap;
+            egui::ComboBox::from_id_salt("roll-snap")
+                .selected_text(snap_name(*snap))
+                .show_ui(ui, |ui| {
+                    for v in [96.0, 48.0, 24.0, 12.0, 1.0] {
+                        ui.selectable_value(snap, v, snap_name(v));
+                    }
+                });
+            ui.label("Zoom");
+            ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false));
         });
         let edits = roll::draw(
             ui,
@@ -306,7 +359,7 @@ impl App {
         self.project.edit(&edits);
     }
 
-    fn play_project(&mut self, mode: PlayMode, from: f64) {
+    pub(crate) fn play_project(&mut self, mode: PlayMode, from: f64) {
         let Some(rate) = self.audio.as_ref().map(|a| a.sample_rate as f64) else {
             return;
         };
@@ -366,158 +419,6 @@ impl App {
                 }
             }
             Err(e) => self.project.error = Some(e),
-        }
-    }
-
-    pub(crate) fn project_view(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Project");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.project.path)
-                    .hint_text("path to a .las file, or drop one on the window")
-                    .desired_width(360.0),
-            );
-            if ui.button("Open").clicked() {
-                let p = self.project.path.trim().to_string();
-                self.open_project(&p);
-            }
-            if let Some(l) = &self.project.loaded {
-                ui.separator();
-                ui.label(
-                    RichText::new(&l.project.name)
-                        .size(16.0)
-                        .strong()
-                        .color(ACCENT),
-                );
-                ui.label(
-                    RichText::new(format!(
-                        "{} BPM, {}/{}, {} channels, {} patterns, {} samples",
-                        l.project.bpm,
-                        l.project.time_sig.0,
-                        l.project.time_sig.1,
-                        l.project.channels.len(),
-                        l.project.patterns.len(),
-                        l.samples.len()
-                    ))
-                    .weak(),
-                );
-            }
-        });
-        if let Some(e) = &self.project.error {
-            ui.colored_label(Color32::from_rgb(235, 70, 60), e);
-        }
-        let Some(l) = &self.project.loaded else {
-            return;
-        };
-        let project = l.project.clone();
-        let warnings = l.warnings.clone();
-        for w in &warnings {
-            ui.label(RichText::new(w).color(Color32::from_rgb(230, 180, 60)));
-        }
-        let (playing, pos) = self
-            .audio
-            .as_ref()
-            .map(|a| (a.meters.playing(), a.meters.position()))
-            .unwrap_or((false, 0.0));
-        let busy = self.project.is_building();
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!busy, egui::Button::new("Play song"))
-                .on_hover_text("From the start marker on the playlist ruler")
-                .clicked()
-            {
-                let from = self.project.start_tick;
-                self.play_project(PlayMode::Song, from);
-            }
-            if ui
-                .add_enabled(
-                    !busy && !project.patterns.is_empty(),
-                    egui::Button::new("Play pattern"),
-                )
-                .clicked()
-            {
-                let i = self.project.pattern;
-                self.play_project(PlayMode::Pattern(i), 0.0);
-            }
-            if ui.button("Stop").clicked() {
-                self.stop_project();
-            }
-            if busy {
-                ui.spinner();
-                ui.label("Loading the sounds...");
-            } else {
-                let shown = if playing { pos } else { 0.0 };
-                ui.label(
-                    RichText::new(bar_beat(shown, project.time_sig))
-                        .monospace()
-                        .size(18.0),
-                );
-            }
-            ui.separator();
-            ui.label("Pattern");
-            for (i, p) in project.patterns.iter().enumerate() {
-                let name = if p.name.is_empty() {
-                    format!("{}", i + 1)
-                } else {
-                    p.name.clone()
-                };
-                ui.selectable_value(&mut self.project.pattern, i, name);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.project.page, Page::Rack, "Channel rack");
-            ui.selectable_value(&mut self.project.page, Page::Roll, "Piano roll");
-            ui.selectable_value(&mut self.project.page, Page::Playlist, "Playlist");
-            ui.selectable_value(&mut self.project.page, Page::Mixer, "Mixer");
-            ui.separator();
-            if self.project.page == Page::Roll {
-                ui.label("Snap");
-                let snap = &mut self.project.roll.snap;
-                egui::ComboBox::from_id_salt("snap")
-                    .selected_text(snap_name(*snap))
-                    .show_ui(ui, |ui| {
-                        for v in [96.0, 48.0, 24.0, 12.0, 1.0] {
-                            ui.selectable_value(snap, v, snap_name(v));
-                        }
-                    });
-                ui.label("Zoom");
-                ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false));
-                ui.separator();
-            }
-            if ui
-                .add_enabled(self.project.dirty, egui::Button::new("Save"))
-                .on_hover_text("Ctrl+S")
-                .clicked()
-            {
-                self.save_project();
-            }
-            if self.project.dirty {
-                ui.label(RichText::new("unsaved changes").weak());
-            }
-            let hint = match self.project.page {
-                Page::Rack => "Pick a channel to play it with the keys below.",
-                Page::Roll => "Click or drag to place notes, drag to move, right click deletes.",
-                Page::Playlist => {
-                    "Double click places the chosen pattern; drag moves, drag an edge resizes, right click deletes, click the ruler to set the start."
-                }
-                Page::Mixer => "Faders, pan, mute and solo; click an effect to switch it on or off.",
-            };
-            ui.label(RichText::new(hint).weak().size(11.0));
-        });
-        ui.separator();
-        let head = (playing && self.project.looping).then_some(pos);
-        match self.project.page {
-            Page::Rack => self.rack(ui, head),
-            Page::Roll => self.roll(ui, head),
-            Page::Playlist => {
-                let song_head = (playing && !self.project.looping).then_some(pos);
-                self.playlist(ui, song_head);
-            }
-            Page::Mixer => {
-                let edits = mixer::draw(ui, &project);
-                drop(project);
-                self.project.edit_mixer(&edits);
-            }
         }
     }
 }
@@ -585,12 +486,5 @@ mod tests {
         s.redo();
         assert!(!s.dirty);
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn positions_read_as_bars_and_beats() {
-        assert_eq!(bar_beat(0.0, (4, 4)), "1:1:000");
-        assert_eq!(bar_beat(96.0 * 5.0 + 7.0, (4, 4)), "2:2:007");
-        assert_eq!(bar_beat(96.0 * 3.0, (3, 4)), "2:1:000");
     }
 }

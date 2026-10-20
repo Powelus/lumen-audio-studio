@@ -3,7 +3,7 @@
 //! edited with the mouse. Drawing only reports what the user asked for ([`Edit`]);
 //! [`apply`] changes the project, so editing is testable without a window.
 
-use crate::widgets::{note_name, ACCENT};
+use crate::widgets::note_name;
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui};
 use las_engine::timeline::{pattern_length, ticks_per_bar};
 use las_project::create::uid;
@@ -152,6 +152,7 @@ pub fn draw(
     playhead: Option<f64>,
 ) -> Vec<Edit> {
     let mut edits = Vec::new();
+    let pl = crate::theme::pal();
     let Some(ch) = project.channels.get(channel) else {
         return edits;
     };
@@ -197,16 +198,16 @@ pub fn draw(
         for r in first.max(0)..last {
             let k = KEYS - 1 - r;
             let black = matches!(k % 12, 1 | 3 | 6 | 8 | 10);
-            let shade = if black { 22 } else { 30 };
+            let shade = if black { pl.roll_row_b } else { pl.roll_row_a };
             let row = Rect::from_min_size(
                 egui::pos2(grid_left, y_of(k)),
                 egui::vec2(width - GUTTER, state.row),
             );
-            painter.rect_filled(row, 0.0, Color32::from_gray(shade));
+            painter.rect_filled(row, 0.0, shade);
             if k % 12 == 0 {
                 painter.line_segment(
                     [row.left_bottom(), row.right_bottom()],
-                    Stroke::new(1.0, Color32::from_gray(60)),
+                    Stroke::new(1.0, pl.grid_bar),
                 );
             }
         }
@@ -219,18 +220,18 @@ pub fn draw(
             let on_beat = (t / beat).fract().abs() < 1e-9;
             if on_bar || on_beat || state.zoom > 0.9 {
                 let g = if on_bar {
-                    80
+                    pl.grid_bar
                 } else if on_beat {
-                    52
+                    crate::theme::mix(pl.grid, pl.grid_bar, 0.5)
                 } else {
-                    38
+                    pl.grid
                 };
                 painter.line_segment(
                     [
                         egui::pos2(x_of(t), origin.y + viewport.min.y),
                         egui::pos2(x_of(t), origin.y + viewport.max.y),
                     ],
-                    Stroke::new(1.0, Color32::from_gray(g)),
+                    Stroke::new(1.0, g),
                 );
             }
             t += step;
@@ -241,7 +242,7 @@ pub fn draw(
                 egui::pos2(x_of(ticks), origin.y + viewport.min.y),
                 egui::pos2(x_of(ticks), origin.y + viewport.max.y),
             ],
-            Stroke::new(2.0, ACCENT.gamma_multiply(0.7)),
+            Stroke::new(2.0, crate::theme::accent().gamma_multiply(0.7)),
         );
         // notes
         for n in notes {
@@ -256,7 +257,7 @@ pub fn draw(
                 continue;
             }
             let a = (0.5 + 0.5 * n.vel.clamp(0.0, 1.0)) as f32;
-            painter.rect_filled(r, 2.0, ACCENT.gamma_multiply(a));
+            painter.rect_filled(r, 2.0, crate::theme::accent().gamma_multiply(a));
             painter.rect_stroke(
                 r,
                 2.0,
@@ -279,15 +280,7 @@ pub fn draw(
             let k = KEYS - 1 - r;
             let black = matches!(k % 12, 1 | 3 | 6 | 8 | 10);
             let cell = Rect::from_min_size(egui::pos2(kx, y_of(k)), egui::vec2(GUTTER, state.row));
-            painter.rect_filled(
-                cell,
-                0.0,
-                if black {
-                    Color32::from_gray(14)
-                } else {
-                    Color32::from_gray(205)
-                },
-            );
+            painter.rect_filled(cell, 0.0, if black { pl.key_black } else { pl.key_white });
             if k % 12 == 0 || state.row >= 14.0 && !black {
                 painter.text(
                     cell.right_center() - egui::vec2(4.0, 0.0),
@@ -295,9 +288,9 @@ pub fn draw(
                     note_name(k as u8),
                     egui::FontId::proportional(9.5),
                     if black {
-                        Color32::from_gray(160)
+                        crate::theme::mix(pl.key_white, pl.key_black, 0.45)
                     } else {
-                        Color32::from_gray(60)
+                        crate::theme::mix(pl.key_black, pl.key_white, 0.35)
                     },
                 );
             }

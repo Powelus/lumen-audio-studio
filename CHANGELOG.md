@@ -2,6 +2,18 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.21
+
+The window now looks and works like the web version.
+
+- **Themes:** all eight of the web version's themes (Lumen Dark, Orange Steel, Daylight, Synthwave, Forest, Ocean, Graphite, High Contrast), derived from the same seed colours with the same formulas, plus "Match the system". Choose one in the menu; it is remembered. Every widget follows it.
+- **Top bar:** logo and menu, PAT and SONG, play and stop (Space also plays and stops), the tempo display (drag it, or tap a tempo), the BAR:BEAT:STEP display, the pattern chooser with a button for a new pattern, toggles for the windows, Save, Export, and the master knob with its meters.
+- **Browser** on the left with the web version's four tabs: Samples (the factory kit in folders, with search, and click to audition a sample through the output; the project's own samples), Plugins (instruments and effects), Presets, and Project (open a file, its details).
+- **Windows** that float over the workspace like the web version's: Playlist, Channel Rack, Piano Roll, Mixer and Synth, each draggable, resizable and closable. `--open roll,mixer,synth,export` and `--close playlist,rack,browser` choose which are open at the start.
+- **Channel rack as a step sequencer:** a mute light, level and pan knobs, the channel name, and a cell for every step; click a cell to place or remove a step and drag to paint. A double click on a name opens its piano roll. Swing sits at the bottom. All of it joins undo, redo and save.
+- **Export window:** WAV at 16, 24 or 32 bit or FLAC at 16 or 24 bit, normalised if wanted, the song or the chosen pattern, rendered in the background.
+- **Status bar** with the project name, the keyboard octave, the audio device and DSP load, voices and dropouts.
+
 ## 0.2.0-alpha.20 - 2026-10-20
 
 Editing while the song plays.

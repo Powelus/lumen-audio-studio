@@ -4,7 +4,7 @@
 
 use crate::app::{index, App, FxItem};
 use crate::audio::Command;
-use crate::widgets::{knob_mapped, ACCENT};
+use crate::widgets::knob_mapped;
 use eframe::egui::{self, pos2, vec2, Color32, Rect, RichText, Sense, Stroke, Ui};
 use las_dsp::fx::native::{eq_response_db, EqParams};
 use las_dsp::fx::registry::{
@@ -133,24 +133,28 @@ fn param(ui: &mut Ui, def: &ParamDef, state: &mut Value, id: &str) -> bool {
 fn eq_curve(ui: &mut Ui, state: &Value, sr: f64) {
     let (rect, _) = ui.allocate_exact_size(vec2(560.0, 120.0), Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(18, 20, 25));
+    painter.rect_filled(rect, 4.0, crate::theme::pal().well_deep);
     let Ok(p) = serde_json::from_value::<EqParams>(state.clone()) else {
         return;
     };
     let range = 18.0;
     let y_of = |db: f64| rect.center().y - (db / range) as f32 * rect.height() * 0.5;
     for db in [-12.0, -6.0, 0.0, 6.0, 12.0] {
-        let c = if db == 0.0 { 70 } else { 38 };
+        let c = if db == 0.0 {
+            crate::theme::pal().grid_bar
+        } else {
+            crate::theme::pal().grid
+        };
         painter.line_segment(
             [pos2(rect.left(), y_of(db)), pos2(rect.right(), y_of(db))],
-            Stroke::new(1.0, Color32::from_gray(c)),
+            Stroke::new(1.0, c),
         );
     }
     for f in [100.0f64, 1000.0, 10000.0] {
         let x = rect.left() + (f / 20.0).ln() as f32 / (1000.0f64).ln() as f32 * rect.width();
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
-            Stroke::new(1.0, Color32::from_gray(38)),
+            Stroke::new(1.0, crate::theme::pal().grid),
         );
     }
     let n = 200;
@@ -162,7 +166,10 @@ fn eq_curve(ui: &mut Ui, state: &Value, sr: f64) {
             pos2(rect.left() + t as f32 * rect.width(), y_of(db))
         })
         .collect();
-    painter.add(egui::Shape::line(points, Stroke::new(2.0, ACCENT)));
+    painter.add(egui::Shape::line(
+        points,
+        Stroke::new(2.0, crate::theme::accent()),
+    ));
 }
 
 /// A row of values edited by dragging over bars. Returns true when changed.
@@ -170,7 +177,7 @@ fn lane(ui: &mut Ui, values: &mut [f64], lo: f64, hi: f64, count: usize, colour:
     let size = vec2(count as f32 * 30.0, 64.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 3.0, Color32::from_rgb(18, 20, 25));
+    painter.rect_filled(rect, 3.0, crate::theme::pal().well_deep);
     let cell = rect.width() / count as f32;
     let mut changed = false;
     if resp.dragged() || resp.clicked() {
@@ -243,7 +250,7 @@ fn shaper_curve(ui: &mut Ui, state: &mut Value) -> bool {
     });
     let (rect, _) = ui.allocate_exact_size(vec2(280.0, 90.0), Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 3.0, Color32::from_rgb(18, 20, 25));
+    painter.rect_filled(rect, 3.0, crate::theme::pal().well_deep);
     if let Some(pts) = state["points"].as_array() {
         let line: Vec<_> = pts
             .iter()
@@ -255,7 +262,10 @@ fn shaper_curve(ui: &mut Ui, state: &mut Value) -> bool {
                 )
             })
             .collect();
-        painter.add(egui::Shape::line(line, Stroke::new(2.0, ACCENT)));
+        painter.add(egui::Shape::line(
+            line,
+            Stroke::new(2.0, crate::theme::accent()),
+        ));
     }
     changed
 }
@@ -264,7 +274,15 @@ fn stepfx_lanes(ui: &mut Ui, state: &mut Value) -> bool {
     let length = state["length"].as_f64().unwrap_or(16.0).clamp(1.0, 16.0) as usize;
     let mut changed = false;
     let lanes = [
-        ("cutoff", "cutoffOn", "Cutoff", 0.0, 1.0, 1.0, ACCENT),
+        (
+            "cutoff",
+            "cutoffOn",
+            "Cutoff",
+            0.0,
+            1.0,
+            1.0,
+            crate::theme::accent(),
+        ),
         (
             "level",
             "levelOn",
@@ -385,7 +403,12 @@ impl App {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 mix_changed |= ui.checkbox(&mut on, "").changed();
-                ui.label(RichText::new(&desc.name).strong().size(16.0).color(ACCENT));
+                ui.label(
+                    RichText::new(&desc.name)
+                        .strong()
+                        .size(16.0)
+                        .color(crate::theme::accent()),
+                );
                 ui.label(RichText::new(&desc.category).weak());
                 ui.menu_button("Presets", |ui| {
                     if desc.presets.is_empty() {
@@ -456,7 +479,7 @@ impl App {
                 for d in list {
                     if d.category != shown {
                         shown = &d.category;
-                        ui.label(RichText::new(shown).strong().color(ACCENT));
+                        ui.label(RichText::new(shown).strong().color(crate::theme::accent()));
                     }
                     if ui.button(&d.name).on_hover_text(&d.description).clicked() {
                         edits.push(Edit::Add(&d.id));

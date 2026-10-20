@@ -7,10 +7,6 @@ use eframe::egui::{
 use std::f32::consts::PI;
 use std::ops::RangeInclusive;
 
-pub const ACCENT: Color32 = Color32::from_rgb(255, 138, 31);
-const TRACK: Color32 = Color32::from_rgb(58, 62, 70);
-const BODY: Color32 = Color32::from_rgb(34, 37, 43);
-
 fn to_unit(v: f64, r: &RangeInclusive<f64>, log: bool) -> f64 {
     let (lo, hi) = (*r.start(), *r.end());
     let t = if log {
@@ -80,7 +76,7 @@ pub fn knob_mapped(
     let painter = ui.painter_at(rect);
     let centre = pos2(rect.center().x, rect.top() + 24.0);
     let radius = 18.0;
-    painter.circle_filled(centre, radius + 3.0, BODY);
+    painter.circle_filled(centre, radius + 3.0, crate::theme::pal().well_deep);
     let (a0, sweep) = (PI * 0.75, PI * 1.5);
     let arc = |t0: f32, t1: f32, r: f32| -> Vec<Pos2> {
         let steps = 28;
@@ -91,13 +87,16 @@ pub fn knob_mapped(
             })
             .collect()
     };
-    painter.add(Shape::line(arc(0.0, 1.0, radius), Stroke::new(3.0, TRACK)));
+    painter.add(Shape::line(
+        arc(0.0, 1.0, radius),
+        Stroke::new(3.0, crate::theme::pal().raised2),
+    ));
     let t = to_norm(*value).clamp(0.0, 1.0) as f32;
     if t > 0.002 {
         let lit = if resp.hovered() || resp.dragged() {
             Color32::from_rgb(255, 170, 80)
         } else {
-            ACCENT
+            crate::theme::accent()
         };
         painter.add(Shape::line(arc(0.0, t, radius), Stroke::new(3.0, lit)));
     }
@@ -117,14 +116,14 @@ pub fn knob_mapped(
         Align2::CENTER_CENTER,
         show(*value),
         FontId::proportional(11.0),
-        Color32::from_gray(210),
+        crate::theme::pal().text2,
     );
     painter.text(
         pos2(rect.center().x, rect.top() + 64.0),
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(11.0),
-        Color32::from_gray(140),
+        crate::theme::pal().muted,
     );
     resp.on_hover_text(format!(
         "{label}: {}\nDrag, Shift for fine, double-click to reset",
@@ -137,7 +136,7 @@ pub fn knob_mapped(
 pub fn meter(ui: &mut Ui, peak: f32, size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 2.0, BODY);
+    p.rect_filled(rect, 2.0, crate::theme::pal().well_deep);
     // dB scale: -60 at the bottom, +3 at the top
     let db = 20.0 * peak.max(1e-6).log10();
     let t = ((db + 60.0) / 63.0).clamp(0.0, 1.0);
@@ -207,9 +206,9 @@ pub fn piano(ui: &mut Ui, first: u8, last: u8, held: &[u8]) -> Option<u8> {
     for (i, k) in whites.iter().enumerate() {
         let r = white_rect(i).shrink2(vec2(0.5, 0.0));
         let fill = if held.contains(k) {
-            ACCENT
+            crate::theme::accent()
         } else {
-            Color32::from_gray(232)
+            crate::theme::pal().key_white
         };
         painter.rect_filled(r, 2.0, fill);
         if k % 12 == 0 {
@@ -218,15 +217,19 @@ pub fn piano(ui: &mut Ui, first: u8, last: u8, held: &[u8]) -> Option<u8> {
                 Align2::CENTER_CENTER,
                 format!("C{}", k / 12 - 1),
                 FontId::proportional(10.0),
-                Color32::from_gray(90),
+                crate::theme::mix(
+                    crate::theme::pal().key_black,
+                    crate::theme::pal().key_white,
+                    0.4,
+                ),
             );
         }
     }
     for (k, r) in &blacks {
         let fill = if held.contains(k) {
-            ACCENT
+            crate::theme::accent()
         } else {
-            Color32::from_gray(28)
+            crate::theme::pal().key_black
         };
         painter.rect_filled(*r, 2.0, fill);
     }

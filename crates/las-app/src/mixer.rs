@@ -4,8 +4,7 @@
 //! [`apply`] changes the project.
 
 use crate::rack::channel_colour_of;
-use crate::widgets::ACCENT;
-use eframe::egui::{self, Color32, RichText, Ui};
+use eframe::egui::{self, RichText, Ui};
 use las_project::Project;
 
 /// A change the user asked for.
@@ -113,7 +112,7 @@ fn strip(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
     let t = &project.mixer[i];
     let col = channel_colour_of(&t.color);
     egui::Frame::new()
-        .fill(Color32::from_gray(30))
+        .fill(crate::theme::pal().panel)
         .corner_radius(4.0)
         .inner_margin(6.0)
         .show(ui, |ui| {
@@ -209,7 +208,11 @@ fn strip(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                     }
                 }
                 if is_master(project, i) {
-                    ui.label(RichText::new("master").color(ACCENT).size(10.5));
+                    ui.label(
+                        RichText::new("master")
+                            .color(crate::theme::accent())
+                            .size(10.5),
+                    );
                 }
             });
         });
