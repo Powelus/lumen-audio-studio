@@ -2,6 +2,13 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.43
+
+Fit the song in the playlist.
+
+- The playlist's "Fit" button zooms so that the whole song (and a bar after it) fits the window.
+- The playlist's hint now says what a right click does (markers, loops and clip options); it still said "right click deletes".
+
 ## 0.2.0-alpha.42
 
 Keyboard shortcuts.

@@ -543,8 +543,16 @@ impl App {
                 });
             ui.label("Zoom");
             ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false));
+            if ui
+                .button("Fit")
+                .on_hover_text("Zoom so that the whole song fits the window")
+                .clicked()
+            {
+                let w = ui.clip_rect().width().max(400.0);
+                self.project.playlist.zoom = playlist::fit_zoom(&project, w);
+            }
             ui.label(
-                RichText::new("Double click places the pattern, drag moves, right click deletes, click the ruler to set the start. Drop a WAV file here for an audio clip.")
+                RichText::new("Double click places the pattern, drag moves, right click for markers, loops and clip options, click the ruler to set the start. Drop a WAV file here for an audio clip.")
                     .weak()
                     .size(11.0),
             );

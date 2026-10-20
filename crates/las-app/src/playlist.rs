@@ -298,6 +298,14 @@ pub fn new_pattern_clip(p: &Project, index: usize, start: f64, track: usize) -> 
     })
 }
 
+/// The zoom (points per tick) that shows the whole song, and a bar after it, in a view
+/// `width` points wide; held to the zoom slider's range.
+pub fn fit_zoom(p: &Project, width: f32) -> f32 {
+    let bar = ticks_per_bar(p.time_sig);
+    let ticks = song_length(p).max(bar * 4.0) + bar;
+    ((width - HEAD - 24.0).max(100.0) / ticks as f32).clamp(0.03, 0.6)
+}
+
 /// The colours a clip's menu offers, after FL's playlist palette.
 pub const CLIP_COLOURS: [&str; 12] = [
     "#e05a47", "#e8953a", "#e3c94a", "#8ccf4d", "#3fbf7f", "#3fb7c9", "#4a8fe0", "#6f6fe8",
@@ -1349,6 +1357,16 @@ mod tests {
             a.notes.values().map(Vec::len).sum::<usize>(),
             b.notes.values().map(Vec::len).sum::<usize>()
         );
+    }
+
+    #[test]
+    fn fit_zoom_shows_the_whole_song() {
+        let p = project();
+        let z = fit_zoom(&p, 1200.0);
+        assert!((0.03..=0.6).contains(&z));
+        let shown = f64::from((1200.0 - HEAD) / z);
+        assert!(shown >= song_length(&p) || z == 0.03);
+        assert!(fit_zoom(&p, 600.0) <= z);
     }
 
     #[test]
