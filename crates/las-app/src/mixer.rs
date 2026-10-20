@@ -54,6 +54,8 @@ pub enum MixEdit {
         insert: usize,
         slot: usize,
     },
+    /// Make an automation clip for a parameter of the insert.
+    Automate(crate::auto::AutoRequest),
     /// Open the window of an effect (not a change to the project).
     OpenEffect {
         insert: usize,
@@ -126,7 +128,7 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
                 project.mixer[i].solo = *on;
             }
         }
-        MixEdit::OpenEffect { .. } => {}
+        MixEdit::OpenEffect { .. } | MixEdit::Automate(_) => {}
         MixEdit::Output { insert, target } => {
             if *insert > 0
                 && *insert < project.mixer.len()
@@ -535,8 +537,18 @@ fn strip(
                     state.selected = i;
                 }
                 let mut pan = t.pan;
-                let (ch, start) =
-                    crate::steps::mini_knob(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.text2);
+                let (ch, start, pr) =
+                    crate::steps::mini_knob_resp(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.text2);
+                pr.context_menu(|ui| {
+                    if ui.button("Create automation clip").clicked() {
+                        edits.push(MixEdit::Automate(crate::auto::AutoRequest {
+                            target: crate::auto::mixer_target(i, "pan"),
+                            name: format!("{} pan", insert_name(project, i)),
+                            start: (t.pan + 1.0) / 2.0,
+                        }));
+                        ui.close();
+                    }
+                });
                 if start {
                     edits.push(MixEdit::Begin);
                 }
@@ -587,6 +599,25 @@ fn strip(
                         value: vol,
                     });
                 }
+                r.context_menu(|ui| {
+                    if ui.button("Create automation clip").clicked() {
+                        // the master's volume is the project's own, not its strip's
+                        let (target, start) = if i == 0 {
+                            (
+                                crate::auto::master_target("volume"),
+                                project.master_volume / 1.25,
+                            )
+                        } else {
+                            (crate::auto::mixer_target(i, "volume"), t.volume / 1.25)
+                        };
+                        edits.push(MixEdit::Automate(crate::auto::AutoRequest {
+                            target,
+                            name: format!("{} volume", insert_name(project, i)),
+                            start,
+                        }));
+                        ui.close();
+                    }
+                });
                 r.on_hover_text(format!("{} ({:.1} dB)", pct(vol), db(vol)));
                 let label = if t.volume <= 0.0 {
                     "-\u{221e}".to_string()

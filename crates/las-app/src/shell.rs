@@ -897,6 +897,15 @@ impl App {
                 self.project.open_effect = None;
             }
         }
+        if let Some(id) = self.project.open_auto.clone() {
+            let mut keep = true;
+            win("Automation", a.min + vec2(220.0, 140.0), vec2(620.0, 380.0))
+                .open(&mut keep)
+                .show(ctx, |ui| self.auto_window(ui, &id));
+            if !keep {
+                self.project.open_auto = None;
+            }
+        }
         if open.export {
             egui::Window::new("Export audio")
                 .open(&mut open.export)
@@ -977,6 +986,83 @@ impl App {
         }
         if !out.chans.is_empty() {
             self.project.edit_chans(&out.chans);
+        }
+    }
+
+    /// The editor of an automation clip: its name, length, curve, and a way to delete it.
+    fn auto_window(&mut self, ui: &mut Ui, id: &str) {
+        let Some(l) = &self.project.loaded else {
+            return;
+        };
+        let project = l.project.clone();
+        let Some(clip) = project.automation.iter().find(|c| c.id == id) else {
+            ui.label("This automation clip no longer exists.");
+            return;
+        };
+        let mut name = clip.name.clone();
+        let mut bars = (clip.length / (f64::from(PPQ) * 4.0)).round().max(1.0);
+        let mut delete = false;
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::TextEdit::singleline(&mut name).desired_width(180.0))
+                .changed()
+            {
+                let (id, n) = (clip.id.clone(), name.clone());
+                self.project.modify_coalesced("auto-name", move |p| {
+                    if let Some(c) = p.automation.iter_mut().find(|c| c.id == id) {
+                        c.name = n;
+                    }
+                });
+            }
+            ui.label(
+                RichText::new(crate::auto::describe_target(&project, &clip.target))
+                    .weak()
+                    .size(11.5),
+            );
+            ui.label("Bars");
+            if ui
+                .add(egui::DragValue::new(&mut bars).range(1.0..=64.0).speed(0.1))
+                .changed()
+            {
+                let (id, len) = (clip.id.clone(), bars * f64::from(PPQ) * 4.0);
+                self.project.modify_coalesced("auto-len", move |p| {
+                    if let Some(c) = p.automation.iter_mut().find(|c| c.id == id) {
+                        let old = c.length;
+                        c.length = len;
+                        for x in &mut c.points {
+                            x.t = (x.t / old * len).min(len);
+                        }
+                    }
+                    for c in &mut p.playlist.clips {
+                        if c.kind == las_project::ClipKind::Automation && c.ref_id == id {
+                            c.length = len;
+                        }
+                    }
+                });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Delete clip").clicked() {
+                    delete = true;
+                }
+            });
+        });
+        ui.label(
+            RichText::new("Click to add a point, drag to move it, right click to remove it.")
+                .weak()
+                .size(11.0),
+        );
+        let edits = crate::auto::draw(ui, clip, &mut self.project.auto_state);
+        let cid = clip.id.clone();
+        drop(project);
+        self.project.edit_auto(&edits);
+        if delete {
+            self.project.modify(true, |p| {
+                p.automation.retain(|c| c.id != cid);
+                p.playlist
+                    .clips
+                    .retain(|c| !(c.kind == las_project::ClipKind::Automation && c.ref_id == cid));
+            });
+            self.project.open_auto = None;
         }
     }
 

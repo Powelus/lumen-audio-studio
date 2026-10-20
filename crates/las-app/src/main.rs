@@ -6,6 +6,7 @@
 
 mod app;
 mod audio;
+mod auto;
 mod fxui;
 mod inst;
 mod menus;

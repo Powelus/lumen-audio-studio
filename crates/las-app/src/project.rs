@@ -5,6 +5,7 @@
 
 use crate::app::App;
 use crate::audio::Command;
+use crate::auto::{self, AutoEdit, AutoRequest, AutoState};
 use crate::mixer::{self, MixEdit};
 use crate::playlist::{self, PlEdit, PlaylistState};
 use crate::roll::{self, Edit, RollState};
@@ -59,6 +60,9 @@ pub struct ProjectState {
     pub roll: RollState,
     pub playlist: PlaylistState,
     pub mixer_state: mixer::MixerState,
+    /// The automation clip whose editor is open, and its state.
+    pub open_auto: Option<String>,
+    pub auto_state: AutoState,
     /// Where "Play song" starts, in ticks.
     pub start_tick: f64,
     /// Earlier and later states of the project, for undo and redo.
@@ -113,6 +117,7 @@ impl ProjectState {
         self.stale = false;
         self.last_edit = None;
         self.open_effect = None;
+        self.open_auto = None;
     }
 
     /// Whether the project has a file to be saved to.
@@ -164,6 +169,7 @@ impl ProjectState {
                     self.redo.clear();
                 }
                 PlEdit::Seek(t) => self.start_tick = *t,
+                PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
                 _ => {
                     playlist::apply(Arc::make_mut(&mut l.project), e);
                     self.dirty = true;
@@ -173,11 +179,40 @@ impl ProjectState {
         }
     }
 
-    /// Carry out the mixer edits of one frame.
-    pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
+    /// Make an automation clip for a request, at the start marker, and open its editor.
+    pub fn create_automation(&mut self, req: &AutoRequest) {
+        let at = self.start_tick;
+        let mut id = String::new();
+        self.modify(true, |p| id = auto::create_clip(p, req, at));
+        self.open_auto = Some(id);
+    }
+
+    /// Carry out the edits of an automation clip's curve.
+    pub fn edit_auto(&mut self, edits: &[AutoEdit]) {
         let Some(l) = &mut self.loaded else { return };
         for e in edits {
-            if let MixEdit::OpenEffect { insert, slot } = e {
+            if *e == AutoEdit::Begin {
+                self.undo.push(l.project.clone());
+                if self.undo.len() > 200 {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            } else {
+                auto::apply(Arc::make_mut(&mut l.project), e);
+                self.dirty = true;
+                self.stale = true;
+            }
+        }
+    }
+
+    /// Carry out the mixer edits of one frame.
+    pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
+        let mut pending: Vec<AutoRequest> = Vec::new();
+        let Some(l) = &mut self.loaded else { return };
+        for e in edits {
+            if let MixEdit::Automate(req) = e {
+                pending.push(req.clone());
+            } else if let MixEdit::OpenEffect { insert, slot } = e {
                 self.open_effect = Some((*insert, *slot));
             } else if *e == MixEdit::Begin {
                 self.undo.push(l.project.clone());
@@ -190,6 +225,9 @@ impl ProjectState {
                 self.dirty = true;
                 self.stale = true;
             }
+        }
+        for r in pending {
+            self.create_automation(&r);
         }
     }
 
@@ -210,9 +248,12 @@ impl ProjectState {
 
     /// Carry out channel setting edits (level, pan, mute, swing).
     pub fn edit_chans(&mut self, edits: &[ChanEdit]) {
+        let mut pending: Vec<AutoRequest> = Vec::new();
         let Some(l) = &mut self.loaded else { return };
         for e in edits {
-            if *e == ChanEdit::Begin {
+            if let ChanEdit::Automate(req) = e {
+                pending.push(req.clone());
+            } else if *e == ChanEdit::Begin {
                 self.undo.push(l.project.clone());
                 if self.undo.len() > 200 {
                     self.undo.remove(0);
@@ -223,6 +264,9 @@ impl ProjectState {
                 self.dirty = true;
                 self.stale = true;
             }
+        }
+        for r in pending {
+            self.create_automation(&r);
         }
     }
 

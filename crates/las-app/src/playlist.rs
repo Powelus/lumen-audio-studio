@@ -42,6 +42,8 @@ pub enum PlEdit {
         id: String,
         at: f64,
     },
+    /// Open the editor of an automation clip (by the clip's own id).
+    OpenAuto(String),
     /// Start playing from here.
     Seek(f64),
 }
@@ -174,7 +176,7 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
     let rows = track_count(project);
     let clips = &mut project.playlist.clips;
     match edit {
-        PlEdit::Begin | PlEdit::Seek(_) => {}
+        PlEdit::Begin | PlEdit::Seek(_) | PlEdit::OpenAuto(_) => {}
         PlEdit::Add(c) => clips.push((**c).clone()),
         PlEdit::Move { id, start, track } => {
             if let Some(c) = clips.iter_mut().find(|c| &c.id == id) {
@@ -298,6 +300,25 @@ pub fn draw(
                     Stroke::new(1.0, Color32::from_black_alpha(150)),
                     egui::StrokeKind::Inside,
                 );
+                if c.kind == ClipKind::Automation {
+                    if let Some(a) = project.automation.iter().find(|a| a.id == c.ref_id) {
+                        let len = a.length.max(1.0);
+                        let line: Vec<egui::Pos2> = a
+                            .points
+                            .iter()
+                            .map(|q| {
+                                egui::pos2(
+                                    r.left() + (q.t / len) as f32 * r.width(),
+                                    r.bottom() - 4.0 - q.v as f32 * (r.height() - 18.0),
+                                )
+                            })
+                            .collect();
+                        painter.with_clip_rect(r).add(egui::Shape::line(
+                            line,
+                            Stroke::new(1.5, Color32::from_black_alpha(190)),
+                        ));
+                    }
+                }
                 painter.with_clip_rect(r).text(
                     r.left_top() + egui::vec2(5.0, 3.0),
                     egui::Align2::LEFT_TOP,
@@ -459,7 +480,12 @@ pub fn draw(
                 if let Some(p) = resp.interact_pointer_pos() {
                     if p.x > left && !in_ruler(p) {
                         let (t, tr) = (tick_at(p.x), track_at(p.y));
-                        if hit(project, t, tr, edge).is_none() {
+                        if let Some((i, _)) = hit(project, t, tr, edge) {
+                            let c = &project.playlist.clips[i];
+                            if c.kind == ClipKind::Automation {
+                                edits.push(PlEdit::OpenAuto(c.ref_id.clone()));
+                            }
+                        } else {
                             if let Some(c) =
                                 new_pattern_clip(project, pattern, snapped(t, bar).max(0.0), tr)
                             {

@@ -31,6 +31,8 @@ pub enum ChanEdit {
         channel: usize,
         on: bool,
     },
+    /// Make an automation clip for a parameter of a channel.
+    Automate(crate::auto::AutoRequest),
 }
 
 /// Carry out a channel edit.
@@ -52,6 +54,7 @@ pub fn apply(project: &mut Project, e: &ChanEdit) {
                 c.mute = *on;
             }
         }
+        ChanEdit::Automate(_) => {}
     }
 }
 
@@ -96,6 +99,19 @@ pub fn mini_knob(
     tip: &str,
     colour: Color32,
 ) -> (bool, bool) {
+    let (changed, started, _) = mini_knob_resp(ui, v, range, default, tip, colour);
+    (changed, started)
+}
+
+/// As [`mini_knob`], also giving the knob's response (for a context menu).
+pub fn mini_knob_resp(
+    ui: &mut Ui,
+    v: &mut f64,
+    range: (f64, f64),
+    default: f64,
+    tip: &str,
+    colour: Color32,
+) -> (bool, bool, egui::Response) {
     let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click_and_drag());
     let mut changed = false;
     if resp.dragged() {
@@ -118,9 +134,8 @@ pub fn mini_knob(
     let ang = (-135.0 + 270.0 * t).to_radians();
     let tip_pt = pos2(c.x + ang.sin() * 7.5, c.y - ang.cos() * 7.5);
     painter.line_segment([c, tip_pt], Stroke::new(2.0, colour));
-    resp.clone()
-        .on_hover_text(format!("{tip}: {:.0}%", *v * 100.0));
-    (changed, resp.drag_started() || reset)
+    let resp = resp.on_hover_text(format!("{tip}: {:.0}%", *v * 100.0));
+    (changed, resp.drag_started() || reset, resp)
 }
 
 /// What the rack asks for in one frame.
@@ -172,7 +187,18 @@ pub fn draw(
                     }
                     // volume and pan
                     let mut vol = c.volume;
-                    let (ch, start) = mini_knob(ui, &mut vol, (0.0, 1.25), 1.0, "Level", p.text2);
+                    let (ch, start, kr) =
+                        mini_knob_resp(ui, &mut vol, (0.0, 1.25), 1.0, "Level", p.text2);
+                    kr.context_menu(|ui| {
+                        if ui.button("Create automation clip").clicked() {
+                            out.chans.push(ChanEdit::Automate(crate::auto::AutoRequest {
+                                target: crate::auto::channel_target(&c.id, "volume"),
+                                name: format!("{} level", c.name),
+                                start: c.volume / 1.25,
+                            }));
+                            ui.close();
+                        }
+                    });
                     if start {
                         out.chans.push(ChanEdit::Begin);
                     }
@@ -183,7 +209,18 @@ pub fn draw(
                         });
                     }
                     let mut pan = c.pan;
-                    let (ch, start) = mini_knob(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.accent);
+                    let (ch, start, kr) =
+                        mini_knob_resp(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.accent);
+                    kr.context_menu(|ui| {
+                        if ui.button("Create automation clip").clicked() {
+                            out.chans.push(ChanEdit::Automate(crate::auto::AutoRequest {
+                                target: crate::auto::channel_target(&c.id, "pan"),
+                                name: format!("{} pan", c.name),
+                                start: (c.pan + 1.0) / 2.0,
+                            }));
+                            ui.close();
+                        }
+                    });
                     if start {
                         out.chans.push(ChanEdit::Begin);
                     }

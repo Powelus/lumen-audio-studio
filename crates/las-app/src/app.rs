@@ -191,6 +191,22 @@ impl App {
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
         }
+        // `--automate` makes an automation clip for the first insert's volume and opens it
+        if std::env::args().any(|a| a == "--automate") {
+            app.project.create_automation(&crate::auto::AutoRequest {
+                target: crate::auto::mixer_target(1, "volume"),
+                name: "Kick volume".into(),
+                start: 0.8,
+            });
+            app.project.edit_auto(&[
+                crate::auto::AutoEdit::Begin,
+                crate::auto::AutoEdit::Add {
+                    clip: app.project.open_auto.clone().unwrap_or_default(),
+                    t: 384.0,
+                    v: 0.2,
+                },
+            ]);
+        }
         // `--channel 1` opens that channel's instrument window
         if let Some(n) = std::env::args()
             .skip_while(|a| a != "--channel")

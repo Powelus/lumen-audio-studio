@@ -10,6 +10,9 @@ More of an FL Studio workflow.
 - Metronome: a button next to Stop; a click on every beat (higher on the first of the bar) while the project plays.
 - Piano roll: a velocity lane under the grid; drag in it to set the velocity of the notes above.
 - Mixer routing: choose what an insert plays to, and add sends with their own level and a sidechain-only switch. Loops are refused.
+- Level meters on every mixer strip while the project plays.
+- Automation clips, as in FL Studio: right click a fader or a knob (an insert's volume or pan, a channel's level or pan, the master's volume), or pick a parameter from the "Automate" menu of an effect's window, and a clip is made at the start marker, flat at the parameter's value. It sits in the playlist with a preview of its curve; double click it to edit the curve in its own window (click to add a point, drag to move, right click to remove, set its length in bars, rename or delete it). The engine plays them as the web version does (a test checks a made clip really pulls a fader down in the render).
+- This release also carries everything of 0.2.0-alpha.24 above, which was not published on its own.
 
 ## 0.2.0-alpha.24
 
