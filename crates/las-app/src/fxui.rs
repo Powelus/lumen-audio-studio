@@ -130,7 +130,7 @@ fn param(ui: &mut Ui, def: &ParamDef, state: &mut Value, id: &str) -> bool {
 }
 
 /// The combined response of the equaliser's bands.
-fn eq_curve(ui: &mut Ui, state: &Value, sr: f64) {
+pub(crate) fn eq_curve(ui: &mut Ui, state: &Value, sr: f64) {
     let (rect, _) = ui.allocate_exact_size(vec2(560.0, 120.0), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, crate::theme::pal().well_deep);
@@ -208,7 +208,7 @@ fn number_list(v: &Value, n: usize, rest: f64) -> Vec<f64> {
         .collect()
 }
 
-fn gate_steps(ui: &mut Ui, state: &mut Value) -> bool {
+pub(crate) fn gate_steps(ui: &mut Ui, state: &mut Value) -> bool {
     let mut steps = number_list(&state["steps"], 16, 0.0);
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -227,7 +227,7 @@ fn gate_steps(ui: &mut Ui, state: &mut Value) -> bool {
     changed
 }
 
-fn shaper_curve(ui: &mut Ui, state: &mut Value) -> bool {
+pub(crate) fn shaper_curve(ui: &mut Ui, state: &mut Value) -> bool {
     let mut changed = false;
     let current = state["preset"].as_str().unwrap_or("").to_string();
     ui.horizontal(|ui| {
@@ -270,7 +270,7 @@ fn shaper_curve(ui: &mut Ui, state: &mut Value) -> bool {
     changed
 }
 
-fn stepfx_lanes(ui: &mut Ui, state: &mut Value) -> bool {
+pub(crate) fn stepfx_lanes(ui: &mut Ui, state: &mut Value) -> bool {
     let length = state["length"].as_f64().unwrap_or(16.0).clamp(1.0, 16.0) as usize;
     let mut changed = false;
     let lanes = [
@@ -325,7 +325,7 @@ fn chain_ok(id: &str) -> bool {
 }
 
 impl App {
-    fn rate(&self) -> f64 {
+    pub(crate) fn rate(&self) -> f64 {
         self.audio
             .as_ref()
             .map_or(FALLBACK_RATE, |a| f64::from(a.sample_rate))
@@ -344,6 +344,7 @@ impl App {
 
     /// Send the whole chain of an instrument to the audio thread.
     pub(crate) fn rebuild_chain(&mut self, inst: crate::audio::Instrument) {
+        self.synth_dirty = true;
         let slots: Vec<FxSlot> = self.fx[index(inst)]
             .iter()
             .filter_map(|item| self.build_slot(item))
@@ -376,6 +377,7 @@ impl App {
 
     /// The effect at `slot` changed: send its new parameters.
     fn push_fx(&mut self, inst: crate::audio::Instrument, slot: usize) {
+        self.synth_dirty = true;
         let item = &self.fx[index(inst)][slot];
         match parse_params(&item.id, &item.state, self.rate()) {
             Ok(p) => {
@@ -550,7 +552,7 @@ impl App {
 }
 
 /// The parameters, grouped as the catalogue says.
-fn params_ui(ui: &mut Ui, desc: &Descriptor, state: &mut Value, id: &str) -> bool {
+pub(crate) fn params_ui(ui: &mut Ui, desc: &Descriptor, state: &mut Value, id: &str) -> bool {
     let mut changed = false;
     let mut group: Option<&str> = None;
     let mut first = true;

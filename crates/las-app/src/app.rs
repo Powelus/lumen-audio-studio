@@ -105,6 +105,10 @@ pub struct App {
     /// The open project and its player.
     pub(crate) project: crate::project::ProjectState,
     pub(crate) shell: crate::shell::Shell,
+    /// The channel whose instrument the synth window edits, if any.
+    pub(crate) bound: Option<crate::inst::Bound>,
+    /// The synth panels changed something that belongs in the bound channel.
+    pub(crate) synth_dirty: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,6 +168,8 @@ impl App {
             error: None,
             project: Default::default(),
             shell: crate::shell::Shell::new(),
+            bound: None,
+            synth_dirty: false,
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
@@ -180,6 +186,21 @@ impl App {
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
+        }
+        // `--channel 1` opens that channel's instrument window
+        if let Some(n) = std::env::args()
+            .skip_while(|a| a != "--channel")
+            .nth(1)
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            app.open_channel(n);
+        }
+        // `--effect 1,0` opens the window of the effect in slot 0 of insert 1
+        if let Some(v) = std::env::args().skip_while(|a| a != "--effect").nth(1) {
+            let mut it = v.split(',').filter_map(|n| n.parse::<usize>().ok());
+            if let (Some(i), Some(s)) = (it.next(), it.next()) {
+                app.project.open_effect = Some((i, s));
+            }
         }
         // `--open roll,mixer,synth,export` opens windows at the start
         if let Some(list) = std::env::args().skip_while(|a| a != "--open").nth(1) {
@@ -273,7 +294,8 @@ impl App {
         }
     }
 
-    fn push_patch(&mut self, inst: Instrument) {
+    pub(crate) fn push_patch(&mut self, inst: Instrument) {
+        self.synth_dirty = true;
         if let Some(a) = &mut self.audio {
             self.error = a.set_patch(inst, &self.patches[index(inst)]).err();
         }
@@ -1458,6 +1480,7 @@ impl eframe::App for App {
                 .collect()
         });
         self.poll_project(ctx);
+        self.sync_bound();
         for path in dropped {
             if path.extension().is_some_and(|e| e == "las") {
                 self.open_project(&path.to_string_lossy());

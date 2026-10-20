@@ -2,6 +2,22 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.23
+
+Effect windows for the mixer.
+
+- Click an effect in a mixer strip to open its window: the switch, presets, mix, and every parameter, with the same curves and knobs as the instrument racks (the equaliser's curve, the gate's steps, the shaper and step effect editors). Edits go to the project through undo and are saved with it.
+- A "+" on each strip adds any effect to the first free slot; right click an effect to remove it; the dot beside it switches it on or off.
+- `lumen song.las --effect 1,0` opens the effect in slot 0 of insert 1 at the start.
+
+## 0.2.0-alpha.22
+
+Instrument windows for the project's channels.
+
+- Double click a channel's name in the rack to open its instrument. Facet, Mist and the wavetable family (Polaris, Vortex, Monolith, Zenith, TriOsc) open in the synth panels with the channel's own patch and effects loaded, and every edit, preset change and effect change is written back to the channel through undo and saved with the project; the next play uses it. Right click a name for its piano roll.
+- Instruments without a panel yet (Nebula, Sampler, LumaPad) open a basic editor that lists the channel's settings (numbers, switches and text) and writes them back the same way.
+- A knob drag is one undo step, not one per movement.
+
 ## 0.2.0-alpha.21
 
 The window now looks and works like the web version.

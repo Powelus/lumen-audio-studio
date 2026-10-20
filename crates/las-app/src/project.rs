@@ -65,6 +65,10 @@ pub struct ProjectState {
     redo: Vec<Arc<Project>>,
     /// Changed since it was opened or saved.
     pub dirty: bool,
+    /// The mixer effect whose window is open: (insert, slot).
+    pub open_effect: Option<(usize, usize)>,
+    /// The kind and time of the last coalesced edit.
+    last_edit: Option<(String, std::time::Instant)>,
     /// The player no longer matches the project and is rebuilt when things are quiet.
     stale: bool,
 }
@@ -88,6 +92,7 @@ impl ProjectState {
         self.redo.clear();
         self.dirty = false;
         self.stale = false;
+        self.last_edit = None;
         Ok(())
     }
 
@@ -148,7 +153,9 @@ impl ProjectState {
     pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
         let Some(l) = &mut self.loaded else { return };
         for e in edits {
-            if *e == MixEdit::Begin {
+            if let MixEdit::OpenEffect { insert, slot } = e {
+                self.open_effect = Some((*insert, *slot));
+            } else if *e == MixEdit::Begin {
                 self.undo.push(l.project.clone());
                 if self.undo.len() > 200 {
                     self.undo.remove(0);
@@ -193,6 +200,20 @@ impl ProjectState {
                 self.stale = true;
             }
         }
+    }
+
+    /// Change the project, starting an undo step only when this is a different kind of
+    /// change from the last one or more than a moment after it: a knob drag is one step.
+    pub fn modify_coalesced(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
+        let now = std::time::Instant::now();
+        let fresh = match &self.last_edit {
+            Some((k, t)) => {
+                k != key || now.duration_since(*t) > std::time::Duration::from_millis(1200)
+            }
+            None => true,
+        };
+        self.last_edit = Some((key.to_string(), now));
+        self.modify(fresh, f);
     }
 
     pub fn undo(&mut self) {

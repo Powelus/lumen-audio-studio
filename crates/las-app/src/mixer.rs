@@ -12,6 +12,21 @@ use las_project::Project;
 pub enum MixEdit {
     /// A gesture starts: remember the project so that it can be undone.
     Begin,
+    /// Put an effect in the first empty slot.
+    AddEffect {
+        insert: usize,
+        plugin: String,
+    },
+    /// Empty a slot.
+    RemoveEffect {
+        insert: usize,
+        slot: usize,
+    },
+    /// Open the window of an effect (not a change to the project).
+    OpenEffect {
+        insert: usize,
+        slot: usize,
+    },
     Volume {
         insert: usize,
         value: f64,
@@ -58,6 +73,36 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
         MixEdit::Solo { insert, on } => {
             if let Some(i) = strip(project, *insert) {
                 project.mixer[i].solo = *on;
+            }
+        }
+        MixEdit::OpenEffect { .. } => {}
+        MixEdit::AddEffect { insert, plugin } => {
+            let Some(d) = las_dsp::fx::registry::descriptor(plugin) else {
+                return;
+            };
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                if t.slots.len() < las_project::MIXER_SLOTS {
+                    t.slots.resize(las_project::MIXER_SLOTS, None);
+                }
+                if let Some(free) = t.slots.iter_mut().find(|s| s.is_none()) {
+                    *free = Some(las_project::EffectSlot {
+                        id: las_project::create::uid("fx"),
+                        plugin_id: plugin.clone(),
+                        enabled: true,
+                        mix: 1.0,
+                        state: d.default_state.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        MixEdit::RemoveEffect { insert, slot } => {
+            if let Some(s) = project
+                .mixer
+                .get_mut(*insert)
+                .and_then(|t| t.slots.get_mut(*slot))
+            {
+                *s = None;
             }
         }
         MixEdit::SlotOn { insert, slot, on } => {
@@ -193,19 +238,65 @@ fn strip(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                 ui.separator();
                 for (n, slot) in t.slots.iter().enumerate() {
                     let Some(s) = slot else { continue };
-                    let label = RichText::new(short(&s.plugin_id));
-                    let label = if s.enabled { label } else { label.weak() };
-                    let r = ui
-                        .selectable_label(s.enabled, label)
-                        .on_hover_text(&s.plugin_id);
-                    if r.clicked() {
-                        edits.push(MixEdit::Begin);
-                        edits.push(MixEdit::SlotOn {
-                            insert: i,
-                            slot: n,
-                            on: !s.enabled,
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        let led = ui
+                            .add(
+                                egui::Button::new(if s.enabled { "\u{25cf}" } else { "\u{25cb}" })
+                                    .small()
+                                    .frame(false),
+                            )
+                            .on_hover_text("Switch on or off");
+                        if led.clicked() {
+                            edits.push(MixEdit::Begin);
+                            edits.push(MixEdit::SlotOn {
+                                insert: i,
+                                slot: n,
+                                on: !s.enabled,
+                            });
+                        }
+                        let label = RichText::new(short(&s.plugin_id)).size(11.5);
+                        let label = if s.enabled { label } else { label.weak() };
+                        let b = ui
+                            .add(egui::Button::new(label).small())
+                            .on_hover_text(format!("{}\nRight click: remove", s.plugin_id));
+                        if b.clicked() {
+                            edits.push(MixEdit::OpenEffect { insert: i, slot: n });
+                        }
+                        b.context_menu(|ui| {
+                            if ui.button("Remove").clicked() {
+                                edits.push(MixEdit::Begin);
+                                edits.push(MixEdit::RemoveEffect { insert: i, slot: n });
+                                ui.close();
+                            }
                         });
-                    }
+                    });
+                }
+                if t.slots.iter().filter(|s| s.is_some()).count() < las_project::MIXER_SLOTS {
+                    ui.menu_button("+", |ui| {
+                        let mut shown = "";
+                        let mut list: Vec<_> =
+                            las_dsp::fx::registry::descriptors().iter().collect();
+                        list.sort_by(|a, b| a.category.cmp(&b.category));
+                        for d in list {
+                            if d.category != shown {
+                                shown = &d.category;
+                                ui.label(
+                                    RichText::new(shown).strong().color(crate::theme::accent()),
+                                );
+                            }
+                            if ui.button(&d.name).on_hover_text(&d.description).clicked() {
+                                edits.push(MixEdit::Begin);
+                                edits.push(MixEdit::AddEffect {
+                                    insert: i,
+                                    plugin: d.id.clone(),
+                                });
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Add an effect");
                 }
                 if is_master(project, i) {
                     ui.label(
@@ -310,6 +401,50 @@ mod tests {
             );
             assert!(!p.mixer[n].slots[slot].as_ref().unwrap().enabled);
         }
+    }
+
+    #[test]
+    fn effects_are_added_to_the_first_free_slot_and_removed() {
+        let mut p = project();
+        let n = p.mixer[2].slots.iter().filter(|s| s.is_some()).count();
+        apply(
+            &mut p,
+            &MixEdit::AddEffect {
+                insert: 2,
+                plugin: "las-hall".into(),
+            },
+        );
+        let slots = &p.mixer[2].slots;
+        assert_eq!(slots.iter().filter(|s| s.is_some()).count(), n + 1);
+        let at = slots
+            .iter()
+            .rposition(|s| s.as_ref().is_some_and(|s| s.plugin_id == "las-hall"));
+        let at = at.expect("the effect is in a slot");
+        assert!(slots[at].as_ref().unwrap().enabled);
+        apply(
+            &mut p,
+            &MixEdit::RemoveEffect {
+                insert: 2,
+                slot: at,
+            },
+        );
+        assert!(p.mixer[2].slots[at].is_none());
+        // unknown effects and inserts are ignored
+        apply(
+            &mut p,
+            &MixEdit::AddEffect {
+                insert: 2,
+                plugin: "nothing".into(),
+            },
+        );
+        apply(
+            &mut p,
+            &MixEdit::AddEffect {
+                insert: 999,
+                plugin: "las-hall".into(),
+            },
+        );
+        assert_eq!(p.mixer[2].slots.iter().filter(|s| s.is_some()).count(), n);
     }
 
     #[test]
