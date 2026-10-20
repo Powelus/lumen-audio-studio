@@ -43,6 +43,10 @@ pub enum PlEdit {
         id: String,
         at: f64,
     },
+    /// Switch a track's mute on or off.
+    TrackMute(usize),
+    /// Ask for a new name for a track.
+    AskRenameTrack(usize),
     /// Open the editor of an automation clip (by the clip's own id).
     OpenAuto(String),
     /// Move several clips together in time and between tracks.
@@ -202,7 +206,19 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
     let rows = track_count(project);
     let clips = &mut project.playlist.clips;
     match edit {
-        PlEdit::Begin | PlEdit::Seek(_) | PlEdit::OpenAuto(_) => {}
+        PlEdit::Begin | PlEdit::Seek(_) | PlEdit::OpenAuto(_) | PlEdit::AskRenameTrack(_) => {}
+        PlEdit::TrackMute(t) => {
+            // tracks that the project does not list yet are made as they are needed
+            while project.playlist.tracks.len() <= *t {
+                let n = project.playlist.tracks.len();
+                project
+                    .playlist
+                    .tracks
+                    .push(las_project::create::playlist_track(n));
+            }
+            let tr = &mut project.playlist.tracks[*t];
+            tr.mute = !tr.mute;
+        }
         PlEdit::MoveMany {
             ids,
             dstart,
@@ -439,6 +455,38 @@ pub fn draw(
                     egui::FontId::proportional(12.0),
                     pl.text2,
                 );
+                // the mute light, and a menu on the whole header
+                let muted = project.playlist.tracks.get(r).is_some_and(|t| t.mute);
+                let dot = Rect::from_center_size(
+                    egui::pos2(cell.right() - 14.0, cell.center().y),
+                    egui::vec2(18.0, 18.0),
+                );
+                painter.circle_filled(dot.center(), 5.0, if muted { pl.led_off } else { pl.ok });
+                let hit_dot = ui.interact(
+                    dot,
+                    ui.make_persistent_id(("track-mute", r)),
+                    Sense::click(),
+                );
+                if hit_dot.on_hover_text("Mute the track").clicked() {
+                    edits.push(PlEdit::Begin);
+                    edits.push(PlEdit::TrackMute(r));
+                }
+                let head = ui.interact(
+                    cell,
+                    ui.make_persistent_id(("track-head", r)),
+                    Sense::click(),
+                );
+                head.context_menu(|ui| {
+                    if ui.button("Rename...").clicked() {
+                        edits.push(PlEdit::AskRenameTrack(r));
+                        ui.close();
+                    }
+                    if ui.button(if muted { "Unmute" } else { "Mute" }).clicked() {
+                        edits.push(PlEdit::Begin);
+                        edits.push(PlEdit::TrackMute(r));
+                        ui.close();
+                    }
+                });
             }
             painter.rect_filled(
                 Rect::from_min_max(egui::pos2(vl, vt), egui::pos2(vr, o.y + RULER)),
@@ -801,6 +849,17 @@ mod tests {
         );
         apply(&mut p, &PlEdit::Delete { id });
         assert_eq!(p.playlist.clips.len(), before);
+    }
+
+    #[test]
+    fn tracks_are_muted_and_made_when_needed() {
+        let mut p = project();
+        p.playlist.tracks.clear();
+        apply(&mut p, &PlEdit::TrackMute(2));
+        assert_eq!(p.playlist.tracks.len(), 3);
+        assert!(p.playlist.tracks[2].mute && !p.playlist.tracks[0].mute);
+        apply(&mut p, &PlEdit::TrackMute(2));
+        assert!(!p.playlist.tracks[2].mute);
     }
 
     #[test]

@@ -916,6 +916,7 @@ impl App {
         }
         self.shell.open = open;
         self.about_window(ctx);
+        self.rename_dialog(ctx);
         self.discard_dialog(ctx);
     }
 

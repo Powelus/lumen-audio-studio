@@ -33,6 +33,21 @@ pub enum ChanEdit {
     },
     /// Make an automation clip for a parameter of a channel.
     Automate(crate::auto::AutoRequest),
+    /// Remove a channel, with its notes in every pattern.
+    Delete(usize),
+    /// A copy of a channel (with its notes) right after it.
+    Clone(usize),
+    /// Play the channel through another insert.
+    Route {
+        channel: usize,
+        insert: usize,
+    },
+    Color {
+        channel: usize,
+        color: String,
+    },
+    /// Ask for a new name for a channel.
+    AskRename(usize),
 }
 
 /// Carry out a channel edit.
@@ -54,7 +69,47 @@ pub fn apply(project: &mut Project, e: &ChanEdit) {
                 c.mute = *on;
             }
         }
-        ChanEdit::Automate(_) => {}
+        ChanEdit::Automate(_) | ChanEdit::AskRename(_) => {}
+        ChanEdit::Delete(i) => {
+            if *i < project.channels.len() {
+                let id = project.channels.remove(*i).id;
+                for pat in &mut project.patterns {
+                    pat.notes.remove(&id);
+                }
+            }
+        }
+        ChanEdit::Clone(i) => {
+            if let Some(src) = project.channels.get(*i).cloned() {
+                let mut c = src.clone();
+                c.id = las_project::create::uid("ch_");
+                c.name = format!("{} copy", src.name);
+                for pat in &mut project.patterns {
+                    if let Some(notes) = pat.notes.get(&src.id).cloned() {
+                        let copy = notes
+                            .into_iter()
+                            .map(|mut n| {
+                                n.id = las_project::create::uid("n");
+                                n
+                            })
+                            .collect();
+                        pat.notes.insert(c.id.clone(), copy);
+                    }
+                }
+                project.channels.insert(*i + 1, c);
+            }
+        }
+        ChanEdit::Route { channel, insert } => {
+            if *insert < project.mixer.len() {
+                if let Some(c) = project.channels.get_mut(*channel) {
+                    c.mixer_track = *insert;
+                }
+            }
+        }
+        ChanEdit::Color { channel, color } => {
+            if let Some(c) = project.channels.get_mut(*channel) {
+                c.color = color.clone();
+            }
+        }
     }
 }
 
@@ -271,10 +326,68 @@ pub fn draw(
                     if resp.double_clicked() {
                         out.open_synth = Some(i);
                     }
-                    if resp.secondary_clicked() {
-                        out.open_roll = Some(i);
-                    }
-                    resp.on_hover_text("Double click: instrument. Right click: piano roll.");
+                    let resp = resp.on_hover_text("Double click: instrument. Right click: more.");
+                    resp.context_menu(|ui| {
+                        if ui.button("Piano roll").clicked() {
+                            out.open_roll = Some(i);
+                            ui.close();
+                        }
+                        if ui.button("Instrument").clicked() {
+                            out.open_synth = Some(i);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Rename...").clicked() {
+                            out.chans.push(ChanEdit::AskRename(i));
+                            ui.close();
+                        }
+                        if ui.button("Clone").clicked() {
+                            out.chans.push(ChanEdit::Begin);
+                            out.chans.push(ChanEdit::Clone(i));
+                            ui.close();
+                        }
+                        ui.menu_button("Colour", |ui| {
+                            for hex in las_project::create::PALETTE {
+                                let col = crate::rack::channel_colour_of(hex);
+                                let (r, sw) =
+                                    ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                                ui.painter().rect_filled(r, 4.0, col);
+                                if sw.clicked() {
+                                    out.chans.push(ChanEdit::Begin);
+                                    out.chans.push(ChanEdit::Color {
+                                        channel: i,
+                                        color: hex.to_string(),
+                                    });
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.menu_button("Send to insert", |ui| {
+                            for (n, t) in project.mixer.iter().enumerate() {
+                                let label = if n == 0 {
+                                    "Master".to_string()
+                                } else if t.name.is_empty() {
+                                    format!("Insert {n}")
+                                } else {
+                                    t.name.clone()
+                                };
+                                if ui.selectable_label(c.mixer_track == n, label).clicked() {
+                                    out.chans.push(ChanEdit::Begin);
+                                    out.chans.push(ChanEdit::Route {
+                                        channel: i,
+                                        insert: n,
+                                    });
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        if ui.button("Delete").clicked() {
+                            out.chans.push(ChanEdit::Begin);
+                            out.chans.push(ChanEdit::Delete(i));
+                            ui.close();
+                        }
+                    });
                     // the steps
                     let width = steps as f32 * (STEP + 3.0) + (steps / 4) as f32 * 4.0;
                     let (area, resp) =
@@ -390,6 +503,56 @@ mod tests {
         assert!(matches!(off, Edit::Delete { .. }));
         crate::roll::apply(&mut p, 0, &ch, &off);
         assert!(!p.patterns[0].notes.contains_key(&ch));
+    }
+
+    #[test]
+    fn channels_are_cloned_routed_coloured_and_deleted() {
+        let mut p = project();
+        let n = p.channels.len();
+        let first = p.channels[0].id.clone();
+        let notes = p.patterns[0].notes.get(&first).map_or(0, Vec::len);
+        apply(&mut p, &ChanEdit::Clone(0));
+        assert_eq!(p.channels.len(), n + 1);
+        let copy = p.channels[1].clone();
+        assert_ne!(copy.id, first);
+        assert!(copy.name.ends_with("copy"));
+        let copied = p.patterns[0].notes.get(&copy.id).map_or(0, Vec::len);
+        assert_eq!(copied, notes);
+        if notes > 0 {
+            assert_ne!(
+                p.patterns[0].notes[&copy.id][0].id,
+                p.patterns[0].notes[&first][0].id
+            );
+        }
+        apply(
+            &mut p,
+            &ChanEdit::Route {
+                channel: 1,
+                insert: 3,
+            },
+        );
+        assert_eq!(p.channels[1].mixer_track, 3);
+        apply(
+            &mut p,
+            &ChanEdit::Route {
+                channel: 1,
+                insert: 999,
+            },
+        );
+        assert_eq!(p.channels[1].mixer_track, 3);
+        apply(
+            &mut p,
+            &ChanEdit::Color {
+                channel: 1,
+                color: "#112233".into(),
+            },
+        );
+        assert_eq!(p.channels[1].color, "#112233");
+        apply(&mut p, &ChanEdit::Delete(1));
+        assert_eq!(p.channels.len(), n);
+        assert!(p.patterns.iter().all(|x| !x.notes.contains_key(&copy.id)));
+        apply(&mut p, &ChanEdit::Delete(99));
+        assert_eq!(p.channels.len(), n);
     }
 
     #[test]

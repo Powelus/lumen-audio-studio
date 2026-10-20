@@ -4,6 +4,7 @@
 
 use crate::app::App;
 use crate::audio::Command;
+use crate::project::RenameTarget;
 use crate::theme;
 use eframe::egui::{self, RichText, Ui};
 use las_project::create::{add_channel, default_project, pattern, INSTRUMENTS};
@@ -19,6 +20,35 @@ pub enum Action {
     Open,
     Demo,
     Quit,
+}
+
+/// Give something of a project a new name.
+pub fn rename(p: &mut Project, target: RenameTarget, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    match target {
+        RenameTarget::Channel(i) => {
+            if let Some(c) = p.channels.get_mut(i) {
+                c.name = name.to_string();
+            }
+        }
+        RenameTarget::Pattern(i) => {
+            if let Some(x) = p.patterns.get_mut(i) {
+                x.name = name.to_string();
+            }
+        }
+        RenameTarget::Track(i) => {
+            while p.playlist.tracks.len() <= i {
+                let n = p.playlist.tracks.len();
+                p.playlist
+                    .tracks
+                    .push(las_project::create::playlist_track(n));
+            }
+            p.playlist.tracks[i].name = name.to_string();
+        }
+    }
 }
 
 /// A copy of a pattern with new ids, placed after it.
@@ -252,6 +282,38 @@ impl App {
         }
     }
 
+    /// The window that asks for a name, when one is wanted.
+    pub(crate) fn rename_dialog(&mut self, ctx: &egui::Context) {
+        let Some((target, mut text)) = self.project.rename.take() else {
+            return;
+        };
+        let (mut ok, mut cancel) = (false, false);
+        egui::Window::new("Rename")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(220.0));
+                r.request_focus();
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    ok = true;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+                ui.horizontal(|ui| {
+                    ok |= ui.button("OK").clicked();
+                    cancel |= ui.button("Cancel").clicked();
+                });
+            });
+        if ok {
+            let name = text.clone();
+            self.project.modify(true, move |p| rename(p, target, &name));
+        } else if !cancel {
+            self.project.rename = Some((target, text));
+        }
+    }
+
     pub(crate) fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.shell.open.about;
         egui::Window::new("About")
@@ -344,6 +406,22 @@ impl App {
                 .clicked()
             {
                 self.new_pattern();
+                ui.close();
+            }
+            if ui
+                .add_enabled(loaded, egui::Button::new("Rename pattern..."))
+                .clicked()
+            {
+                let i = self.project.pattern;
+                let name = self
+                    .project
+                    .loaded
+                    .as_ref()
+                    .and_then(|l| l.project.patterns.get(i))
+                    .map(|x| x.name.clone());
+                if let Some(name) = name {
+                    self.project.rename = Some((RenameTarget::Pattern(i), name));
+                }
                 ui.close();
             }
             if ui
@@ -525,6 +603,20 @@ mod tests {
     fn the_demo_song_is_a_project() {
         let b = las_project::decode(DEMO).unwrap();
         assert!(!b.project.channels.is_empty());
+    }
+
+    #[test]
+    fn things_are_renamed_and_blank_names_are_ignored() {
+        let mut p = default_project();
+        rename(&mut p, RenameTarget::Channel(0), "  Big kick ");
+        rename(&mut p, RenameTarget::Pattern(0), "Intro");
+        rename(&mut p, RenameTarget::Track(30), "Drums");
+        assert_eq!(p.channels[0].name, "Big kick");
+        assert_eq!(p.patterns[0].name, "Intro");
+        assert_eq!(p.playlist.tracks[30].name, "Drums");
+        rename(&mut p, RenameTarget::Channel(0), "   ");
+        rename(&mut p, RenameTarget::Channel(99), "x");
+        assert_eq!(p.channels[0].name, "Big kick");
     }
 
     #[test]
