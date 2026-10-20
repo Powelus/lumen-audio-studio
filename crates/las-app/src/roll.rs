@@ -512,7 +512,7 @@ mod tests {
         let mut state = RollState::default();
         let mut out = Vec::new();
         for _ in 0..2 {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::widgets::run_frame(&ctx, egui::RawInput::default(), |ui| {
                 out = draw(ui, &p, 0, 0, &mut state, Some(10.0));
             });
         }
@@ -530,7 +530,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            crate::widgets::run_frame(&ctx, input, |ui| {
                 all.extend(draw(ui, p, 0, 0, state, None));
             });
         }
