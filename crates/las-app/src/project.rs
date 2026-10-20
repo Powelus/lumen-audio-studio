@@ -328,6 +328,37 @@ impl ProjectState {
         self.modify(fresh, f);
     }
 
+    /// The steps undo and redo can reach, each described by what it changed: the
+    /// earlier steps (oldest first) and the later ones (next first).
+    pub fn history(&self) -> (Vec<String>, Vec<String>) {
+        let Some(l) = &self.loaded else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut back = Vec::new();
+        for (i, before) in self.undo.iter().enumerate() {
+            let after = self.undo.get(i + 1).unwrap_or(&l.project);
+            back.push(describe_change(before, after));
+        }
+        let mut forward = Vec::new();
+        let mut cur = &l.project;
+        for next in self.redo.iter().rev() {
+            forward.push(describe_change(cur, next));
+            cur = next;
+        }
+        (back, forward)
+    }
+
+    /// Undo or redo until `steps` from now (negative goes back).
+    pub fn travel(&mut self, steps: i32) {
+        for _ in 0..steps.unsigned_abs() {
+            if steps < 0 {
+                self.undo();
+            } else {
+                self.redo();
+            }
+        }
+    }
+
     pub fn undo(&mut self) {
         if let (Some(l), Some(prev)) = (&mut self.loaded, self.undo.pop()) {
             self.redo.push(std::mem::replace(&mut l.project, prev));
@@ -736,6 +767,69 @@ impl App {
     }
 }
 
+/// What changed between two states of a project, in a few words.
+pub fn describe_change(a: &Project, b: &Project) -> String {
+    let notes = |p: &Project| {
+        p.patterns
+            .iter()
+            .map(|x| x.notes.values().map(Vec::len).sum::<usize>())
+            .sum::<usize>()
+    };
+    let count = |n: usize, m: usize, what: &str| -> Option<String> {
+        match n.cmp(&m) {
+            std::cmp::Ordering::Less => Some(format!("Add {what}")),
+            std::cmp::Ordering::Greater => Some(format!("Delete {what}")),
+            std::cmp::Ordering::Equal => None,
+        }
+    };
+    if let Some(s) = count(a.channels.len(), b.channels.len(), "channel") {
+        return s;
+    }
+    if let Some(s) = count(a.patterns.len(), b.patterns.len(), "pattern") {
+        return s;
+    }
+    if let Some(s) = count(notes(a), notes(b), "notes") {
+        return s;
+    }
+    if let Some(s) = count(a.playlist.clips.len(), b.playlist.clips.len(), "clip") {
+        return s;
+    }
+    if let Some(s) = count(a.automation.len(), b.automation.len(), "automation") {
+        return s;
+    }
+    if a.bpm != b.bpm {
+        return format!("Tempo {:.1}", b.bpm);
+    }
+    macro_rules! json {
+        ($v:expr) => {
+            serde_json::to_string($v).unwrap_or_default()
+        };
+    }
+    if json!(&a.mixer) != json!(&b.mixer) {
+        return "Mixer".into();
+    }
+    if json!(&a.channels) != json!(&b.channels) {
+        // the first channel that changed
+        let name = a
+            .channels
+            .iter()
+            .zip(&b.channels)
+            .find(|(x, y)| json!(x) != json!(y))
+            .map_or("Channel".to_string(), |(_, y)| y.name.clone());
+        return format!("Edit {name}");
+    }
+    if json!(&a.patterns) != json!(&b.patterns) {
+        return "Move notes".into();
+    }
+    if json!(&a.playlist) != json!(&b.playlist) {
+        return "Arrange".into();
+    }
+    if json!(&a.automation) != json!(&b.automation) {
+        return "Automation".into();
+    }
+    "Edit".into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,6 +850,35 @@ mod tests {
         let mut s = ProjectState::default();
         s.open(path.to_str().unwrap()).unwrap();
         (s, path.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn history_names_each_step_and_travels_to_any_of_them() {
+        let (mut s, _) = fixture();
+        let channels = |s: &ProjectState| s.loaded.as_ref().unwrap().project.channels.len();
+        let n0 = channels(&s);
+        s.modify(true, |p| {
+            las_project::create::add_channel(p, "polaris");
+        });
+        s.modify(true, |p| p.bpm = 99.0);
+        s.modify(true, |p| p.channels[0].name = "Renamed".into());
+        let (back, fwd) = s.history();
+        assert_eq!(back, vec!["Add channel", "Tempo 99.0", "Edit Renamed"]);
+        assert!(fwd.is_empty());
+        // back to the start, then forward two steps
+        s.travel(-3);
+        assert_eq!(channels(&s), n0);
+        assert_eq!(s.history().1.len(), 3);
+        s.travel(2);
+        assert_eq!(channels(&s), n0 + 1);
+        assert_eq!(s.loaded.as_ref().unwrap().project.bpm, 99.0);
+        assert_eq!(
+            s.history(),
+            (
+                vec!["Add channel".to_string(), "Tempo 99.0".to_string()],
+                vec!["Edit Renamed".to_string()]
+            )
+        );
     }
 
     fn count(s: &ProjectState) -> usize {

@@ -34,6 +34,7 @@ pub struct Windows {
     pub synth: bool,
     pub export: bool,
     pub about: bool,
+    pub history: bool,
 }
 
 /// What the export window holds.
@@ -101,6 +102,7 @@ impl Shell {
                 synth: false,
                 export: false,
                 about: false,
+                history: false,
             },
             song_mode: true,
             metronome: false,
@@ -964,8 +966,8 @@ impl App {
         if open.mixer {
             win(
                 "Mixer",
-                a.min + vec2(30.0, a.height() - 330.0),
-                vec2(a.width() - 60.0, 310.0),
+                a.min + vec2(30.0, (a.height() - 470.0).max(10.0)),
+                vec2(a.width() - 60.0, 450.0),
             )
             .open(&mut open.mixer)
             .show(ctx, |ui| {
@@ -1031,6 +1033,7 @@ impl App {
         }
         self.shell.open = open;
         self.about_window(ctx);
+        self.history_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
     }
