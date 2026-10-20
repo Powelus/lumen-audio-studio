@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.39
+
+Clip colours.
+
+- Right-click a pattern or automation clip in the playlist for a palette of twelve colours, as in FL's playlist. The colour belongs to the pattern (or automation clip), so every clip of it changes, and it is one undo step.
+
 ## 0.2.0-alpha.38
 
 Export the loop.

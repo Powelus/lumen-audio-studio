@@ -47,6 +47,11 @@ pub enum PlEdit {
     TrackMute(usize),
     /// Play a stretch of the song (ticks) over and over, or the whole song again.
     SongLoop(Option<(f64, f64)>),
+    /// Give the pattern or automation clip that a clip plays a colour ("#rrggbb").
+    Colour {
+        clip: String,
+        color: String,
+    },
     /// Put a song marker at a tick.
     AddMarker(f64),
     DeleteMarker(String),
@@ -108,6 +113,8 @@ enum Drag {
 pub struct PlaylistState {
     /// Where the last right click landed (tick) and the marker under it, for its menu.
     pub menu_at: Option<(f64, Option<String>)>,
+    /// The clip under the last right click, for its colour menu.
+    pub menu_clip: Option<String>,
     /// The stretch of the song that plays over and over (ticks), if any.
     pub song_loop: Option<(f64, f64)>,
     /// Points per tick.
@@ -211,6 +218,7 @@ impl Default for PlaylistState {
             group_last: None,
             drag: None,
             menu_at: None,
+            menu_clip: None,
             song_loop: None,
         }
     }
@@ -288,6 +296,12 @@ pub fn new_pattern_clip(p: &Project, index: usize, start: f64, track: usize) -> 
     })
 }
 
+/// The colours a clip's menu offers, after FL's playlist palette.
+pub const CLIP_COLOURS: [&str; 12] = [
+    "#e05a47", "#e8953a", "#e3c94a", "#8ccf4d", "#3fbf7f", "#3fb7c9", "#4a8fe0", "#6f6fe8",
+    "#a463e0", "#d65ab8", "#8a8f99", "#c9cdd4",
+];
+
 /// The stretch between the markers on either side of `t`: from the last marker at or
 /// before it to the next one after it.
 pub fn loop_around(marks: &[f64], t: f64) -> Option<(f64, f64)> {
@@ -315,6 +329,25 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
         | PlEdit::AskRenameTrack(_)
         | PlEdit::AskRenameMarker(_)
         | PlEdit::SongLoop(_) => {}
+        PlEdit::Colour { clip, color } => {
+            let Some(c) = project.playlist.clips.iter().find(|c| &c.id == clip) else {
+                return;
+            };
+            let (kind, of) = (c.kind, c.ref_id.clone());
+            match kind {
+                ClipKind::Pattern => {
+                    if let Some(x) = project.patterns.iter_mut().find(|x| x.id == of) {
+                        x.color = color.clone();
+                    }
+                }
+                ClipKind::Automation => {
+                    if let Some(x) = project.automation.iter_mut().find(|x| x.id == of) {
+                        x.color = color.clone();
+                    }
+                }
+                ClipKind::Audio => {}
+            }
+        }
         PlEdit::AddMarker(t) => {
             let list = project.markers.get_or_insert_with(Vec::new);
             let name = format!("Marker {}", list.len() + 1);
@@ -764,12 +797,50 @@ pub fn draw(
                     snapped(tick_at(p.x), state.snap).max(0.0),
                     near_marker.clone(),
                 ));
+                state.menu_clip = (p.y >= top && p.x > left)
+                    .then(|| hit(project, tick_at(p.x), track_at(p.y), 0.0))
+                    .flatten()
+                    .map(|(i, _)| project.playlist.clips[i].id.clone());
             }
             resp.context_menu(|ui| {
                 let Some((t, near)) = state.menu_at.clone() else {
                     ui.close();
                     return;
                 };
+                if let Some(id) = state.menu_clip.clone() {
+                    let audio = project
+                        .playlist
+                        .clips
+                        .iter()
+                        .find(|c| c.id == id)
+                        .is_some_and(|c| c.kind == ClipKind::Audio);
+                    if !audio {
+                        ui.label("Colour");
+                        ui.horizontal_wrapped(|ui| {
+                            for c in CLIP_COLOURS {
+                                let (r, _) =
+                                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::click());
+                                ui.painter().rect_filled(r, 3.0, hex(c));
+                                if ui
+                                    .interact(
+                                        r,
+                                        ui.make_persistent_id(("clip-colour", c)),
+                                        Sense::click(),
+                                    )
+                                    .clicked()
+                                {
+                                    edits.push(PlEdit::Begin);
+                                    edits.push(PlEdit::Colour {
+                                        clip: id.clone(),
+                                        color: c.to_string(),
+                                    });
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
+                    }
+                }
                 if ui.button("Add marker here").clicked() {
                     edits.push(PlEdit::Begin);
                     edits.push(PlEdit::AddMarker(t));
@@ -1190,6 +1261,32 @@ mod tests {
         assert_eq!(loop_around(&m, 384.0), Some((384.0, 1536.0)));
         assert_eq!(loop_around(&m, 2000.0), None);
         assert_eq!(loop_around(&[], 10.0), None);
+    }
+
+    #[test]
+    fn a_clip_colours_its_pattern() {
+        let mut p = project();
+        let i = p
+            .playlist
+            .clips
+            .iter()
+            .position(|c| c.kind == ClipKind::Pattern)
+            .unwrap();
+        let (clip, of) = (
+            p.playlist.clips[i].id.clone(),
+            p.playlist.clips[i].ref_id.clone(),
+        );
+        apply(
+            &mut p,
+            &PlEdit::Colour {
+                clip,
+                color: "#3fbf7f".into(),
+            },
+        );
+        assert_eq!(
+            p.patterns.iter().find(|x| x.id == of).unwrap().color,
+            "#3fbf7f"
+        );
     }
 
     #[test]
