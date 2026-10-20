@@ -28,8 +28,19 @@ pub struct Loaded {
 /// A player being built, and what to do with it when it is ready.
 struct Building {
     done: Receiver<Result<Player, String>>,
-    /// Where to start playing; `None` only readies the player for live keys.
-    from: Option<f64>,
+    from: Start,
+}
+
+/// What a freshly built player does.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Start {
+    /// Nothing: it only waits for keys played live.
+    Ready,
+    /// Play from this tick.
+    At(f64),
+    /// Carry on from wherever the song has got to, if it is still playing (an edit
+    /// made while playing).
+    Resume,
 }
 
 #[derive(Default)]
@@ -188,7 +199,7 @@ impl ProjectState {
     }
 
     /// Start building a player for the open project.
-    fn start(&mut self, mode: PlayMode, from: Option<f64>, sample_rate: f64) {
+    fn start(&mut self, mode: PlayMode, from: Start, sample_rate: f64) {
         let Some(l) = &self.loaded else { return };
         let (project, samples) = (l.project.clone(), l.samples.clone());
         let (tx, rx) = channel();
@@ -236,7 +247,7 @@ impl App {
                 self.view = crate::app::View::Project;
                 // ready for keys played live
                 if let Some(rate) = self.audio.as_ref().map(|a| a.sample_rate as f64) {
-                    self.project.start(PlayMode::Song, None, rate);
+                    self.project.start(PlayMode::Song, Start::Ready, rate);
                 }
             }
             Err(e) => self.project.error = Some(e),
@@ -301,7 +312,7 @@ impl App {
         };
         self.stop_project();
         self.project.looping = matches!(mode, PlayMode::Pattern(_));
-        self.project.start(mode, Some(from), rate);
+        self.project.start(mode, Start::At(from), rate);
     }
 
     pub(crate) fn stop_project(&mut self) {
@@ -312,12 +323,19 @@ impl App {
 
     /// Hand a finished player to the audio thread. Called every frame.
     pub(crate) fn poll_project(&mut self, ctx: &egui::Context) {
-        let quiet = !ctx.input(|i| i.pointer.any_down())
-            && !self.audio.as_ref().is_some_and(|a| a.meters.playing());
+        // an edit takes effect once the pointer is up: a player is built for the edited
+        // project, and if the song is playing it carries on from where it is
+        let quiet = !ctx.input(|i| i.pointer.any_down());
         if self.project.stale && quiet && self.project.building.is_none() {
             self.project.stale = false;
             if let Some(rate) = self.audio.as_ref().map(|a| a.sample_rate as f64) {
-                self.project.start(PlayMode::Song, None, rate);
+                let playing = self.audio.as_ref().is_some_and(|a| a.meters.playing());
+                let (mode, from) = match (playing, self.project.looping) {
+                    (true, true) => (PlayMode::Pattern(self.project.pattern), Start::Resume),
+                    (true, false) => (PlayMode::Song, Start::Resume),
+                    (false, _) => (PlayMode::Song, Start::Ready),
+                };
+                self.project.start(mode, from, rate);
             }
         }
         let Some(b) = &self.project.building else {
@@ -334,8 +352,15 @@ impl App {
             Ok(p) => {
                 if let Some(a) = &mut self.audio {
                     a.set_player(p);
-                    if let Some(from) = from {
-                        a.send(Command::PlayerPlay(from));
+                    match from {
+                        Start::Ready => {}
+                        Start::At(t) => a.send(Command::PlayerPlay(t)),
+                        Start::Resume => {
+                            if a.meters.playing() {
+                                let t = a.meters.position();
+                                a.send(Command::PlayerPlay(t));
+                            }
+                        }
                     }
                     self.project.has_player = true;
                 }

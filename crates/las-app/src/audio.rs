@@ -770,6 +770,33 @@ mod tests {
     }
 
     #[test]
+    fn a_player_built_for_an_edit_carries_on_from_the_position() {
+        let (mut r, mut tx, _g) = renderer();
+        let mut buf = vec![0f32; 512 * 2];
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        tx.push(Command::PlayerPlay(0.0)).ok().unwrap();
+        for _ in 0..60 {
+            r.fill(&mut buf);
+        }
+        let at = r.meters.position();
+        assert!(r.meters.playing() && at > 0.0);
+        // the interface swaps in a new player and starts it where the old one had got to
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        tx.push(Command::PlayerPlay(at)).ok().unwrap();
+        r.fill(&mut buf);
+        let after = r.meters.position();
+        assert!(r.meters.playing(), "still playing after the swap");
+        assert!(
+            (after - at).abs() < 96.0 * 2.0,
+            "the song carried on near {at}, not {after}"
+        );
+    }
+
+    #[test]
     fn keys_play_a_project_channel_live() {
         let (mut r, mut tx, _g) = renderer();
         tx.push(Command::SetPlayer(Box::new(project_player())))
