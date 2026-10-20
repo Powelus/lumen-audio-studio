@@ -32,11 +32,27 @@ pub enum Edit {
     Delete {
         id: String,
     },
+    /// Snap every note's start and length to the grid.
+    Quantize {
+        snap: f64,
+    },
     /// Sound a key (a note being placed or moved) or let go of it.
     Audition {
         key: i32,
         on: bool,
     },
+}
+
+/// What a click on the roll does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Tool {
+    /// Place, move and resize notes.
+    #[default]
+    Draw,
+    /// Move and resize notes without placing new ones.
+    Select,
+    /// Delete the note that is clicked.
+    Delete,
 }
 
 /// What is being dragged.
@@ -62,6 +78,9 @@ pub struct RollState {
     pub snap: f64,
     /// The length a new note gets from a click.
     pub len: f64,
+    pub tool: Tool,
+    /// Show the other channels' notes faintly behind this one's.
+    pub ghost: bool,
     drag: Option<Drag>,
     /// The pattern and channel the view was last centred for.
     centred: Option<(usize, usize)>,
@@ -74,6 +93,8 @@ impl Default for RollState {
             row: 14.0,
             snap: f64::from(TICKS_PER_STEP),
             len: f64::from(TICKS_PER_STEP) * 4.0,
+            tool: Tool::Draw,
+            ghost: true,
             drag: None,
             centred: None,
         }
@@ -124,6 +145,13 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
             }
         }
         Edit::Delete { id } => notes.retain(|n| &n.id != id),
+        Edit::Quantize { snap } => {
+            let g = snap.max(1.0);
+            for n in notes.iter_mut() {
+                n.pos = (n.pos / g).round() * g;
+                n.len = ((n.len / g).round() * g).max(g);
+            }
+        }
     }
     if notes.is_empty() {
         p.notes.remove(channel);
@@ -244,6 +272,27 @@ pub fn draw(
             ],
             Stroke::new(2.0, crate::theme::accent().gamma_multiply(0.7)),
         );
+        // the other channels' notes, faintly
+        if state.ghost {
+            if let Some(pat) = pat {
+                for (i, c) in project.channels.iter().enumerate() {
+                    if i == channel {
+                        continue;
+                    }
+                    let col = crate::rack::channel_colour(c);
+                    for n in pat.notes.get(&c.id).into_iter().flatten() {
+                        let r = Rect::from_min_max(
+                            egui::pos2(x_of(n.pos), y_of(n.key) + 2.0),
+                            egui::pos2(
+                                (x_of(n.pos + n.len) - 1.0).max(x_of(n.pos) + 3.0),
+                                y_of(n.key) + state.row - 1.0,
+                            ),
+                        );
+                        painter.rect_filled(r, 2.0, col.gamma_multiply(0.22));
+                    }
+                }
+            }
+        }
         // notes
         for n in notes {
             let r = Rect::from_min_max(
@@ -306,6 +355,11 @@ pub fn draw(
                     let (t, k) = ptr(origin_pos);
                     edits.push(Edit::Begin);
                     match hit(notes, t, k, edge) {
+                        Some((i, _)) if state.tool == Tool::Delete => {
+                            edits.push(Edit::Delete {
+                                id: notes[i].id.clone(),
+                            });
+                        }
                         Some((i, true)) => {
                             state.drag = Some(Drag::Resize {
                                 id: notes[i].id.clone(),
@@ -323,6 +377,7 @@ pub fn draw(
                                 on: true,
                             });
                         }
+                        None if state.tool != Tool::Draw => {}
                         None => {
                             let at = snapped(t, state.snap).max(0.0);
                             let n = new_note(k, at, state.snap.max(1.0));
@@ -371,7 +426,7 @@ pub fn draw(
             if let Some(p) = resp.interact_pointer_pos() {
                 if p.x > grid_left {
                     let (t, k) = ptr(p);
-                    if hit(notes, t, k, edge).is_none() {
+                    if state.tool == Tool::Draw && hit(notes, t, k, edge).is_none() {
                         edits.push(Edit::Begin);
                         let at = snapped(t, state.snap).max(0.0);
                         edits.push(Edit::Add(new_note(k, at, state.len)));
@@ -480,6 +535,26 @@ mod tests {
         assert!(!p.patterns[0].notes.contains_key("nobody"));
         // a pattern that does not exist is ignored
         apply(&mut p, 999, "nobody", &Edit::Add(new_note(60, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn quantize_snaps_starts_and_lengths_to_the_grid() {
+        let mut p = project();
+        let ch = p.channels[0].id.clone();
+        p.patterns[0].notes.remove(&ch);
+        let mut n = new_note(60, 50.0, 30.0);
+        n.step = None;
+        apply(&mut p, 0, &ch, &Edit::Add(n));
+        apply(&mut p, 0, &ch, &Edit::Quantize { snap: 24.0 });
+        let (pos, len, id) = {
+            let n = &p.patterns[0].notes[&ch][0];
+            (n.pos, n.len, n.id.clone())
+        };
+        assert_eq!((pos, len), (48.0, 24.0));
+        // a very short note never vanishes
+        apply(&mut p, 0, &ch, &Edit::Resize { id, len: 1.0 });
+        apply(&mut p, 0, &ch, &Edit::Quantize { snap: 24.0 });
+        assert_eq!(p.patterns[0].notes[&ch][0].len, 24.0);
     }
 
     #[test]

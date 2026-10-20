@@ -2,6 +2,18 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.24
+
+Menus, new and demo projects, and FL Studio style tools.
+
+- The app opens on the "new project" of the web version: Kick, Clap, Hat and Snare samplers and a Nebula, a four on the floor pattern in the playlist. `lumen song.las` opens that file instead.
+- Main menu (the button at the left of the top bar): File (New, Open, Open demo song, Save, Save as, Export, Quit), Edit (undo, redo), Add (any instrument as a new channel on a free insert), Patterns (new, clone, delete), View, Options (themes) and Help (About). Native file dialogs for Open and Save as; a question about unsaved changes before anything that would lose them. Shortcuts: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+R, F4 (new pattern), F5 to F9 (windows), Space (play and stop).
+- The rack has an "Add channel" menu.
+- Piano roll: Draw, Select and Delete tools, Quantize, and ghost notes (the other channels' notes behind the one being edited).
+- Playlist: Draw, Select, Slice, Mute and Delete tools; slicing cuts a clip at the grid line, mute switches a clip off.
+- Mixer: every insert is shown with its coloured name, pan, mute, solo and fader; the selected insert has a panel with its name, its ten effect slots (add an effect to any slot) and its stereo width.
+- Builds on pull requests no longer upload packages (only a release does, kept for a day), which stops the runs from filling the repository's Actions storage.
+
 ## 0.2.0-alpha.23
 
 Effect windows for the mixer.

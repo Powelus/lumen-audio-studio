@@ -183,7 +183,150 @@ pub fn empty_project(name: &str) -> Project {
     }
 }
 
+/// A note of the step sequencer: one step long, at `step`.
+pub fn step_note(step: usize, key: i32, vel: f64) -> Note {
+    Note {
+        id: uid("n"),
+        key,
+        pos: step as f64 * f64::from(TICKS_PER_STEP),
+        len: f64::from(TICKS_PER_STEP),
+        vel,
+        pan: 0.0,
+        step: Some(true),
+        ..Note::default()
+    }
+}
+
+/// The "new project" of the web version: four drum channels and a synth, a four on the
+/// floor pattern, and the pattern in the playlist.
+pub fn default_project() -> Project {
+    let mut p = empty_project("Untitled");
+    let drums = [
+        ("Kick", "factory:kick-punch", "#ff5c8a"),
+        ("Clap", "factory:clap-classic", "#ffb547"),
+        ("Hat", "factory:hat-closed", "#22d3ee"),
+        ("Snare", "factory:snare-tight", "#3ddc97"),
+    ];
+    for (i, (name, sample, color)) in drums.iter().enumerate() {
+        let mut c = channel("sampler");
+        c.name = (*name).into();
+        c.color = (*color).into();
+        c.sample_id = Some((*sample).into());
+        c.mixer_track = i + 1;
+        p.channels.push(c);
+        p.mixer[i + 1].name = (*name).into();
+        p.mixer[i + 1].color = (*color).into();
+        p.samples.push(SampleRef {
+            id: (*sample).into(),
+            name: (*name).into(),
+            factory: Some(true),
+            ..SampleRef::default()
+        });
+    }
+    let mut lead = channel("nebula");
+    lead.name = "Nebula".into();
+    lead.mixer_track = 5;
+    p.channels.push(lead);
+    p.mixer[5].name = "Nebula".into();
+    p.mixer[5].color = "#c26bff".into();
+    p.mixer[0].slots[0] = Some(effect_slot("las-limiter"));
+    let ids: Vec<String> = p.channels.iter().map(|c| c.id.clone()).collect();
+    let pat = &mut p.patterns[0];
+    pat.notes.insert(
+        ids[0].clone(),
+        [0, 4, 8, 12]
+            .iter()
+            .map(|&s| step_note(s, 60, 0.78))
+            .collect(),
+    );
+    pat.notes.insert(
+        ids[1].clone(),
+        [4, 12].iter().map(|&s| step_note(s, 60, 0.78)).collect(),
+    );
+    pat.notes.insert(
+        ids[2].clone(),
+        [2, 6, 10, 14]
+            .iter()
+            .map(|&s| step_note(s, 60, 0.6))
+            .collect(),
+    );
+    let pat_id = pat.id.clone();
+    p.playlist.clips.push(Clip {
+        id: uid("clip_"),
+        kind: ClipKind::Pattern,
+        ref_id: pat_id,
+        track: 0,
+        start: 0.0,
+        length: 384.0,
+        offset: 0.0,
+        ..Clip::default()
+    });
+    p
+}
+
+/// Add a channel with the given instrument to a project: it takes the first insert
+/// that no channel uses (or the master's neighbour when all are used), named for it.
+pub fn add_channel(p: &mut Project, plugin_id: &str) -> usize {
+    let mut c = channel(plugin_id);
+    let used: Vec<usize> = p.channels.iter().map(|c| c.mixer_track).collect();
+    let insert = (1..p.mixer.len()).find(|i| !used.contains(i)).unwrap_or(1);
+    c.mixer_track = insert;
+    let same = p
+        .channels
+        .iter()
+        .filter(|x| x.plugin_id == plugin_id)
+        .count();
+    if same > 0 {
+        c.name = format!("{} {}", c.name, same + 1);
+    }
+    if let Some(t) = p.mixer.get_mut(insert) {
+        t.name = c.name.clone();
+        t.color = c.color.clone();
+    }
+    p.channels.push(c);
+    p.channels.len() - 1
+}
+
 /// The same defaults as JSON, for filling in the gaps of a saved project.
 pub(crate) fn to_value<T: serde::Serialize>(v: &T) -> Value {
     serde_json::to_value(v).unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_project_is_the_web_versions() {
+        let p = default_project();
+        let names: Vec<_> = p.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Kick", "Clap", "Hat", "Snare", "Nebula"]);
+        assert_eq!(p.bpm, 128.0);
+        assert_eq!(p.mixer.len(), MIXER_INSERTS + 1);
+        assert_eq!(
+            p.mixer[0].slots[0].as_ref().unwrap().plugin_id,
+            "las-limiter"
+        );
+        let steps = |i: usize| p.patterns[0].notes[&p.channels[i].id].len();
+        assert_eq!((steps(0), steps(1), steps(2)), (4, 2, 4));
+        assert!(!p.patterns[0].notes.contains_key(&p.channels[3].id));
+        assert_eq!(p.playlist.clips.len(), 1);
+        assert_eq!(p.playlist.clips[0].ref_id, p.patterns[0].id);
+        // it survives a save and a load
+        let bytes = crate::encode(&p, &Default::default(), true).unwrap();
+        let back = crate::decode(&bytes).unwrap().project;
+        assert_eq!(back.channels.len(), 5);
+        assert_eq!(back.samples.len(), 4);
+    }
+
+    #[test]
+    fn channels_are_added_on_free_inserts_with_numbered_names() {
+        let mut p = default_project();
+        let i = add_channel(&mut p, "polaris");
+        assert_eq!(p.channels[i].mixer_track, 6);
+        assert_eq!(p.mixer[6].name, "Polaris");
+        let j = add_channel(&mut p, "polaris");
+        assert_eq!(p.channels[j].name, "Polaris 2");
+        assert_eq!(p.channels[j].mixer_track, 7);
+    }
 }

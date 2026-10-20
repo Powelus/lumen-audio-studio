@@ -33,6 +33,7 @@ pub struct Windows {
     pub mixer: bool,
     pub synth: bool,
     pub export: bool,
+    pub about: bool,
 }
 
 /// What the export window holds.
@@ -68,6 +69,8 @@ pub struct Shell {
     pub steps: StepState,
     pub export: Export,
     pub status: String,
+    /// An action waiting for an answer about unsaved changes.
+    pub pending: Option<crate::menus::Action>,
     placed: bool,
 }
 
@@ -83,6 +86,7 @@ impl Shell {
                 mixer: false,
                 synth: false,
                 export: false,
+                about: false,
             },
             song_mode: true,
             search: String::new(),
@@ -99,6 +103,7 @@ impl Shell {
                 message: None,
             },
             status: "Ready".into(),
+            pending: None,
             placed: false,
         }
     }
@@ -299,7 +304,7 @@ impl App {
         }
     }
 
-    fn choose_theme(&mut self, choice: &str) {
+    pub(crate) fn choose_theme(&mut self, choice: &str) {
         self.shell.theme = choice.to_string();
         theme::save_choice(choice);
     }
@@ -327,53 +332,7 @@ impl App {
             logo(ui);
             ui.label(RichText::new("LAS").strong().size(17.0));
             ui.menu_button(RichText::new("\u{2630}").size(16.0), |ui| {
-                if ui.button("Open project").clicked() {
-                    self.shell.browser = true;
-                    self.shell.tab = BrowserTab::Project;
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(self.project.dirty, egui::Button::new("Save    Ctrl+S"))
-                    .clicked()
-                {
-                    self.save_project();
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(
-                        self.project.loaded.is_some(),
-                        egui::Button::new("Export audio"),
-                    )
-                    .clicked()
-                {
-                    self.shell.open.export = true;
-                    ui.close();
-                }
-                ui.separator();
-                ui.menu_button("Theme", |ui| {
-                    let current = self.shell.theme.clone();
-                    for t in theme::themes() {
-                        if ui
-                            .selectable_label(current == t.id, t.name)
-                            .on_hover_text(t.description)
-                            .clicked()
-                        {
-                            self.choose_theme(t.id);
-                            ui.close();
-                        }
-                    }
-                    if ui
-                        .selectable_label(current == theme::SYSTEM, "Match the system")
-                        .clicked()
-                    {
-                        self.choose_theme(theme::SYSTEM);
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                ui.horizontal(|ui| self.main_menu(ui));
             });
             ui.add_space(4.0);
             // transport
@@ -562,7 +521,7 @@ impl App {
                     .loaded
                     .as_ref()
                     .map_or("No project".to_string(), |l| {
-                        let dirty = if self.project.dirty { " *" } else { "" };
+                        let dirty = if self.project.dirty { " \u{2022}" } else { "" };
                         format!("{}{dirty}", l.project.name)
                     });
                 ui.label(RichText::new(name).size(12.0).color(p.text2));
@@ -911,6 +870,8 @@ impl App {
                 .show(ctx, |ui| self.export_window(ui));
         }
         self.shell.open = open;
+        self.about_window(ctx);
+        self.discard_dialog(ctx);
     }
 
     fn no_project(&self, ui: &mut Ui) {
@@ -937,6 +898,14 @@ impl App {
         );
         ui.separator();
         ui.horizontal(|ui| {
+            ui.menu_button("+ Add channel", |ui| {
+                for (id, name, _) in las_project::create::INSTRUMENTS {
+                    if ui.button(*name).clicked() {
+                        self.add_channel(id);
+                        ui.close();
+                    }
+                }
+            });
             ui.label(
                 RichText::new(
                     project
@@ -981,7 +950,7 @@ impl App {
             return;
         };
         let project = l.project.clone();
-        let edits = mixer::draw(ui, &project);
+        let edits = mixer::draw(ui, &project, &mut self.project.mixer_state);
         drop(project);
         self.project.edit_mixer(&edits);
     }

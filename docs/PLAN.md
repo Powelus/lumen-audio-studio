@@ -48,3 +48,12 @@ version to JSON and loaded by the Rust engine, with the same validation rules.
   instrument still frees its own previous copy on the audio thread (a few small
   allocations per patch change). To fix when the instruments move to preallocated
   state.
+
+## Direction: an FL Studio style workstation
+
+The aim is a free FL Studio style DAW (features and layout like FL Studio, not limited
+to it), not a copy of the web version's screens. The web version stays the parity
+oracle for the audio engine; the interface follows FL: browser on the left, channel
+rack with a step sequencer, piano roll, playlist with tools, mixer with routing and
+effect slots, plugin windows, patterns, automation clips and the usual shortcuts.
+Cheap FL features come before pixel matching of the web version.

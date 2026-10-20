@@ -139,3 +139,21 @@ fn which_channel() {
         );
     }
 }
+
+#[test]
+fn the_default_project_renders_a_beat() {
+    let p = las_project::create::default_project();
+    let r = las_engine::render_mix_with(
+        &p,
+        &Default::default(),
+        &las_engine::RenderOptions {
+            sample_rate: 24000.0,
+            tail: 0.2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let peak = r.left.iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(peak > 0.05, "the starter beat is audible, peak {peak}");
+    assert!(r.seconds() > 1.5, "a bar at 128 bpm is about 1.9 s");
+}

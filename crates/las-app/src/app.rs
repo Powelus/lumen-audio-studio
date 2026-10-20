@@ -109,6 +109,8 @@ pub struct App {
     pub(crate) bound: Option<crate::inst::Bound>,
     /// The synth panels changed something that belongs in the bound channel.
     pub(crate) synth_dirty: bool,
+    /// Set when the user asked to quit and it is allowed.
+    pub(crate) quit: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -170,6 +172,7 @@ impl App {
             shell: crate::shell::Shell::new(),
             bound: None,
             synth_dirty: false,
+            quit: false,
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
@@ -183,6 +186,7 @@ impl App {
             app.shell.open.synth = true;
             app.switch(Instrument::Facet);
         }
+        app.new_project();
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
@@ -1481,6 +1485,9 @@ impl eframe::App for App {
         });
         self.poll_project(ctx);
         self.sync_bound();
+        if self.quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         for path in dropped {
             if path.extension().is_some_and(|e| e == "las") {
                 self.open_project(&path.to_string_lossy());

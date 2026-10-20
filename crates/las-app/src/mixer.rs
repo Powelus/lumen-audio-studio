@@ -15,7 +15,16 @@ pub enum MixEdit {
     /// Put an effect in the first empty slot.
     AddEffect {
         insert: usize,
+        slot: usize,
         plugin: String,
+    },
+    Rename {
+        insert: usize,
+        name: String,
+    },
+    Width {
+        insert: usize,
+        value: f64,
     },
     /// Empty a slot.
     RemoveEffect {
@@ -76,7 +85,21 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
             }
         }
         MixEdit::OpenEffect { .. } => {}
-        MixEdit::AddEffect { insert, plugin } => {
+        MixEdit::Rename { insert, name } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                t.name = name.clone();
+            }
+        }
+        MixEdit::Width { insert, value } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                t.width = value.clamp(0.0, 2.0);
+            }
+        }
+        MixEdit::AddEffect {
+            insert,
+            slot,
+            plugin,
+        } => {
             let Some(d) = las_dsp::fx::registry::descriptor(plugin) else {
                 return;
             };
@@ -84,7 +107,7 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
                 if t.slots.len() < las_project::MIXER_SLOTS {
                     t.slots.resize(las_project::MIXER_SLOTS, None);
                 }
-                if let Some(free) = t.slots.iter_mut().find(|s| s.is_none()) {
+                if let Some(free) = t.slots.get_mut(*slot).filter(|s| s.is_none()) {
                     *free = Some(las_project::EffectSlot {
                         id: las_project::create::uid("fx"),
                         plugin_id: plugin.clone(),
@@ -117,107 +140,206 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
     }
 }
 
-/// The insert that is the master (the one that plays to nothing).
-fn is_master(project: &Project, i: usize) -> bool {
-    i == 0 || project.mixer[i].output.is_none()
+/// What the mixer remembers between frames.
+#[derive(Default)]
+pub struct MixerState {
+    /// The insert whose effects and settings the panel on the right shows.
+    pub selected: usize,
 }
 
-/// Whether an insert has anything to show: the master, or an insert that is named,
-/// has effects, or has been moved from its defaults.
-fn in_use(project: &Project, i: usize) -> bool {
-    let t = &project.mixer[i];
-    is_master(project, i)
-        || project.channels.iter().any(|c| c.mixer_track == i)
-        || t.slots.iter().any(Option::is_some)
-        || (t.volume - 1.0).abs() > 1e-9
-        || t.pan != 0.0
-        || t.mute
-        || t.solo
-}
-
-pub fn draw(ui: &mut Ui, project: &Project) -> Vec<MixEdit> {
+pub fn draw(ui: &mut Ui, project: &Project, state: &mut MixerState) -> Vec<MixEdit> {
     let mut edits = Vec::new();
-    egui::ScrollArea::horizontal()
-        .auto_shrink([false, false])
-        .id_salt("mixer")
-        .show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                for i in 0..project.mixer.len() {
-                    if !in_use(project, i) {
-                        continue;
+    state.selected = state.selected.min(project.mixer.len().saturating_sub(1));
+    let panel_w = 190.0;
+    let avail = ui.available_width();
+    ui.horizontal_top(|ui| {
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, false])
+            .id_salt("mixer")
+            .max_width((avail - panel_w - 12.0).max(200.0))
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for i in 0..project.mixer.len() {
+                        strip(ui, project, i, state, &mut edits);
                     }
-                    strip(ui, project, i, &mut edits);
-                }
+                });
             });
+        ui.separator();
+        ui.vertical(|ui| {
+            ui.set_width(panel_w);
+            detail(ui, project, state.selected, &mut edits);
         });
+    });
     edits
 }
 
-fn strip(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
+/// The panel of the selected insert: its name, its effect slots, its stereo width.
+fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
+    let p = crate::theme::pal();
     let t = &project.mixer[i];
+    let mut name = t.name.clone();
+    if ui
+        .add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY))
+        .changed()
+    {
+        edits.push(MixEdit::Begin);
+        edits.push(MixEdit::Rename { insert: i, name });
+    }
+    ui.add_space(6.0);
+    ui.label(RichText::new("EFFECTS").size(11.0).strong().color(p.muted));
+    for n in 0..las_project::MIXER_SLOTS {
+        match t.slots.get(n).and_then(Option::as_ref) {
+            Some(s) => {
+                ui.horizontal(|ui| {
+                    let led = ui
+                        .add(
+                            egui::Button::new(if s.enabled { "\u{25cf}" } else { "\u{25cb}" })
+                                .small()
+                                .frame(false),
+                        )
+                        .on_hover_text("Switch on or off");
+                    if led.clicked() {
+                        edits.push(MixEdit::Begin);
+                        edits.push(MixEdit::SlotOn {
+                            insert: i,
+                            slot: n,
+                            on: !s.enabled,
+                        });
+                    }
+                    let b = ui
+                        .add(
+                            egui::Button::new(short(&s.plugin_id)).min_size(egui::vec2(100.0, 0.0)),
+                        )
+                        .on_hover_text(format!("{}\nRight click: remove", s.plugin_id));
+                    if b.clicked() {
+                        edits.push(MixEdit::OpenEffect { insert: i, slot: n });
+                    }
+                    b.context_menu(|ui| {
+                        if ui.button("Remove").clicked() {
+                            edits.push(MixEdit::Begin);
+                            edits.push(MixEdit::RemoveEffect { insert: i, slot: n });
+                            ui.close();
+                        }
+                    });
+                });
+            }
+            None => {
+                let r = ui.menu_button(
+                    RichText::new(format!("+  Slot {}", n + 1)).color(p.muted),
+                    |ui| {
+                        let mut shown = "";
+                        let mut list: Vec<_> =
+                            las_dsp::fx::registry::descriptors().iter().collect();
+                        list.sort_by(|a, b| a.category.cmp(&b.category));
+                        for d in list {
+                            if d.category != shown {
+                                shown = &d.category;
+                                ui.label(RichText::new(shown).strong().color(p.accent_text));
+                            }
+                            if ui.button(&d.name).on_hover_text(&d.description).clicked() {
+                                edits.push(MixEdit::Begin);
+                                edits.push(MixEdit::AddEffect {
+                                    insert: i,
+                                    slot: n,
+                                    plugin: d.id.clone(),
+                                });
+                                ui.close();
+                            }
+                        }
+                    },
+                );
+                r.response.on_hover_text("Add an effect");
+            }
+        }
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new("STEREO").size(11.0).strong().color(p.muted));
+    ui.horizontal(|ui| {
+        let mut w = t.width;
+        let (ch, start) = crate::steps::mini_knob(ui, &mut w, (0.0, 2.0), 1.0, "Width", p.accent);
+        if start {
+            edits.push(MixEdit::Begin);
+        }
+        if ch {
+            edits.push(MixEdit::Width {
+                insert: i,
+                value: w,
+            });
+        }
+        ui.label(
+            RichText::new(format!("Width {:.0}%", t.width * 100.0))
+                .size(11.0)
+                .color(p.muted),
+        );
+    });
+}
+
+fn strip(
+    ui: &mut Ui,
+    project: &Project,
+    i: usize,
+    state: &mut MixerState,
+    edits: &mut Vec<MixEdit>,
+) {
+    let t = &project.mixer[i];
+    let p = crate::theme::pal();
     let col = channel_colour_of(&t.color);
-    egui::Frame::new()
-        .fill(crate::theme::pal().panel)
-        .corner_radius(4.0)
-        .inner_margin(6.0)
+    let selected = state.selected == i;
+    let frame = egui::Frame::new()
+        .fill(p.panel)
+        .stroke(egui::Stroke::new(
+            if selected { 1.5 } else { 1.0 },
+            if selected { p.accent } else { p.border },
+        ))
+        .corner_radius(6.0)
+        .inner_margin(4.0)
         .show(ui, |ui| {
-            ui.set_width(76.0);
+            ui.set_width(58.0);
+            ui.set_min_height(300.0);
             ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(if i == 0 {
+                        "M".to_string()
+                    } else {
+                        i.to_string()
+                    })
+                    .size(10.0)
+                    .color(p.muted),
+                );
+                // the name on a pill in the insert's colour
                 let name = if t.name.is_empty() {
                     format!("Insert {i}")
                 } else {
                     t.name.clone()
                 };
-                let bar = ui.available_rect_before_wrap();
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_size(
-                        bar.min - egui::vec2(0.0, 3.0),
-                        egui::vec2(bar.width(), 3.0),
-                    ),
-                    1.0,
-                    col,
+                let (r, resp) =
+                    ui.allocate_exact_size(egui::vec2(54.0, 17.0), egui::Sense::click());
+                ui.painter().rect_filled(r, 4.0, col.gamma_multiply(0.55));
+                ui.painter().with_clip_rect(r).text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    egui::FontId::proportional(10.5),
+                    p.text,
                 );
-                ui.label(RichText::new(name).strong().size(12.0));
-                // pan
+                if resp.clicked() {
+                    state.selected = i;
+                }
                 let mut pan = t.pan;
-                let r = ui.add(
-                    egui::Slider::new(&mut pan, -1.0..=1.0)
-                        .show_value(false)
-                        .text(""),
-                );
-                if r.changed() {
-                    if r.drag_started() || !r.dragged() {
-                        edits.push(MixEdit::Begin);
-                    }
+                let (ch, start) =
+                    crate::steps::mini_knob(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.text2);
+                if start {
+                    edits.push(MixEdit::Begin);
+                }
+                if ch {
                     edits.push(MixEdit::Pan {
                         insert: i,
                         value: pan,
                     });
                 }
-                r.on_hover_text(format!("Pan {:+.0}", pan * 100.0));
-                // fader
-                let mut vol = t.volume;
-                let r = ui.add(
-                    egui::Slider::new(&mut vol, 0.0..=1.25)
-                        .vertical()
-                        .show_value(false),
-                );
-                if r.changed() {
-                    if r.drag_started() || !r.dragged() {
-                        edits.push(MixEdit::Begin);
-                    }
-                    edits.push(MixEdit::Volume {
-                        insert: i,
-                        value: vol,
-                    });
-                }
-                r.on_hover_text(format!("{} ({:.1} dB)", pct(vol), db(vol)));
-                ui.label(
-                    RichText::new(format!("{:.1} dB", db(vol)))
-                        .weak()
-                        .size(10.5),
-                );
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     let m = ui.selectable_label(t.mute, "M");
                     if m.clicked() {
                         edits.push(MixEdit::Begin);
@@ -235,78 +357,33 @@ fn strip(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                         });
                     }
                 });
-                ui.separator();
-                for (n, slot) in t.slots.iter().enumerate() {
-                    let Some(s) = slot else { continue };
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        let led = ui
-                            .add(
-                                egui::Button::new(if s.enabled { "\u{25cf}" } else { "\u{25cb}" })
-                                    .small()
-                                    .frame(false),
-                            )
-                            .on_hover_text("Switch on or off");
-                        if led.clicked() {
-                            edits.push(MixEdit::Begin);
-                            edits.push(MixEdit::SlotOn {
-                                insert: i,
-                                slot: n,
-                                on: !s.enabled,
-                            });
-                        }
-                        let label = RichText::new(short(&s.plugin_id)).size(11.5);
-                        let label = if s.enabled { label } else { label.weak() };
-                        let b = ui
-                            .add(egui::Button::new(label).small())
-                            .on_hover_text(format!("{}\nRight click: remove", s.plugin_id));
-                        if b.clicked() {
-                            edits.push(MixEdit::OpenEffect { insert: i, slot: n });
-                        }
-                        b.context_menu(|ui| {
-                            if ui.button("Remove").clicked() {
-                                edits.push(MixEdit::Begin);
-                                edits.push(MixEdit::RemoveEffect { insert: i, slot: n });
-                                ui.close();
-                            }
-                        });
+                let mut vol = t.volume;
+                let r = ui.add(
+                    egui::Slider::new(&mut vol, 0.0..=1.25)
+                        .vertical()
+                        .show_value(false),
+                );
+                if r.changed() {
+                    if r.drag_started() || !r.dragged() {
+                        edits.push(MixEdit::Begin);
+                    }
+                    edits.push(MixEdit::Volume {
+                        insert: i,
+                        value: vol,
                     });
                 }
-                if t.slots.iter().filter(|s| s.is_some()).count() < las_project::MIXER_SLOTS {
-                    ui.menu_button("+", |ui| {
-                        let mut shown = "";
-                        let mut list: Vec<_> =
-                            las_dsp::fx::registry::descriptors().iter().collect();
-                        list.sort_by(|a, b| a.category.cmp(&b.category));
-                        for d in list {
-                            if d.category != shown {
-                                shown = &d.category;
-                                ui.label(
-                                    RichText::new(shown).strong().color(crate::theme::accent()),
-                                );
-                            }
-                            if ui.button(&d.name).on_hover_text(&d.description).clicked() {
-                                edits.push(MixEdit::Begin);
-                                edits.push(MixEdit::AddEffect {
-                                    insert: i,
-                                    plugin: d.id.clone(),
-                                });
-                                ui.close();
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Add an effect");
-                }
-                if is_master(project, i) {
-                    ui.label(
-                        RichText::new("master")
-                            .color(crate::theme::accent())
-                            .size(10.5),
-                    );
-                }
+                r.on_hover_text(format!("{} ({:.1} dB)", pct(vol), db(vol)));
+                let label = if t.volume <= 0.0 {
+                    "-\u{221e}".to_string()
+                } else {
+                    format!("{:.1}", db(vol))
+                };
+                ui.label(RichText::new(label).weak().size(10.0));
             });
         });
+    if frame.response.interact(egui::Sense::click()).clicked() {
+        state.selected = i;
+    }
 }
 
 fn db(v: f64) -> f64 {
@@ -407,10 +484,12 @@ mod tests {
     fn effects_are_added_to_the_first_free_slot_and_removed() {
         let mut p = project();
         let n = p.mixer[2].slots.iter().filter(|s| s.is_some()).count();
+        let free = p.mixer[2].slots.iter().position(|s| s.is_none()).unwrap();
         apply(
             &mut p,
             &MixEdit::AddEffect {
                 insert: 2,
+                slot: free,
                 plugin: "las-hall".into(),
             },
         );
@@ -434,6 +513,7 @@ mod tests {
             &mut p,
             &MixEdit::AddEffect {
                 insert: 2,
+                slot: 0,
                 plugin: "nothing".into(),
             },
         );
@@ -441,6 +521,7 @@ mod tests {
             &mut p,
             &MixEdit::AddEffect {
                 insert: 999,
+                slot: 0,
                 plugin: "las-hall".into(),
             },
         );
@@ -459,9 +540,10 @@ mod tests {
         let p = project();
         let ctx = egui::Context::default();
         let mut out = Vec::new();
+        let mut state = MixerState::default();
         for _ in 0..2 {
             crate::widgets::run_frame(&ctx, egui::RawInput::default(), |ui| {
-                out = draw(ui, &p);
+                out = draw(ui, &p, &mut state);
             });
         }
         assert!(out.is_empty());
