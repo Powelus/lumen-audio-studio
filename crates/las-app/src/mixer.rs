@@ -549,7 +549,7 @@ fn strip(
         .inner_margin(4.0)
         .show(ui, |ui| {
             ui.set_width(58.0);
-            ui.set_min_height(300.0);
+            ui.set_min_height(360.0);
             ui.vertical_centered(|ui| {
                 ui.label(
                     RichText::new(if i == 0 {
@@ -621,18 +621,7 @@ fn strip(
                     }
                 });
                 let mut vol = t.volume;
-                let r = ui
-                    .horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        let r = ui.add(
-                            egui::Slider::new(&mut vol, 0.0..=1.25)
-                                .vertical()
-                                .show_value(false),
-                        );
-                        crate::widgets::meter(ui, peak, egui::vec2(6.0, 100.0));
-                        r
-                    })
-                    .inner;
+                let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, 190.0);
                 if r.changed() {
                     if r.drag_started() || !r.dragged() {
                         edits.push(MixEdit::Begin);

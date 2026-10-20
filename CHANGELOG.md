@@ -2,6 +2,14 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.35
+
+FL style faders, an undo history, and the "Modern Talking" bass.
+
+- Mixer faders in FL's style: a tall groove with a dB scale and a 0 dB line, a ridged fader cap, and a segmented meter that runs green, yellow and red. Drag to move (Shift for fine), double-click for 0 dB; the tooltip shows the level in dB. The mixer window is taller to fit them.
+- Edit > History lists every step undo can reach, each named by what it did ("Add channel", "Tempo 99.0", "Edit Kick", "Delete notes", "Mixer"...), plus the steps redo can reach. A click goes straight to that step.
+- "Modern Talking" (Vortex and Polaris, Bass): a talking wobble bass. A formant wavetable and a reese, a sine sub, and a formant filter, with a tempo-synced LFO sweeping both the table and the filter, into drive and compression. A test checks that it sounds and that its tone moves in quarter notes.
+
 ## 0.2.0-alpha.34
 
 Instrument windows that look like plugins, every instrument in the browser, MP3 export, and piano roll scales and chord stamps.

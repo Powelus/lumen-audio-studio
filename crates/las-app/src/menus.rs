@@ -389,6 +389,45 @@ impl App {
         }
     }
 
+    /// Every step undo and redo can reach; a click goes to that step.
+    pub(crate) fn history_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.shell.open.history;
+        let (back, forward) = self.project.history();
+        let mut go = None;
+        egui::Window::new("History")
+            .open(&mut open)
+            .default_size([260.0, 360.0])
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let n = back.len() as i32;
+                    if ui.selectable_label(false, "Opened").clicked() {
+                        go = Some(-n);
+                    }
+                    for (i, label) in back.iter().enumerate() {
+                        let steps = i as i32 + 1 - n;
+                        if ui.selectable_label(steps == 0, label).clicked() && steps != 0 {
+                            go = Some(steps);
+                        }
+                    }
+                    for (i, label) in forward.iter().enumerate() {
+                        if ui
+                            .add(egui::Button::selectable(
+                                false,
+                                RichText::new(label).weak().italics(),
+                            ))
+                            .clicked()
+                        {
+                            go = Some(i as i32 + 1);
+                        }
+                    }
+                });
+            });
+        if let Some(s) = go {
+            self.project.travel(s);
+        }
+        self.shell.open.history = open;
+    }
+
     pub(crate) fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.shell.open.about;
         egui::Window::new("About")
@@ -464,6 +503,11 @@ impl App {
             }
             if ui.button("Redo          Ctrl+Shift+Z").clicked() {
                 self.project.redo();
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("History...").clicked() {
+                self.shell.open.history = true;
                 ui.close();
             }
         });

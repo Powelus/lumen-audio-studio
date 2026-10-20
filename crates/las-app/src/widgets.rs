@@ -284,3 +284,121 @@ pub fn run_frame(ctx: &egui::Context, input: egui::RawInput, f: impl FnMut(&mut 
     let mut out = ctx.run_ui(input, f);
     out.textures_delta.clear();
 }
+
+/// Gain to decibels, for the fader scale.
+fn gain_db(g: f64) -> f64 {
+    if g <= 1e-5 {
+        -100.0
+    } else {
+        20.0 * g.log10()
+    }
+}
+
+/// Where a gain sits on a fader (0 at the bottom, 1 at the top): a curve like a
+/// console's, with unity at about three quarters of the travel.
+pub fn fader_pos(g: f64, max: f64) -> f64 {
+    (g / max).clamp(0.0, 1.0).powf(0.5)
+}
+
+fn fader_gain(pos: f64, max: f64) -> f64 {
+    pos.clamp(0.0, 1.0).powi(2) * max
+}
+
+/// A mixer fader in FL's style: a tall groove with a dB scale, a ridged cap and a
+/// segmented level meter beside it. Drag to move it, Shift for fine steps,
+/// double-click for unity. Returns the response; `changed` is set when it moved.
+pub fn fader(ui: &mut Ui, value: &mut f64, max: f64, peak: f32, height: f32) -> egui::Response {
+    let p = crate::theme::pal();
+    let (r, mut resp) = ui.allocate_exact_size(vec2(44.0, height), Sense::click_and_drag());
+    let groove = Rect::from_center_size(
+        pos2(r.left() + 16.0, r.center().y),
+        vec2(6.0, height - 16.0),
+    );
+    let travel = (groove.top() + 6.0, groove.bottom() - 6.0);
+    if resp.double_clicked() {
+        *value = 1.0;
+        resp.mark_changed();
+    } else if resp.dragged() {
+        let fine = ui.input(|i| i.modifiers.shift);
+        let dy = resp.drag_delta().y as f64 / f64::from(travel.1 - travel.0);
+        let pos = fader_pos(*value, max) - dy * if fine { 0.2 } else { 1.0 };
+        *value = fader_gain(pos, max);
+        resp.mark_changed();
+    }
+    let painter = ui.painter_at(r);
+    // dB marks
+    for db in [6.0f64, 0.0, -6.0, -12.0, -24.0, -48.0] {
+        let pos = fader_pos(10f64.powf(db / 20.0), max) as f32;
+        if pos <= 0.0 {
+            continue;
+        }
+        let y = travel.1 - pos * (travel.1 - travel.0);
+        painter.line_segment(
+            [pos2(groove.left() - 6.0, y), pos2(groove.left() - 2.0, y)],
+            Stroke::new(1.0, p.muted),
+        );
+        if db == 0.0 {
+            painter.line_segment(
+                [pos2(groove.left() - 9.0, y), pos2(groove.right() + 2.0, y)],
+                Stroke::new(1.0, p.text2),
+            );
+        }
+    }
+    painter.rect_filled(groove, 3.0, p.well_deep);
+    // the cap
+    let pos = fader_pos(*value, max) as f32;
+    let y = travel.1 - pos * (travel.1 - travel.0);
+    let cap = Rect::from_center_size(pos2(groove.center().x, y), vec2(22.0, 30.0));
+    painter.rect_filled(
+        cap.translate(vec2(0.0, 2.0)),
+        3.0,
+        Color32::from_black_alpha(90),
+    );
+    let hot = resp.hovered() || resp.dragged();
+    painter.rect_filled(cap, 3.0, if hot { p.raised2 } else { p.raised });
+    for k in [-8.0, -4.0, 4.0, 8.0] {
+        painter.line_segment(
+            [
+                pos2(cap.left() + 4.0, y + k),
+                pos2(cap.right() - 4.0, y + k),
+            ],
+            Stroke::new(1.0, Color32::from_black_alpha(80)),
+        );
+    }
+    painter.line_segment(
+        [pos2(cap.left() + 2.0, y), pos2(cap.right() - 2.0, y)],
+        Stroke::new(2.0, crate::theme::accent()),
+    );
+    // the meter: segments from green through yellow to red
+    let m = Rect::from_min_max(
+        pos2(r.right() - 12.0, groove.top()),
+        pos2(r.right() - 4.0, groove.bottom()),
+    );
+    painter.rect_filled(m, 2.0, p.well_deep);
+    let segs = 28;
+    let lit = (fader_pos(f64::from(peak), max) * segs as f64).round() as usize;
+    let seg_h = m.height() / segs as f32;
+    for s in 0..segs.min(lit) {
+        let frac = s as f32 / segs as f32;
+        let col = if frac > 0.86 {
+            Color32::from_rgb(240, 70, 60)
+        } else if frac > 0.7 {
+            Color32::from_rgb(240, 200, 60)
+        } else {
+            Color32::from_rgb(80, 220, 110)
+        };
+        let yb = m.bottom() - s as f32 * seg_h;
+        painter.rect_filled(
+            Rect::from_min_max(
+                pos2(m.left() + 1.0, yb - seg_h + 1.0),
+                pos2(m.right() - 1.0, yb),
+            ),
+            0.0,
+            col,
+        );
+    }
+    resp.on_hover_text(format!(
+        "{:.1} dB\nDrag, Shift for fine, double-click for 0 dB",
+        gain_db(*value)
+    ))
+}

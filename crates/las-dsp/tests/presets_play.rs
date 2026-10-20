@@ -70,3 +70,32 @@ fn every_facet_preset_plays() {
 fn every_mist_preset_plays() {
     check("mist", &|| Box::new(mist_engine(SR, 1)));
 }
+
+/// "Modern Talking", a talking wobble bass: it sounds, and its tone moves (the LFO
+/// sweeps the formant filter and the table), so its loudness rises and falls in
+/// quarter notes instead of staying flat.
+#[test]
+fn modern_talking_talks() {
+    for id in ["vortex", "polaris"] {
+        let b = bank(id).unwrap();
+        let i = b.find("Modern Talking").expect("the preset is in the bank");
+        assert_eq!(b.presets[i].category, "Bass");
+        let mut e = synth_engine(SR, 1);
+        e.set_patch(&b.patch(i).unwrap()).unwrap();
+        // a low E, where a bass lives
+        let (l, _) = play(&mut e, 40.0);
+        let win = (SR * 0.02) as usize;
+        let levels: Vec<f32> = l[..SR as usize]
+            .chunks(win)
+            .map(|c| (c.iter().map(|x| x * x).sum::<f32>() / c.len() as f32).sqrt())
+            .collect();
+        let (lo, hi) = levels[5..]
+            .iter()
+            .fold((f32::MAX, 0f32), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!(hi > 0.02, "{id}: it sounds ({hi})");
+        assert!(
+            hi / lo.max(1e-6) > 1.3,
+            "{id}: the tone moves ({lo} to {hi})"
+        );
+    }
+}
