@@ -169,7 +169,7 @@ mod tests {
         let mut selected = 0usize;
         let mut seen = 0;
         for pattern in 0..project.patterns.len().max(1) {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::widgets::run_frame(&ctx, egui::RawInput::default(), |ui| {
                 draw(ui, &project, pattern, &mut selected, Some(100.0));
                 seen += 1;
             });
