@@ -42,11 +42,18 @@ pub fn apply(state: &mut Value, changes: &[(u32, f64)]) {
     }
 }
 
-/// Sliders for the parameters of the plugin `state` names; what the user changed.
-pub fn params_ui(ui: &mut Ui, state: &Value) -> Vec<(u32, f64)> {
+/// What the user did in the parameter list.
+#[derive(Default)]
+pub struct ParamsOut {
+    pub changes: Vec<(u32, f64)>,
+    /// A parameter to automate: its id, name and where it is now (0 to 1).
+    pub automate: Option<(u32, String, f64)>,
+}
+
+/// Sliders for the parameters of the plugin `state` names. Right click one to automate it.
+pub fn params_ui(ui: &mut Ui, state: &Value) -> ParamsOut {
+    let mut out = ParamsOut::default();
     let id = plugin_id(state);
-    let params = params_of(id);
-    let mut changes = Vec::new();
     if find(id).is_none() {
         ui.label(
             RichText::new(format!(
@@ -54,8 +61,9 @@ pub fn params_ui(ui: &mut Ui, state: &Value) -> Vec<(u32, f64)> {
             ))
             .color(pal().muted),
         );
-        return changes;
+        return out;
     }
+    let params = params_of(id);
     if params.is_empty() {
         ui.label(RichText::new("This plugin has no parameters to show.").weak());
     }
@@ -67,15 +75,29 @@ pub fn params_ui(ui: &mut Ui, state: &Value) -> Vec<(u32, f64)> {
                 ui.label(&p.name);
                 let r = ui.add(egui::Slider::new(&mut v, p.min..=p.max));
                 if r.changed() {
-                    changes.push((p.id, v));
+                    out.changes.push((p.id, v));
                 }
                 if r.double_clicked() {
-                    changes.push((p.id, p.default));
+                    out.changes.push((p.id, p.default));
                 }
+                r.context_menu(|ui| {
+                    if ui.button("Create automation clip").clicked() {
+                        let at = ((v - p.min) / (p.max - p.min)).clamp(0.0, 1.0);
+                        out.automate = Some((p.id, p.name.clone(), at));
+                        ui.close();
+                    }
+                });
                 ui.end_row();
             }
         });
-    changes
+    out
+}
+
+fn format_name(f: las_host::Format) -> &'static str {
+    match f {
+        las_host::Format::Clap => "CLAP",
+        las_host::Format::Vst3 => "VST3",
+    }
 }
 
 impl App {
@@ -89,15 +111,30 @@ impl App {
         else {
             return;
         };
-        let (name, state) = (c.name.clone(), c.state.clone());
-        ui.label(RichText::new(name).size(16.0).strong());
+        let (name, state, channel_id) = (c.name.clone(), c.state.clone(), c.id.clone());
+        ui.label(RichText::new(&name).size(16.0).strong());
         if let Some(info) = find(plugin_id(&state)) {
-            ui.label(RichText::new(format!("{} ({})", info.name, info.vendor)).weak());
+            ui.label(
+                RichText::new(format!(
+                    "{} ({}, {})",
+                    info.name,
+                    info.vendor,
+                    format_name(info.format)
+                ))
+                .weak(),
+            );
         }
         ui.separator();
-        let changes = egui::ScrollArea::vertical()
+        let ParamsOut { changes, automate } = egui::ScrollArea::vertical()
             .show(ui, |ui| params_ui(ui, &state))
             .inner;
+        if let Some((id, pname, start)) = automate {
+            self.project.create_automation(&crate::auto::AutoRequest {
+                target: crate::auto::plugin_target(&channel_id, &format!("p.{id}")),
+                name: format!("{name} {pname}"),
+                start,
+            });
+        }
         if !changes.is_empty() {
             self.project.modify_coalesced("hosted", move |p| {
                 if let Some(c) = p.channels.get_mut(channel) {
@@ -119,7 +156,7 @@ impl App {
         else {
             return;
         };
-        let (state, mut on, mut mix) = (s.state.clone(), s.enabled, s.mix);
+        let (state, mut on, mut mix, slot_id) = (s.state.clone(), s.enabled, s.mix, s.id.clone());
         let (mut on_changed, mut mix_changed, mut remove) = (false, false, false);
         ui.horizontal(|ui| {
             on_changed = ui.checkbox(&mut on, "").changed();
@@ -138,9 +175,16 @@ impl App {
             });
         });
         ui.separator();
-        let changes = egui::ScrollArea::vertical()
+        let ParamsOut { changes, automate } = egui::ScrollArea::vertical()
             .show(ui, |ui| params_ui(ui, &state))
             .inner;
+        if let Some((id, pname, start)) = automate {
+            self.project.create_automation(&crate::auto::AutoRequest {
+                target: crate::auto::effect_target(insert, &slot_id, &format!("p.{id}")),
+                name: format!("{} {pname}", name_of(&state)),
+                start,
+            });
+        }
         if remove {
             self.project.modify(true, |p| {
                 if let Some(s) = p.mixer.get_mut(insert).and_then(|t| t.slots.get_mut(slot)) {
@@ -186,7 +230,7 @@ impl App {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("EXTERNAL (CLAP)")
+                RichText::new("EXTERNAL (CLAP, VST3)")
                     .size(11.0)
                     .strong()
                     .color(p.muted),
@@ -197,7 +241,7 @@ impl App {
                 .clicked()
             {
                 std::thread::spawn(|| {
-                    las_host::rescan(&las_host::search_paths());
+                    las_host::rescan(&las_host::all_search_paths());
                 });
             }
         });
@@ -205,7 +249,7 @@ impl App {
         if list.is_empty() {
             ui.label(
                 RichText::new(
-                    "None found. Plugins are looked for in the usual CLAP folders and CLAP_PATH.",
+                    "None found. Plugins are looked for in the usual CLAP and VST3 folders, and in CLAP_PATH and VST3_PATH.",
                 )
                 .weak()
                 .size(11.0),

@@ -782,6 +782,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "com-scrape-types"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ce183b975b8fc736a20919c4002717255fbd867df575c792aeefa9a56a73ad0"
+
+[[package]]
 name = "combine"
 version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2142,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "las-app"
-version = "0.2.0-alpha.30"
+version = "0.2.0-alpha.31"
 dependencies = [
  "cpal",
  "eframe",
@@ -2159,7 +2165,7 @@ dependencies = [
 
 [[package]]
 name = "las-cli"
-version = "0.2.0-alpha.30"
+version = "0.2.0-alpha.31"
 dependencies = [
  "hound",
  "las-dsp",
@@ -2170,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "las-dsp"
-version = "0.2.0-alpha.30"
+version = "0.2.0-alpha.31"
 dependencies = [
  "serde",
  "serde_json",
@@ -2178,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "las-engine"
-version = "0.2.0-alpha.30"
+version = "0.2.0-alpha.31"
 dependencies = [
  "claxon",
  "flacenc",
@@ -2190,19 +2196,21 @@ dependencies = [
 
 [[package]]
 name = "las-host"
-version = "0.2.0-alpha.30"
+version = "0.2.0-alpha.31"
 dependencies = [
  "clack-extensions",
  "clack-host",
  "las-dsp",
  "las-engine",
  "las-project",
+ "libloading 0.8.9",
  "serde_json",
+ "vst3",
 ]
 
 [[package]]
 name = "las-project"
-version = "0.2.0-alpha.30"
+version = "0.2.0-alpha.31"
 dependencies = [
  "aes-gcm",
  "crc32fast",
@@ -2215,10 +2223,17 @@ dependencies = [
 
 [[package]]
 name = "las-testplug"
-version = "0.2.0-alpha.30"
+version = "0.2.0-alpha.31"
 dependencies = [
  "clack-extensions",
  "clack-plugin",
+]
+
+[[package]]
+name = "las-testvst3"
+version = "0.2.0-alpha.31"
+dependencies = [
+ "vst3",
 ]
 
 [[package]]
@@ -4144,6 +4159,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vst3"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e31e3fe7a6f028ded8c5a9984cf283319e6dc63572c9b71da1d4ee9d71d3b6bf"
+dependencies = [
+ "com-scrape-types",
+]
 
 [[package]]
 name = "walkdir"

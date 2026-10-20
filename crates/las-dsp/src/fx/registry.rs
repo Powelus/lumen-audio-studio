@@ -430,6 +430,15 @@ pub trait External: Send {
     fn latency(&self) -> f64 {
         0.0
     }
+
+    /// Where the next block starts, in frames.
+    fn set_time(&mut self, _frame: usize) {}
+
+    /// Timed automation of a parameter (`points` are time in seconds and 0 to 1):
+    /// whether `path` is one this effect takes.
+    fn automate(&mut self, _path: &str, _points: &[(f64, f64)], _first: bool) -> bool {
+        false
+    }
 }
 
 /// A running effect.
@@ -637,6 +646,7 @@ impl EffectUnit {
             EffectUnit::Chorus(f) => f.frame = frame,
             EffectUnit::Phaser(f) => f.frame = frame,
             EffectUnit::Stereo(f) => f.frame = frame,
+            EffectUnit::External(f) => f.set_time(frame),
             _ => {}
         }
     }
@@ -646,6 +656,7 @@ impl EffectUnit {
     pub fn automate(&mut self, path: &str, points: &[(f64, f64)], first: bool) -> bool {
         match self {
             EffectUnit::Eq(eq) => eq.automate(path, points, first),
+            EffectUnit::External(e) => e.automate(path, points, first),
             _ => false,
         }
     }

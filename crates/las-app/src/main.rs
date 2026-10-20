@@ -33,7 +33,7 @@ fn main() -> eframe::Result {
     // plugins are looked for in the background; the browser lists what is found
     las_host::install();
     std::thread::spawn(|| {
-        las_host::rescan(&las_host::search_paths());
+        las_host::rescan(&las_host::all_search_paths());
     });
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

@@ -378,11 +378,7 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                             .filter(las_host::PluginInfo::is_effect)
                             .collect();
                         if !external.is_empty() {
-                            ui.label(
-                                RichText::new("External (CLAP)")
-                                    .strong()
-                                    .color(p.accent_text),
-                            );
+                            ui.label(RichText::new("External").strong().color(p.accent_text));
                         }
                         for info in external {
                             if ui.button(&info.name).on_hover_text(&info.vendor).clicked() {

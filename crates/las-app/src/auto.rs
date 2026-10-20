@@ -28,6 +28,11 @@ pub fn channel_target(channel_id: &str, param: &str) -> Value {
     json!({ "kind": "channel", "channelId": channel_id, "param": param })
 }
 
+/// A parameter of a channel's hosted plugin (`p.<id>`).
+pub fn plugin_target(channel_id: &str, param: &str) -> Value {
+    json!({ "kind": "plugin", "channelId": channel_id, "param": param })
+}
+
 pub fn master_target(param: &str) -> Value {
     json!({ "kind": "master", "param": param })
 }
@@ -175,7 +180,7 @@ pub fn describe_target(p: &Project, target: &Value) -> String {
             format!("{name} {}", s("param"))
         }
         "master" => format!("Master {}", s("param")),
-        "channel" => {
+        "channel" | "plugin" => {
             let name = p
                 .channels
                 .iter()
@@ -191,7 +196,13 @@ pub fn describe_target(p: &Project, target: &Value) -> String {
                 .into_iter()
                 .flat_map(|m| m.slots.iter().flatten())
                 .find(|x| x.id == s("slotId"));
-            let fx = slot.map_or("?", |x| x.plugin_id.as_str());
+            let fx = slot.map_or("?".to_string(), |x| {
+                if x.plugin_id == las_host::HOSTED {
+                    crate::hosted::name_of(&x.state)
+                } else {
+                    x.plugin_id.clone()
+                }
+            });
             format!("{fx} {}", s("param"))
         }
         other => other.to_string(),

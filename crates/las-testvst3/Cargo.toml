@@ -1,0 +1,16 @@
+[package]
+name = "las-testvst3"
+description = "Lumen Audio Studio: a small VST3 plugin to test the host with"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vst3 = "0.3.0"
+
+[lints.rust]
+unsafe_code = "allow"
