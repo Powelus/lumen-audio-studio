@@ -48,6 +48,11 @@ pub fn rename(p: &mut Project, target: RenameTarget, name: &str) {
             }
             p.playlist.tracks[i].name = name.to_string();
         }
+        RenameTarget::Marker(id) => {
+            if let Some(m) = p.markers.iter_mut().flatten().find(|m| m.id == id) {
+                m.name = name.chars().take(80).collect();
+            }
+        }
     }
 }
 

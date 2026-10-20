@@ -45,6 +45,11 @@ pub enum PlEdit {
     },
     /// Switch a track's mute on or off.
     TrackMute(usize),
+    /// Put a song marker at a tick.
+    AddMarker(f64),
+    DeleteMarker(String),
+    /// Ask for a new name for a marker (by id).
+    AskRenameMarker(String),
     /// Ask for a new name for a track.
     AskRenameTrack(usize),
     /// Open the editor of an automation clip (by the clip's own id).
@@ -99,6 +104,8 @@ enum Drag {
 }
 
 pub struct PlaylistState {
+    /// Where the last right click landed (tick) and the marker under it, for its menu.
+    pub menu_at: Option<(f64, Option<String>)>,
     /// Points per tick.
     pub zoom: f32,
     pub row: f32,
@@ -199,6 +206,7 @@ impl Default for PlaylistState {
             marquee: None,
             group_last: None,
             drag: None,
+            menu_at: None,
         }
     }
 }
@@ -280,7 +288,31 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
     let rows = track_count(project);
     let clips = &mut project.playlist.clips;
     match edit {
-        PlEdit::Begin | PlEdit::Seek(_) | PlEdit::OpenAuto(_) | PlEdit::AskRenameTrack(_) => {}
+        PlEdit::Begin
+        | PlEdit::Seek(_)
+        | PlEdit::OpenAuto(_)
+        | PlEdit::AskRenameTrack(_)
+        | PlEdit::AskRenameMarker(_) => {}
+        PlEdit::AddMarker(t) => {
+            let list = project.markers.get_or_insert_with(Vec::new);
+            let name = format!("Marker {}", list.len() + 1);
+            list.push(las_project::Marker {
+                id: las_project::create::uid("mk_"),
+                tick: t.max(0.0),
+                name,
+                color: None,
+                extra: Default::default(),
+            });
+            list.sort_by(|a, b| a.tick.total_cmp(&b.tick));
+        }
+        PlEdit::DeleteMarker(id) => {
+            if let Some(list) = &mut project.markers {
+                list.retain(|m| &m.id != id);
+                if list.is_empty() {
+                    project.markers = None;
+                }
+            }
+        }
         PlEdit::TrackMute(t) => {
             // tracks that the project does not list yet are made as they are needed
             while project.playlist.tracks.len() <= *t {
@@ -667,6 +699,69 @@ pub fn draw(
                 t += bar;
                 n += 1;
             }
+            // song markers: a flag and a name on the ruler; a click jumps to one
+            let mut near_marker = None;
+            let pointer = ui.input(|i| i.pointer.hover_pos());
+            for m in project.markers.iter().flatten() {
+                let x = x_of(m.tick);
+                if x < vl + HEAD - 80.0 || x > vr {
+                    continue;
+                }
+                let flag = Rect::from_min_size(egui::pos2(x, vt + 14.0), egui::vec2(6.0, 8.0));
+                painter.line_segment(
+                    [egui::pos2(x, vt + 12.0), egui::pos2(x, vt + RULER)],
+                    Stroke::new(1.5, pl.accent),
+                );
+                painter.rect_filled(flag, 0.0, pl.accent);
+                painter.text(
+                    egui::pos2(x + 9.0, vt + 13.0),
+                    egui::Align2::LEFT_TOP,
+                    &m.name,
+                    egui::FontId::proportional(10.0),
+                    pl.text,
+                );
+                if pointer.is_some_and(|p| p.y < vt + RULER && (p.x - x).abs() < 8.0) {
+                    near_marker = Some(m.id.clone());
+                }
+            }
+            if let Some(p) = resp
+                .interact_pointer_pos()
+                .filter(|_| resp.secondary_clicked())
+            {
+                state.menu_at = Some((
+                    snapped(tick_at(p.x), state.snap).max(0.0),
+                    near_marker.clone(),
+                ));
+            }
+            resp.context_menu(|ui| {
+                let Some((t, near)) = state.menu_at.clone() else {
+                    ui.close();
+                    return;
+                };
+                if ui.button("Add marker here").clicked() {
+                    edits.push(PlEdit::Begin);
+                    edits.push(PlEdit::AddMarker(t));
+                    ui.close();
+                }
+                if let Some(id) = near {
+                    if ui.button("Rename marker...").clicked() {
+                        edits.push(PlEdit::AskRenameMarker(id.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Delete marker").clicked() {
+                        edits.push(PlEdit::Begin);
+                        edits.push(PlEdit::DeleteMarker(id));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                for m in project.markers.iter().flatten() {
+                    if ui.button(format!("Go to {}", m.name)).clicked() {
+                        edits.push(PlEdit::Seek(m.tick));
+                        ui.close();
+                    }
+                }
+            });
             mark_ruler(&painter, x_of(start), vt);
 
             // the mouse
@@ -1036,6 +1131,18 @@ mod tests {
     }
 
     #[test]
+    fn markers_are_added_in_order_and_deleted() {
+        let mut p = project();
+        apply(&mut p, &PlEdit::AddMarker(384.0));
+        apply(&mut p, &PlEdit::AddMarker(96.0));
+        let m = p.markers.clone().unwrap();
+        assert_eq!(m.iter().map(|m| m.tick).collect::<Vec<_>>(), [96.0, 384.0]);
+        apply(&mut p, &PlEdit::DeleteMarker(m[0].id.clone()));
+        apply(&mut p, &PlEdit::DeleteMarker(m[1].id.clone()));
+        assert!(p.markers.is_none());
+    }
+
+    #[test]
     fn tracks_are_muted_and_made_when_needed() {
         let mut p = project();
         p.playlist.tracks.clear();
@@ -1165,7 +1272,8 @@ mod tests {
 
     #[test]
     fn the_playlist_draws() {
-        let p = project();
+        let mut p = project();
+        apply(&mut p, &PlEdit::AddMarker(0.0));
         let ctx = egui::Context::default();
         let mut state = PlaylistState::default();
         let mut out = Vec::new();

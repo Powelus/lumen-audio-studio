@@ -55,11 +55,203 @@ pub enum Edit {
     Quantize {
         snap: f64,
     },
+    /// One of the Tools menu's operations, on the given notes (all notes when empty).
+    Tool {
+        op: NoteTool,
+        ids: Vec<String>,
+    },
     /// Sound a key (a note being placed or moved) or let go of it.
     Audition {
         key: i32,
         on: bool,
     },
+}
+
+/// The piano roll's Tools menu, after FL's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NoteTool {
+    /// Stretch each note to the start of the next one.
+    Legato,
+    /// Offset the notes of each chord, lowest first, by this many ticks each.
+    Strum(f64),
+    /// Mirror the keys upside down around the middle of their range.
+    Flip,
+    /// Mirror the notes in time.
+    Reverse,
+    /// Move starts and velocities by small random amounts (the seed makes it repeatable).
+    Humanize(u64),
+    /// Cut each note into pieces of this many ticks.
+    Chop(f64),
+    /// Move keys outside the scale to the nearest key inside it.
+    ToScale(i32, &'static [i32]),
+    /// Velocities rising from the first note to the last.
+    Ramp,
+    /// Double or halve the lengths and places, from the first note.
+    Stretch(f64),
+}
+
+/// The Tools menu's entries.
+pub const NOTE_TOOLS: [(&str, NoteTool, &str); 9] = [
+    (
+        "Legato",
+        NoteTool::Legato,
+        "Stretch each note to the next one",
+    ),
+    (
+        "Strum",
+        NoteTool::Strum(6.0),
+        "Spread each chord, lowest note first",
+    ),
+    ("Flip", NoteTool::Flip, "Turn the keys upside down"),
+    (
+        "Reverse",
+        NoteTool::Reverse,
+        "Play the notes backwards in time",
+    ),
+    (
+        "Humanize",
+        NoteTool::Humanize(0),
+        "Small random changes to timing and velocity",
+    ),
+    ("Chop", NoteTool::Chop(24.0), "Cut notes into sixteenths"),
+    (
+        "Velocity ramp",
+        NoteTool::Ramp,
+        "Velocities rising from first to last",
+    ),
+    (
+        "Double length",
+        NoteTool::Stretch(2.0),
+        "Twice as long and twice as far apart",
+    ),
+    (
+        "Half length",
+        NoteTool::Stretch(0.5),
+        "Half as long and half as far apart",
+    ),
+];
+
+/// Carry out a tool on the notes it picks.
+pub fn note_tool(notes: &mut Vec<Note>, op: NoteTool, ids: &[String]) {
+    let pick = |n: &Note| ids.is_empty() || ids.contains(&n.id);
+    let mut idx: Vec<usize> = (0..notes.len()).filter(|&i| pick(&notes[i])).collect();
+    if idx.is_empty() {
+        return;
+    }
+    idx.sort_by(|&a, &b| {
+        notes[a]
+            .pos
+            .total_cmp(&notes[b].pos)
+            .then(notes[a].key.cmp(&notes[b].key))
+    });
+    let start = notes[idx[0]].pos;
+    let end = idx
+        .iter()
+        .map(|&i| notes[i].pos + notes[i].len)
+        .fold(start, f64::max);
+    match op {
+        NoteTool::Legato => {
+            for (k, &i) in idx.iter().enumerate() {
+                let next = idx[k + 1..]
+                    .iter()
+                    .map(|&j| notes[j].pos)
+                    .find(|&p| p > notes[i].pos + 0.5);
+                if let Some(p) = next {
+                    notes[i].len = (p - notes[i].pos).max(1.0);
+                }
+            }
+        }
+        NoteTool::Strum(step) => {
+            let mut k = 0;
+            while k < idx.len() {
+                let at = notes[idx[k]].pos;
+                let mut chord: Vec<usize> = idx[k..]
+                    .iter()
+                    .copied()
+                    .take_while(|&j| (notes[j].pos - at).abs() < 0.5)
+                    .collect();
+                k += chord.len();
+                chord.sort_by_key(|&j| notes[j].key);
+                for (n, &j) in chord.iter().enumerate() {
+                    let d = step * n as f64;
+                    notes[j].pos += d;
+                    notes[j].len = (notes[j].len - d).max(1.0);
+                }
+            }
+        }
+        NoteTool::Flip => {
+            let lo = idx.iter().map(|&i| notes[i].key).min().unwrap_or(0);
+            let hi = idx.iter().map(|&i| notes[i].key).max().unwrap_or(0);
+            for &i in &idx {
+                notes[i].key = (lo + hi - notes[i].key).clamp(0, KEYS - 1);
+            }
+        }
+        NoteTool::Reverse => {
+            for &i in &idx {
+                notes[i].pos = (start + end - notes[i].pos - notes[i].len).max(0.0);
+            }
+        }
+        NoteTool::Humanize(seed) => {
+            let mut x = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407)
+                | 1;
+            let mut rnd = || {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+            };
+            for &i in &idx {
+                notes[i].pos = (notes[i].pos + rnd() * 3.0).max(0.0);
+                notes[i].vel = (notes[i].vel + rnd() * 0.08).clamp(0.05, 1.0);
+            }
+        }
+        NoteTool::Chop(piece) => {
+            let piece = piece.max(1.0);
+            let mut add = Vec::new();
+            for &i in &idx {
+                let n = &mut notes[i];
+                let mut p = n.pos + piece;
+                let stop = n.pos + n.len;
+                if n.len > piece {
+                    n.len = piece;
+                }
+                while p < stop - 0.5 {
+                    let mut c = n.clone();
+                    c.id = uid("n");
+                    c.pos = p;
+                    c.len = piece.min(stop - p);
+                    add.push(c);
+                    p += piece;
+                }
+            }
+            notes.extend(add);
+        }
+        NoteTool::ToScale(root, steps) => {
+            let inside = |k: i32| steps.contains(&(k - root).rem_euclid(12));
+            for &i in &idx {
+                let k = notes[i].key;
+                let to = (0..12)
+                    .flat_map(|d| [k - d, k + d])
+                    .find(|&c| inside(c))
+                    .unwrap_or(k);
+                notes[i].key = to.clamp(0, KEYS - 1);
+            }
+        }
+        NoteTool::Ramp => {
+            let n = idx.len().max(2) - 1;
+            for (k, &i) in idx.iter().enumerate() {
+                notes[i].vel = 0.3 + 0.7 * k as f64 / n as f64;
+            }
+        }
+        NoteTool::Stretch(f) => {
+            for &i in &idx {
+                notes[i].pos = start + (notes[i].pos - start) * f;
+                notes[i].len = (notes[i].len * f).max(1.0);
+            }
+        }
+    }
 }
 
 /// What a click on the roll does.
@@ -253,6 +445,7 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
                 n.vel = vel.clamp(0.0, 1.0);
             }
         }
+        Edit::Tool { op, ids } => note_tool(notes, *op, ids),
         Edit::Quantize { snap } => {
             let g = snap.max(1.0);
             for n in notes.iter_mut() {
@@ -851,6 +1044,42 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_tools_reshape_notes() {
+        let n = |key, pos, len| new_note(key, pos, len);
+        let mut v = vec![n(60, 0.0, 10.0), n(64, 0.0, 10.0), n(67, 48.0, 10.0)];
+        note_tool(&mut v, NoteTool::Legato, &[]);
+        assert_eq!((v[0].len, v[1].len, v[2].len), (48.0, 48.0, 10.0));
+        note_tool(&mut v, NoteTool::Strum(6.0), &[]);
+        assert_eq!((v[0].pos, v[1].pos, v[2].pos), (0.0, 6.0, 48.0));
+        note_tool(&mut v, NoteTool::Flip, &[]);
+        assert_eq!((v[0].key, v[1].key, v[2].key), (67, 63, 60));
+        let mut r = vec![n(60, 0.0, 24.0), n(62, 72.0, 24.0)];
+        note_tool(&mut r, NoteTool::Reverse, &[]);
+        assert_eq!((r[0].pos, r[1].pos), (72.0, 0.0));
+        let mut c = vec![n(60, 0.0, 96.0)];
+        note_tool(&mut c, NoteTool::Chop(24.0), &[]);
+        assert_eq!(c.len(), 4);
+        assert!(c.iter().all(|x| x.len == 24.0));
+        let mut s = vec![n(61, 0.0, 24.0), n(66, 24.0, 24.0)];
+        note_tool(&mut s, NoteTool::ToScale(0, SCALES[0].1), &[]);
+        assert_eq!((s[0].key, s[1].key), (60, 65));
+        let mut h = vec![n(60, 48.0, 24.0); 8];
+        let before = h.clone();
+        note_tool(&mut h, NoteTool::Humanize(7), &[]);
+        assert!(h
+            .iter()
+            .zip(&before)
+            .all(|(a, b)| (a.pos - b.pos).abs() <= 3.0 && (a.vel - b.vel).abs() <= 0.08));
+        assert!(h.iter().any(|a| a.pos != 48.0));
+        let mut m = vec![n(60, 0.0, 24.0), n(60, 24.0, 24.0), n(60, 48.0, 24.0)];
+        let only = vec![m[1].id.clone()];
+        note_tool(&mut m, NoteTool::Stretch(2.0), &only);
+        assert_eq!((m[0].len, m[1].len, m[2].len), (24.0, 48.0, 24.0));
+        note_tool(&mut m, NoteTool::Ramp, &[]);
+        assert!(m[0].vel < m[2].vel);
+    }
 
     #[test]
     fn a_stamp_draws_its_chord_and_a_plain_click_one_note() {
