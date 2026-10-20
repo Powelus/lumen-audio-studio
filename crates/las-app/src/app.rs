@@ -186,6 +186,10 @@ impl App {
         if std::env::args().any(|a| a == "--playlist") {
             app.project.page = crate::project::Page::Playlist;
         }
+        // `--mixer` starts on the mixer
+        if std::env::args().any(|a| a == "--mixer") {
+            app.project.page = crate::project::Page::Mixer;
+        }
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
             app.view = View::Effects;

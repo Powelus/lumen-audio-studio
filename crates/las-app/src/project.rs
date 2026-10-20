@@ -5,6 +5,7 @@
 
 use crate::app::App;
 use crate::audio::Command;
+use crate::mixer::{self, MixEdit};
 use crate::playlist::{self, PlEdit, PlaylistState};
 use crate::roll::{self, Edit, RollState};
 use crate::widgets::ACCENT;
@@ -66,6 +67,7 @@ pub enum Page {
     Rack,
     Roll,
     Playlist,
+    Mixer,
 }
 
 impl ProjectState {
@@ -134,6 +136,24 @@ impl ProjectState {
                     self.dirty = true;
                     self.stale = true;
                 }
+            }
+        }
+    }
+
+    /// Carry out the mixer edits of one frame.
+    pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
+        let Some(l) = &mut self.loaded else { return };
+        for e in edits {
+            if *e == MixEdit::Begin {
+                self.undo.push(l.project.clone());
+                if self.undo.len() > 200 {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            } else {
+                mixer::apply(Arc::make_mut(&mut l.project), e);
+                self.dirty = true;
+                self.stale = true;
             }
         }
     }
@@ -235,13 +255,6 @@ impl App {
             return;
         };
         let project = l.project.clone();
-        ui.label(
-            RichText::new(
-                "Double click to place the chosen pattern, drag to move, drag an edge to resize, \
-                 right click to delete, click the ruler to set where the song starts.",
-            )
-            .weak(),
-        );
         let edits = playlist::draw(
             ui,
             &project,
@@ -333,14 +346,38 @@ impl App {
 
     pub(crate) fn project_view(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label("Project file");
-            ui.add(egui::TextEdit::singleline(&mut self.project.path).desired_width(420.0));
+            ui.label("Project");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.project.path)
+                    .hint_text("path to a .las file, or drop one on the window")
+                    .desired_width(360.0),
+            );
             if ui.button("Open").clicked() {
                 let p = self.project.path.trim().to_string();
                 self.open_project(&p);
             }
+            if let Some(l) = &self.project.loaded {
+                ui.separator();
+                ui.label(
+                    RichText::new(&l.project.name)
+                        .size(16.0)
+                        .strong()
+                        .color(ACCENT),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{} BPM, {}/{}, {} channels, {} patterns, {} samples",
+                        l.project.bpm,
+                        l.project.time_sig.0,
+                        l.project.time_sig.1,
+                        l.project.channels.len(),
+                        l.project.patterns.len(),
+                        l.samples.len()
+                    ))
+                    .weak(),
+                );
+            }
         });
-        ui.label(RichText::new("Or drop a .las file on the window.").weak());
         if let Some(e) = &self.project.error {
             ui.colored_label(Color32::from_rgb(235, 70, 60), e);
         }
@@ -349,29 +386,9 @@ impl App {
         };
         let project = l.project.clone();
         let warnings = l.warnings.clone();
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new(&project.name)
-                .size(20.0)
-                .strong()
-                .color(ACCENT),
-        );
-        ui.label(
-            RichText::new(format!(
-                "{} BPM, {}/{}, {} channels, {} patterns, {} samples",
-                project.bpm,
-                project.time_sig.0,
-                project.time_sig.1,
-                project.channels.len(),
-                project.patterns.len(),
-                l.samples.len()
-            ))
-            .weak(),
-        );
         for w in &warnings {
             ui.label(RichText::new(w).color(Color32::from_rgb(230, 180, 60)));
         }
-        ui.add_space(8.0);
         let (playing, pos) = self
             .audio
             .as_ref()
@@ -381,6 +398,7 @@ impl App {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!busy, egui::Button::new("Play song"))
+                .on_hover_text("From the start marker on the playlist ruler")
                 .clicked()
             {
                 let from = self.project.start_tick;
@@ -410,9 +428,7 @@ impl App {
                         .size(18.0),
                 );
             }
-        });
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
+            ui.separator();
             ui.label("Pattern");
             for (i, p) in project.patterns.iter().enumerate() {
                 let name = if p.name.is_empty() {
@@ -423,11 +439,11 @@ impl App {
                 ui.selectable_value(&mut self.project.pattern, i, name);
             }
         });
-        ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.project.page, Page::Rack, "Channel rack");
             ui.selectable_value(&mut self.project.page, Page::Roll, "Piano roll");
             ui.selectable_value(&mut self.project.page, Page::Playlist, "Playlist");
+            ui.selectable_value(&mut self.project.page, Page::Mixer, "Mixer");
             ui.separator();
             if self.project.page == Page::Roll {
                 ui.label("Snap");
@@ -453,10 +469,17 @@ impl App {
             if self.project.dirty {
                 ui.label(RichText::new("unsaved changes").weak());
             }
+            let hint = match self.project.page {
+                Page::Rack => "Pick a channel to play it with the keys below.",
+                Page::Roll => "Click or drag to place notes, drag to move, right click deletes.",
+                Page::Playlist => {
+                    "Double click places the chosen pattern; drag moves, drag an edge resizes, right click deletes, click the ruler to set the start."
+                }
+                Page::Mixer => "Faders, pan, mute and solo; click an effect to switch it on or off.",
+            };
+            ui.label(RichText::new(hint).weak().size(11.0));
         });
-        ui.label(
-            RichText::new("Pick a channel to edit it and play it with the keys below.").weak(),
-        );
+        ui.separator();
         let head = (playing && self.project.looping).then_some(pos);
         match self.project.page {
             Page::Rack => self.rack(ui, head),
@@ -464,6 +487,11 @@ impl App {
             Page::Playlist => {
                 let song_head = (playing && !self.project.looping).then_some(pos);
                 self.playlist(ui, song_head);
+            }
+            Page::Mixer => {
+                let edits = mixer::draw(ui, &project);
+                drop(project);
+                self.project.edit_mixer(&edits);
             }
         }
     }
