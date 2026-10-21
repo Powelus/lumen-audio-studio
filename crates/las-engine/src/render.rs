@@ -149,6 +149,7 @@ pub(crate) struct Engine {
     br: Vec<f32>,
     vol: Vec<f32>,
     pan: Vec<f32>,
+    mono: Vec<f32>,
 }
 
 /// The clip's value at `t`, its stored points ramped, between clip ticks `from` and `to`.
@@ -734,7 +735,7 @@ impl Engine {
                 Vec::new()
             };
             // a channel whose settings cannot be read is silent; the rest still plays
-            let inst =
+            let mut inst =
                 match Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample, pad_samples)
                 {
                     Ok(i) => i,
@@ -751,6 +752,7 @@ impl Engine {
                         .map_err(|e| format!("{}: {}", c.name, e.0))?
                     }
                 };
+            inst.set_smart_disable(smart_disable(&c.extra));
             index.insert(c.id.clone(), channels.len());
             channels.push(ChannelRt {
                 inst,
@@ -788,6 +790,7 @@ impl Engine {
             br: vec![0.0; BLOCK],
             vol: vec![0.0; BLOCK],
             pan: vec![0.0; BLOCK],
+            mono: Vec::with_capacity(BLOCK),
         };
         let bpm0 = tempo_at(&e.project, 0.0, song);
         for ch in &mut e.channels {
@@ -827,6 +830,9 @@ impl Engine {
             ch.inst.set_position(beat, a.bpm);
             let (l, r) = (&mut self.bl[..n], &mut self.br[..n]);
             ch.inst.render(t0, l, r);
+            if ch.inst.is_asleep() {
+                continue;
+            }
             let mono = ch.inst.is_mono();
             let (vol, pan) = (&mut self.vol, &mut self.pan);
             ch.volume.fill(frame, vol, sr);
@@ -839,8 +845,10 @@ impl Engine {
             }
             if mono {
                 // a mono signal pans with the mono law, even in the middle
-                let src = l.to_vec();
-                mono_pan_a(&src, pan, l, r);
+                let src = &mut self.mono;
+                src.clear();
+                src.extend_from_slice(l);
+                mono_pan_a(src, pan, l, r);
             } else if pan.iter().any(|&p| p != 0.0) {
                 stereo_pan_a(l, r, pan);
             }
@@ -859,10 +867,27 @@ impl Engine {
         }
     }
 
+    /// The channels and the inserts that are running (not asleep, see smart disable).
+    pub fn awake(&self) -> (Vec<usize>, Vec<usize>) {
+        let ch = (0..self.channels.len())
+            .filter(|&i| !self.channels[i].inst.is_silent() && !self.channels[i].inst.is_asleep())
+            .collect();
+        let ins = (0..self.mixer.len())
+            .filter(|&i| !self.mixer.is_asleep(i))
+            .collect();
+        (ch, ins)
+    }
+
     /// The peak level of each insert, master first.
     pub fn insert_peaks(&self) -> &[f32] {
         &self.peaks
     }
+}
+
+/// Whether a channel or an effect slot may sleep while it is quiet (FL's "smart
+/// disable"): on unless the project says `"smartDisable": false`.
+pub fn smart_disable(extra: &las_project::Extra) -> bool {
+    extra.get("smartDisable") != Some(&serde_json::Value::Bool(false))
 }
 
 /// Render the project and return each tap's output, trimmed by its plugin delay.

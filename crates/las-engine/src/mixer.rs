@@ -5,7 +5,18 @@
 
 use crate::external::{plugin_host, PLUGIN_ID};
 use crate::fxauto::{effect_param_def, map_automation, SlotAuto};
-use crate::instrument::stereo_pan_a;
+use crate::instrument::{stereo_pan_a, QUIET};
+
+/// Denormal numbers (tiny values a decaying tail leaves) are slow on many processors:
+/// anything under -300 dB is made zero.
+#[inline]
+fn flush(x: f32) -> f32 {
+    if x.abs() < 1e-15 {
+        0.0
+    } else {
+        x
+    }
+}
 use crate::param::Param;
 use las_dsp::fx::registry::{descriptor, full_state, parse_params, EffectUnit, FxSlot};
 use las_project::{MixerTrack, MIXER_SLOTS};
@@ -97,6 +108,11 @@ struct Track {
     input_line: Option<Delay2>,
     routes: Vec<Route>,
     latency: f64,
+    /// Smart disable: whether this insert may sleep, and the frames its input and its
+    /// output have been quiet.
+    smart: bool,
+    quiet_in: usize,
+    quiet_out: usize,
 }
 
 pub struct Mixer {
@@ -112,6 +128,8 @@ pub struct Mixer {
     length: usize,
     wet_gain: Vec<f32>,
     dry_gain: Vec<f32>,
+    /// Frames of quiet in and out after which an insert sleeps.
+    hold: usize,
 }
 
 /// Inserts muted because another insert is soloed (FL semantics).
@@ -167,7 +185,11 @@ impl Mixer {
         let mut tracks: Vec<Track> = Vec::with_capacity(n);
         for (i, t) in mixer.iter().enumerate() {
             let mut slots = Vec::new();
+            let mut smart = true;
             for s in t.slots.iter().take(MIXER_SLOTS).flatten() {
+                if s.enabled && !crate::render::smart_disable(&s.extra) {
+                    smart = false;
+                }
                 let unit = if s.plugin_id == PLUGIN_ID {
                     let hosted = plugin_host().and_then(|h| h.effect(&s.state, sr));
                     let Some(p) = hosted else {
@@ -232,6 +254,9 @@ impl Mixer {
                 input_line: None,
                 routes: Vec::new(),
                 latency: 0.0,
+                smart,
+                quiet_in: 0,
+                quiet_out: 0,
             });
         }
         for t in &mut tracks {
@@ -314,7 +339,15 @@ impl Mixer {
             length: usize::MAX,
             wet_gain: Vec::new(),
             dry_gain: Vec::new(),
+            hold: (crate::instrument::SMART_HOLD * sr) as usize,
         }
+    }
+
+    /// Whether insert `index` is asleep (smart disable: quiet in and out for a while).
+    pub fn is_asleep(&self, index: usize) -> bool {
+        self.tracks
+            .get(index)
+            .is_some_and(|t| t.smart && t.quiet_in >= self.hold && t.quiet_out >= self.hold)
     }
 
     /// Order the inserts so each comes after everything that feeds it.
@@ -521,6 +554,21 @@ impl Mixer {
                     t.sum[0][j] += t.input[0][j];
                     t.sum[1][j] += t.input[1][j];
                 }
+                let quiet = |b: &[f32]| b.iter().all(|s| s.abs() < QUIET);
+                if quiet(&t.sum[0][..n]) && quiet(&t.sum[1][..n]) {
+                    t.quiet_in = t.quiet_in.saturating_add(n);
+                } else {
+                    t.quiet_in = 0;
+                }
+            }
+            // smart disable: nothing comes in and the tail has died away
+            if self.is_asleep(i) {
+                let t = &mut self.tracks[i];
+                for b in &mut t.out {
+                    b.resize(n, 0.0);
+                    b.fill(0.0);
+                }
+                continue;
             }
             // effects
             let slot_count = self.tracks[i].slots.len();
@@ -584,8 +632,13 @@ impl Mixer {
             }
             for j in 0..n {
                 let g = fade_v[j] * t.mute;
-                ol[j] *= g;
-                or[j] *= g;
+                ol[j] = flush(ol[j] * g);
+                or[j] = flush(or[j] * g);
+            }
+            if ol.iter().chain(or.iter()).all(|s| s.abs() < QUIET) {
+                t.quiet_out = t.quiet_out.saturating_add(n);
+            } else {
+                t.quiet_out = 0;
             }
             // routes
             for ri in 0..self.tracks[i].routes.len() {
@@ -602,11 +655,19 @@ impl Mixer {
                 if let Some(line) = &mut t.routes[ri].line {
                     line.run(tl, tr, delay * self.sr);
                 }
-                let (cl, cr) = (t.tmp[0].clone(), t.tmp[1].clone());
-                let dest = &mut self.tracks[target];
+                if target == i {
+                    continue;
+                }
+                let (src, dest) = if i < target {
+                    let (a, b) = self.tracks.split_at_mut(target);
+                    (&a[i], &mut b[0])
+                } else {
+                    let (a, b) = self.tracks.split_at_mut(i);
+                    (&b[0], &mut a[target])
+                };
                 for j in 0..n {
-                    dest.sum[0][j] += cl[j];
-                    dest.sum[1][j] += cr[j];
+                    dest.sum[0][j] += src.tmp[0][j];
+                    dest.sum[1][j] += src.tmp[1][j];
                 }
             }
         }

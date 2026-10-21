@@ -906,10 +906,20 @@ impl Vst3 {
         let mut in_ptrs = [i0.as_mut_ptr(), i1.as_mut_ptr()];
         let mut out_ptrs = [o0.as_mut_ptr(), o1.as_mut_ptr()];
         // every bus is passed; only the first of each way is active
+        // silent input is flagged, so a plugin can skip its work (VST3 silence flags)
+        let quiet_in = self.inp[0][..n]
+            .iter()
+            .chain(&self.inp[1][..n])
+            .all(|s| *s == 0.0);
+        let in_silence: u64 = if quiet_in {
+            (1u64 << self.in_channels.min(63)) - 1
+        } else {
+            0
+        };
         let mut ins: Vec<AudioBusBuffers> = (0..self.audio_in)
             .map(|b| AudioBusBuffers {
                 numChannels: if b == 0 { self.in_channels as int32 } else { 0 },
-                silenceFlags: 0,
+                silenceFlags: in_silence,
                 __field0: AudioBusBuffers__type0 {
                     channelBuffers32: if b == 0 {
                         in_ptrs.as_mut_ptr()

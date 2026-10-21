@@ -13,6 +13,7 @@ use clack_extensions::params::{ParamInfoBuffer, PluginParams};
 use clack_extensions::state::PluginState;
 use clack_host::events::event_types::{NoteOffEvent, NoteOnEvent, ParamValueEvent};
 use clack_host::prelude::*;
+use clack_host::process::ProcessStatus;
 pub mod bridge;
 pub mod clap_editor;
 pub mod vst3;
@@ -245,6 +246,9 @@ pub struct Clap {
     out_events: EventBuffer,
     /// Parameter changes to deliver with the next block.
     pending: Vec<(u32, f64)>,
+    /// The plugin said it has nothing to do until an event or some input comes
+    /// (CLAP's sleep status): it is not called until then.
+    asleep: bool,
 }
 
 // SAFETY: a `Clap` is built on one thread and then used by the one thread that holds it
@@ -309,6 +313,7 @@ impl Clap {
             events: EventBuffer::with_capacity(64),
             out_events: EventBuffer::with_capacity(64),
             pending: Vec::new(),
+            asleep: false,
         })
     }
 
@@ -420,6 +425,13 @@ impl Clap {
         // the host's events must be in time order
         self.events.sort();
 
+        let quiet_in = input.is_none_or(|(l, r)| l.iter().chain(r).all(|s| s.abs() < 1e-6));
+        if self.asleep && self.events.is_empty() && quiet_in {
+            self.out[0][..n].fill(0.0);
+            self.out[1][..n].fill(0.0);
+            return (&self.out[0], &self.out[1]);
+        }
+
         match input {
             Some((l, r)) => {
                 self.inp[0][..n].copy_from_slice(&l[..n]);
@@ -465,7 +477,7 @@ impl Clap {
         };
         if let Some(p) = self.processor.as_mut() {
             // a plugin that fails a block is silent for that block
-            let _ = p.process(
+            let status = p.process(
                 &in_audio,
                 &mut out_audio,
                 &in_events,
@@ -473,6 +485,17 @@ impl Clap {
                 None,
                 None,
             );
+            let quiet_out = || {
+                self.out[0][..n]
+                    .iter()
+                    .chain(&self.out[1][..n])
+                    .all(|s| s.abs() < 1e-6)
+            };
+            self.asleep = match status {
+                Ok(ProcessStatus::Sleep) => quiet_out(),
+                Ok(ProcessStatus::ContinueIfNotQuiet) => quiet_in && quiet_out(),
+                _ => false,
+            };
         }
         let _ = &mut in_audio;
         (&self.out[0], &self.out[1])
@@ -664,6 +687,9 @@ struct Automated {
     plugin: Plugin,
     lines: ParamLines,
     sr: f64,
+    /// Reused each block, so the audio thread does not allocate.
+    msgs: Vec<NoteMsg>,
+    due: Vec<(u32, f64)>,
 }
 
 impl Automated {
@@ -672,6 +698,8 @@ impl Automated {
             plugin,
             lines: ParamLines::default(),
             sr,
+            msgs: Vec::with_capacity(128),
+            due: Vec::with_capacity(16),
         }
     }
 
@@ -681,26 +709,27 @@ impl Automated {
 
     /// Send the parameters whose lines moved, at `t` seconds.
     fn follow(&mut self, t: f64) {
-        for (id, v) in self.lines.due(t) {
+        let mut due = std::mem::take(&mut self.due);
+        self.lines.due_into(t, &mut due);
+        for &(id, v) in &due {
             if let Some(p) = self.plugin.params().iter().find(|p| p.id == id) {
                 let plain = p.min + v.clamp(0.0, 1.0) * (p.max - p.min);
                 self.plugin.set_param(id, plain);
             }
         }
+        self.due = due;
     }
 }
 
 impl Instrument for Automated {
     fn process(&mut self, t0: f64, notes: &[Note], l: &mut [f32], r: &mut [f32]) {
         self.follow(t0);
-        let msgs: Vec<NoteMsg> = notes
-            .iter()
-            .map(|n| match *n {
-                Note::On { offset, key, vel } => NoteMsg::On { offset, key, vel },
-                Note::Off { offset, key } => NoteMsg::Off { offset, key },
-            })
-            .collect();
-        self.plugin.process(None, &msgs, l, r);
+        self.msgs.clear();
+        self.msgs.extend(notes.iter().map(|n| match *n {
+            Note::On { offset, key, vel } => NoteMsg::On { offset, key, vel },
+            Note::Off { offset, key } => NoteMsg::Off { offset, key },
+        }));
+        self.plugin.process(None, &self.msgs, l, r);
     }
 
     fn automate(&mut self, id: u32, points: &[(f64, f64)], first: bool) -> bool {

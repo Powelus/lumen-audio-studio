@@ -77,6 +77,14 @@ impl ParamLines {
     /// The parameters whose line has a new value at time `t`: `(id, 0 to 1)`.
     pub fn due(&mut self, t: f64) -> Vec<(u32, f64)> {
         let mut out = Vec::new();
+        self.due_into(t, &mut out);
+        out
+    }
+
+    /// [`ParamLines::due`] into a list the caller keeps (cleared first), so the audio
+    /// thread need not allocate.
+    pub fn due_into(&mut self, t: f64, out: &mut Vec<(u32, f64)>) {
+        out.clear();
         for l in &mut self.lines {
             let Some(v) = value_at(&l.points, t) else {
                 continue;
@@ -89,7 +97,6 @@ impl ParamLines {
             let keep = l.points.partition_point(|p| p.0 <= t).saturating_sub(1);
             l.points.drain(..keep);
         }
-        out
     }
 }
 
@@ -136,6 +143,7 @@ pub(crate) struct Hosted {
     queue: Vec<(f64, u8, f32)>,
     held: Vec<u8>,
     sr: f64,
+    notes: Vec<Note>,
 }
 
 impl Hosted {
@@ -145,6 +153,7 @@ impl Hosted {
             queue: Vec::new(),
             held: Vec::new(),
             sr,
+            notes: Vec::with_capacity(128),
         }
     }
 
@@ -178,7 +187,8 @@ impl Hosted {
         let end = t0 + n as f64 / self.sr;
         self.queue.sort_by(|a, b| a.0.total_cmp(&b.0));
         let due = self.queue.partition_point(|e| e.0 < end);
-        let mut notes = Vec::with_capacity(due);
+        let mut notes = std::mem::take(&mut self.notes);
+        notes.clear();
         for (time, key, vel) in self.queue.drain(..due) {
             let offset = (((time - t0) * self.sr).round().max(0.0) as usize).min(n - 1) as u32;
             if vel > 0.0 {
@@ -192,5 +202,6 @@ impl Hosted {
             }
         }
         self.plugin.process(t0, &notes, l, r);
+        self.notes = notes;
     }
 }
