@@ -385,7 +385,7 @@ impl AutomationClip {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EffectSlot {
     pub id: Id,

@@ -740,10 +740,18 @@ mod tests {
         assert!(up > flat_low * 2.5, "{up} vs {flat_low}");
         // the high tone hardly moves
         let other = rms(&run(boosted, &high, &high).0);
-        assert!((other / flat_high - 1.0).abs() < 0.1, "{other} vs {flat_high}");
+        assert!(
+            (other / flat_high - 1.0).abs() < 0.1,
+            "{other} vs {flat_high}"
+        );
         let cut = rms(&run(|t| t.eq.high = -12.0, &high, &high).0);
         assert!(cut < flat_high * 0.4, "{cut} vs {flat_high}");
-        let mid = rms(&run(|t| t.eq.mid = 9.0, &tone(1000.0, 24_000), &tone(1000.0, 24_000)).0);
+        let mid = rms(&run(
+            |t| t.eq.mid = 9.0,
+            &tone(1000.0, 24_000),
+            &tone(1000.0, 24_000),
+        )
+        .0);
         let flat_mid = rms(&run(|_| {}, &tone(1000.0, 24_000), &tone(1000.0, 24_000)).0);
         assert!(mid > flat_mid * 2.0, "{mid} vs {flat_mid}");
     }

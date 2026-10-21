@@ -88,6 +88,154 @@ pub enum MixEdit {
         slot: usize,
         on: bool,
     },
+    /// Set a band (0 low, 1 mid, 2 high) of the insert's built-in EQ, dB.
+    Eq {
+        insert: usize,
+        band: usize,
+        gain: f64,
+    },
+    /// Invert the insert's polarity.
+    Invert {
+        insert: usize,
+        on: bool,
+    },
+    /// Swap the insert's left and right sides.
+    Swap {
+        insert: usize,
+        on: bool,
+    },
+    /// Move an effect to another slot of the same insert (trading places with what is
+    /// there).
+    MoveEffect {
+        insert: usize,
+        from: usize,
+        to: usize,
+    },
+    /// Put another effect (`hosted`: a plugin id) in a slot in place of its own.
+    ReplaceEffect {
+        insert: usize,
+        slot: usize,
+        plugin: String,
+        hosted: bool,
+    },
+    /// Replace the insert's whole effects chain.
+    SetChain {
+        insert: usize,
+        slots: Vec<Option<las_project::EffectSlot>>,
+    },
+    /// Ask where to save the insert's effects chain (not a change to the project).
+    SaveChain(usize),
+    /// Ask for an effects chain file to load into the insert.
+    LoadChain(usize),
+    /// Play a channel through this insert (FL's "Route to this track only", Ctrl+L).
+    RouteChannel {
+        channel: usize,
+        insert: usize,
+    },
+}
+
+/// The file an insert's effects chain is saved as.
+pub fn chain_json(t: &las_project::MixerTrack) -> String {
+    let v = serde_json::json!({ "lumenMixerChain": 1, "slots": t.slots });
+    serde_json::to_string_pretty(&v).unwrap_or_default()
+}
+
+/// The slots of a chain file, with new ids, as many as an insert has.
+pub fn parse_chain(text: &str) -> Result<Vec<Option<las_project::EffectSlot>>, String> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let slots = v
+        .get("slots")
+        .ok_or("This is not an effects chain file (it has no slots).")?;
+    let mut slots: Vec<Option<las_project::EffectSlot>> =
+        serde_json::from_value(slots.clone()).map_err(|e| e.to_string())?;
+    slots.truncate(las_project::MIXER_SLOTS);
+    slots.resize(las_project::MIXER_SLOTS, None);
+    for s in slots.iter_mut().flatten() {
+        s.id = las_project::create::uid("fx");
+    }
+    Ok(slots)
+}
+
+/// A new effect for a slot: a built-in one by its id, or a hosted plugin by its id.
+fn new_effect(plugin: &str, hosted: bool) -> Option<las_project::EffectSlot> {
+    let state = if hosted {
+        las_host::plugin_state(plugin, &[])
+    } else {
+        las_dsp::fx::registry::descriptor(plugin)?
+            .default_state
+            .clone()
+    };
+    Some(las_project::EffectSlot {
+        id: las_project::create::uid("fx"),
+        plugin_id: if hosted {
+            las_host::HOSTED.into()
+        } else {
+            plugin.to_string()
+        },
+        enabled: true,
+        mix: 1.0,
+        state,
+        ..Default::default()
+    })
+}
+
+/// What a level meter remembers: its peak hold line and whether it clipped.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeterHold {
+    /// The highest recent peak (linear).
+    pub hold: f32,
+    /// When it was reached, seconds.
+    pub at: f64,
+    /// It went over 0 dB since the last reset.
+    pub clip: bool,
+}
+
+impl MeterHold {
+    /// Seconds the hold line stays before it falls.
+    pub const HOLD: f64 = 1.5;
+
+    /// Take the peak of a frame at time `now`.
+    pub fn update(&mut self, peak: f32, now: f64) {
+        let peak = if peak.is_finite() { peak.max(0.0) } else { 0.0 };
+        if peak >= self.hold {
+            self.hold = peak;
+            self.at = now;
+        } else if now - self.at > Self::HOLD {
+            // falls about 20 dB a second
+            let dt = (now - self.at - Self::HOLD).min(0.1) as f32;
+            self.hold = (self.hold * 0.1f32.powf(dt)).max(peak);
+        }
+        if peak > 1.0 {
+            self.clip = true;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        *self = MeterHold::default();
+    }
+}
+
+/// The response of the insert's three-band EQ at `freq`, dB.
+pub fn eq_db(eq: &las_project::InsertEq, freq: f64) -> f64 {
+    use las_dsp::biquad::{biquad_db, Kind};
+    let sr = 48_000.0;
+    let kinds = [Kind::LowShelf, Kind::Peaking, Kind::HighShelf];
+    let qs = [0.707, 0.9, 0.707];
+    eq.gains()
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.abs() > 1e-6)
+        .map(|(b, g)| {
+            biquad_db(
+                kinds[b],
+                las_project::InsertEq::FREQS[b],
+                *g,
+                qs[b],
+                freq,
+                sr,
+            )
+        })
+        .sum()
 }
 
 /// Whether feeding `to` from `from` would make a loop: `to` is `from`, or `from` is
@@ -134,7 +282,75 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
                 project.mixer[i].solo = *on;
             }
         }
-        MixEdit::OpenEffect { .. } | MixEdit::Automate(_) => {}
+        MixEdit::OpenEffect { .. }
+        | MixEdit::Automate(_)
+        | MixEdit::SaveChain(_)
+        | MixEdit::LoadChain(_) => {}
+        MixEdit::Eq { insert, band, gain } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                let g = if gain.is_finite() {
+                    gain.clamp(-las_project::InsertEq::RANGE, las_project::InsertEq::RANGE)
+                } else {
+                    0.0
+                };
+                match band {
+                    0 => t.eq.low = g,
+                    1 => t.eq.mid = g,
+                    2 => t.eq.high = g,
+                    _ => {}
+                }
+            }
+        }
+        MixEdit::Invert { insert, on } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                t.invert = *on;
+            }
+        }
+        MixEdit::Swap { insert, on } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                t.swap = *on;
+            }
+        }
+        MixEdit::MoveEffect { insert, from, to } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                if t.slots.len() < las_project::MIXER_SLOTS {
+                    t.slots.resize(las_project::MIXER_SLOTS, None);
+                }
+                if *from < t.slots.len() && *to < t.slots.len() {
+                    t.slots.swap(*from, *to);
+                }
+            }
+        }
+        MixEdit::ReplaceEffect {
+            insert,
+            slot,
+            plugin,
+            hosted,
+        } => {
+            if let (Some(t), Some(fx)) =
+                (project.mixer.get_mut(*insert), new_effect(plugin, *hosted))
+            {
+                if t.slots.len() < las_project::MIXER_SLOTS {
+                    t.slots.resize(las_project::MIXER_SLOTS, None);
+                }
+                if let Some(s) = t.slots.get_mut(*slot) {
+                    *s = Some(fx);
+                }
+            }
+        }
+        MixEdit::SetChain { insert, slots } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                t.slots = slots.clone();
+                t.slots.resize(las_project::MIXER_SLOTS, None);
+            }
+        }
+        MixEdit::RouteChannel { channel, insert } => {
+            if *insert < project.mixer.len() {
+                if let Some(c) = project.channels.get_mut(*channel) {
+                    c.mixer_track = *insert;
+                }
+            }
+        }
         MixEdit::Output { insert, target } => {
             if *insert > 0
                 && *insert < project.mixer.len()
@@ -271,11 +487,49 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
 pub struct MixerState {
     /// The insert whose effects and settings the panel on the right shows.
     pub selected: usize,
+    /// Peak hold and clip of each insert's meter.
+    pub meters: Vec<MeterHold>,
 }
 
-pub fn draw(ui: &mut Ui, project: &Project, state: &mut MixerState, peaks: &[f32]) -> Vec<MixEdit> {
+/// An effect slot being dragged to another slot.
+#[derive(Clone, Copy, Debug)]
+struct SlotDrag {
+    insert: usize,
+    slot: usize,
+}
+
+/// The channel selected in the rack: its index and name.
+pub type Selected<'a> = Option<(usize, &'a str)>;
+
+pub fn draw(
+    ui: &mut Ui,
+    project: &Project,
+    state: &mut MixerState,
+    peaks: &[f32],
+    channel: Selected,
+) -> Vec<MixEdit> {
     let mut edits = Vec::new();
     state.selected = state.selected.min(project.mixer.len().saturating_sub(1));
+    let now = ui.input(|i| i.time);
+    state
+        .meters
+        .resize(project.mixer.len(), MeterHold::default());
+    for (i, m) in state.meters.iter_mut().enumerate() {
+        m.update(peaks.get(i).copied().unwrap_or(0.0), now);
+    }
+    if !peaks.is_empty() || state.meters.iter().any(|m| m.hold > 0.0) {
+        ui.ctx().request_repaint();
+    }
+    // Ctrl+L, as in FL: the selected channel plays through the selected insert
+    if let Some((c, _)) = channel {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
+            edits.push(MixEdit::Begin);
+            edits.push(MixEdit::RouteChannel {
+                channel: c,
+                insert: state.selected,
+            });
+        }
+    }
     let panel_w = 190.0;
     let avail = ui.available_width();
     ui.horizontal_top(|ui| {
@@ -288,7 +542,7 @@ pub fn draw(ui: &mut Ui, project: &Project, state: &mut MixerState, peaks: &[f32
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for i in 0..project.mixer.len() {
                         let peak = peaks.get(i).copied().unwrap_or(0.0);
-                        strip(ui, project, i, state, peak, &mut edits);
+                        strip(ui, project, i, state, peak, channel, &mut edits);
                     }
                 });
             });
@@ -315,85 +569,158 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
         edits.push(MixEdit::Rename { insert: i, name });
     }
     ui.add_space(6.0);
-    ui.label(RichText::new("EFFECTS").size(11.0).strong().color(p.muted));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("EFFECTS").size(11.0).strong().color(p.muted));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("Load")
+                .on_hover_text("Load chain...: replace this insert's effects with a saved chain")
+                .clicked()
+            {
+                edits.push(MixEdit::LoadChain(i));
+            }
+            if ui
+                .small_button("Save")
+                .on_hover_text("Save chain...: save this insert's effects to a file")
+                .clicked()
+            {
+                edits.push(MixEdit::SaveChain(i));
+            }
+        });
+    });
+    let carrying = egui::DragAndDrop::payload::<SlotDrag>(ui.ctx())
+        .map(|d| *d)
+        .filter(|d| d.insert == i);
     for n in 0..las_project::MIXER_SLOTS {
-        match t.slots.get(n).and_then(Option::as_ref) {
+        let row = ui.horizontal(|ui| match t.slots.get(n).and_then(Option::as_ref) {
             Some(s) => {
-                ui.horizontal(|ui| {
-                    let led = ui
-                        .add(
-                            egui::Button::new(if s.enabled { "\u{25cf}" } else { "\u{25cb}" })
-                                .small()
-                                .frame(false),
-                        )
-                        .on_hover_text("Switch on or off");
-                    if led.clicked() {
+                let led = ui
+                    .add(
+                        egui::Button::new(if s.enabled { "\u{25cf}" } else { "\u{25cb}" })
+                            .small()
+                            .frame(false),
+                    )
+                    .on_hover_text("Switch on or off");
+                if led.clicked() {
+                    edits.push(MixEdit::Begin);
+                    edits.push(MixEdit::SlotOn {
+                        insert: i,
+                        slot: n,
+                        on: !s.enabled,
+                    });
+                }
+                let b = ui
+                    .add(egui::Button::new(slot_label(s)).min_size(egui::vec2(100.0, 0.0)))
+                    .interact(egui::Sense::click_and_drag())
+                    .on_hover_text(format!(
+                        "{}\nClick: open. Drag onto another slot to move it. Right click: more.",
+                        s.plugin_id
+                    ));
+                b.dnd_set_drag_payload(SlotDrag { insert: i, slot: n });
+                if b.clicked() {
+                    edits.push(MixEdit::OpenEffect { insert: i, slot: n });
+                }
+                b.context_menu(|ui| {
+                    if ui
+                        .add_enabled(n > 0, egui::Button::new("Move up"))
+                        .clicked()
+                    {
                         edits.push(MixEdit::Begin);
-                        edits.push(MixEdit::SlotOn {
+                        edits.push(MixEdit::MoveEffect {
                             insert: i,
-                            slot: n,
-                            on: !s.enabled,
+                            from: n,
+                            to: n - 1,
                         });
+                        ui.close();
                     }
-                    let b = ui
-                        .add(egui::Button::new(slot_label(s)).min_size(egui::vec2(100.0, 0.0)))
-                        .on_hover_text(format!("{}\nRight click: remove", s.plugin_id));
-                    if b.clicked() {
-                        edits.push(MixEdit::OpenEffect { insert: i, slot: n });
+                    if ui
+                        .add_enabled(
+                            n + 1 < las_project::MIXER_SLOTS,
+                            egui::Button::new("Move down"),
+                        )
+                        .clicked()
+                    {
+                        edits.push(MixEdit::Begin);
+                        edits.push(MixEdit::MoveEffect {
+                            insert: i,
+                            from: n,
+                            to: n + 1,
+                        });
+                        ui.close();
                     }
-                    b.context_menu(|ui| {
-                        if ui.button("Remove").clicked() {
+                    ui.menu_button("Replace", |ui| {
+                        if let Some((plugin, hosted)) = effect_menu(ui) {
                             edits.push(MixEdit::Begin);
-                            edits.push(MixEdit::RemoveEffect { insert: i, slot: n });
+                            edits.push(MixEdit::ReplaceEffect {
+                                insert: i,
+                                slot: n,
+                                plugin,
+                                hosted,
+                            });
                             ui.close();
                         }
                     });
+                    if ui.button("Remove").clicked() {
+                        edits.push(MixEdit::Begin);
+                        edits.push(MixEdit::RemoveEffect { insert: i, slot: n });
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Save chain...").clicked() {
+                        edits.push(MixEdit::SaveChain(i));
+                        ui.close();
+                    }
+                    if ui.button("Load chain...").clicked() {
+                        edits.push(MixEdit::LoadChain(i));
+                        ui.close();
+                    }
                 });
             }
             None => {
                 let r = ui.menu_button(
                     RichText::new(format!("+  Slot {}", n + 1)).color(p.muted),
                     |ui| {
-                        let mut shown = "";
-                        let mut list: Vec<_> =
-                            las_dsp::fx::registry::descriptors().iter().collect();
-                        list.sort_by(|a, b| a.category.cmp(&b.category));
-                        for d in list {
-                            if d.category != shown {
-                                shown = &d.category;
-                                ui.label(RichText::new(shown).strong().color(p.accent_text));
-                            }
-                            if ui.button(&d.name).on_hover_text(&d.description).clicked() {
-                                edits.push(MixEdit::Begin);
-                                edits.push(MixEdit::AddEffect {
+                        if let Some((plugin, hosted)) = effect_menu(ui) {
+                            edits.push(MixEdit::Begin);
+                            edits.push(if hosted {
+                                MixEdit::AddHosted {
                                     insert: i,
                                     slot: n,
-                                    plugin: d.id.clone(),
-                                });
-                                ui.close();
-                            }
-                        }
-                        let external: Vec<_> = las_host::known()
-                            .into_iter()
-                            .filter(las_host::PluginInfo::is_effect)
-                            .collect();
-                        if !external.is_empty() {
-                            ui.label(RichText::new("External").strong().color(p.accent_text));
-                        }
-                        for info in external {
-                            if ui.button(&info.name).on_hover_text(&info.vendor).clicked() {
-                                edits.push(MixEdit::Begin);
-                                edits.push(MixEdit::AddHosted {
+                                    plugin,
+                                }
+                            } else {
+                                MixEdit::AddEffect {
                                     insert: i,
                                     slot: n,
-                                    plugin: info.id,
-                                });
-                                ui.close();
-                            }
+                                    plugin,
+                                }
+                            });
+                            ui.close();
                         }
                     },
                 );
                 r.response.on_hover_text("Add an effect");
+            }
+        });
+        // a slot dragged here moves (trading places with what is here)
+        let rr = row.response;
+        if let Some(d) = carrying {
+            if d.slot != n && rr.contains_pointer() {
+                ui.painter().rect_stroke(
+                    rr.rect.expand(1.0),
+                    3.0,
+                    egui::Stroke::new(1.5, p.accent),
+                    egui::StrokeKind::Outside,
+                );
+                if ui.input(|x| x.pointer.any_released()) {
+                    egui::DragAndDrop::clear_payload(ui.ctx());
+                    edits.push(MixEdit::Begin);
+                    edits.push(MixEdit::MoveEffect {
+                        insert: i,
+                        from: d.slot,
+                        to: n,
+                    });
+                }
             }
         }
     }
@@ -412,11 +739,68 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
             });
         }
         ui.label(
-            RichText::new(format!("Width {:.0}%", t.width * 100.0))
+            RichText::new(format!("Separation {:.0}%", t.width * 100.0))
                 .size(11.0)
                 .color(p.muted),
-        );
+        )
+        .on_hover_text("Stereo separation: 0% is mono, 100% as it is, 200% extra wide");
     });
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(t.invert, "\u{00d8} Invert")
+            .on_hover_text("Invert the polarity (phase) of this insert")
+            .clicked()
+        {
+            edits.push(MixEdit::Begin);
+            edits.push(MixEdit::Invert {
+                insert: i,
+                on: !t.invert,
+            });
+        }
+        if ui
+            .selectable_label(t.swap, "L \u{21c4} R")
+            .on_hover_text("Swap the left and right sides of this insert")
+            .clicked()
+        {
+            edits.push(MixEdit::Begin);
+            edits.push(MixEdit::Swap {
+                insert: i,
+                on: !t.swap,
+            });
+        }
+    });
+}
+
+/// The menu of effects to put in a slot: the built-in ones by category, then the
+/// plugins found on the computer. Returns the pick (and whether it is a plugin).
+fn effect_menu(ui: &mut Ui) -> Option<(String, bool)> {
+    let p = crate::theme::pal();
+    let mut pick = None;
+    let mut shown = "";
+    let mut list: Vec<_> = las_dsp::fx::registry::descriptors().iter().collect();
+    list.sort_by(|a, b| a.category.cmp(&b.category));
+    for d in list {
+        if d.category != shown {
+            shown = &d.category;
+            ui.label(RichText::new(shown).strong().color(p.accent_text));
+        }
+        if ui.button(&d.name).on_hover_text(&d.description).clicked() {
+            pick = Some((d.id.clone(), false));
+        }
+    }
+    let external: Vec<_> = las_host::known()
+        .into_iter()
+        .filter(las_host::PluginInfo::is_effect)
+        .collect();
+    if !external.is_empty() {
+        ui.label(RichText::new("External").strong().color(p.accent_text));
+    }
+    for info in external {
+        if ui.button(&info.name).on_hover_text(&info.vendor).clicked() {
+            pick = Some((info.id, true));
+        }
+    }
+    pick
 }
 
 /// The name an insert goes by in the routing menus.
@@ -533,6 +917,7 @@ fn strip(
     i: usize,
     state: &mut MixerState,
     peak: f32,
+    channel: Selected,
     edits: &mut Vec<MixEdit>,
 ) {
     let t = &project.mixer[i];
@@ -549,7 +934,7 @@ fn strip(
         .inner_margin(4.0)
         .show(ui, |ui| {
             ui.set_width(58.0);
-            ui.set_min_height(360.0);
+            ui.set_min_height(420.0);
             ui.vertical_centered(|ui| {
                 ui.label(
                     RichText::new(if i == 0 {
@@ -601,6 +986,7 @@ fn strip(
                         value: pan,
                     });
                 }
+                eq_strip(ui, t, i, edits);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     let m = ui.selectable_label(t.mute, "M");
@@ -620,8 +1006,66 @@ fn strip(
                         });
                     }
                 });
+                // the clip light: lit once the strip went over 0 dB; click to reset
+                let meter = state.meters.get(i).copied().unwrap_or_default();
+                let (cr, cresp) =
+                    ui.allocate_exact_size(egui::vec2(44.0, 9.0), egui::Sense::click());
+                ui.painter().rect_filled(
+                    cr,
+                    2.0,
+                    if meter.clip {
+                        egui::Color32::from_rgb(240, 60, 50)
+                    } else {
+                        p.well_deep
+                    },
+                );
+                ui.painter().text(
+                    cr.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "CLIP",
+                    egui::FontId::proportional(7.5),
+                    if meter.clip {
+                        egui::Color32::WHITE
+                    } else {
+                        p.muted
+                    },
+                );
+                let peak_db = if meter.hold > 0.0 {
+                    format!("{:.1} dB", 20.0 * meter.hold.log10())
+                } else {
+                    "-\u{221e} dB".into()
+                };
+                if cresp
+                    .on_hover_text(format!(
+                        "Peak {peak_db}. Lights red when the level goes over 0 dB. Click to reset."
+                    ))
+                    .clicked()
+                {
+                    if let Some(m) = state.meters.get_mut(i) {
+                        m.reset();
+                    }
+                }
                 let mut vol = t.volume;
                 let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, 190.0);
+                // the peak hold line over the fader's meter
+                if meter.hold > 0.0 {
+                    let fr = r.rect;
+                    let m = egui::Rect::from_min_max(
+                        egui::pos2(fr.right() - 12.0, fr.top() + 8.0),
+                        egui::pos2(fr.right() - 4.0, fr.bottom() - 8.0),
+                    );
+                    let pos = crate::widgets::fader_pos(f64::from(meter.hold), 1.25) as f32;
+                    let y = m.bottom() - pos * m.height();
+                    let col = if meter.hold > 1.0 {
+                        egui::Color32::from_rgb(240, 70, 60)
+                    } else {
+                        egui::Color32::from_gray(230)
+                    };
+                    ui.painter().line_segment(
+                        [egui::pos2(m.left(), y), egui::pos2(m.right(), y)],
+                        egui::Stroke::new(1.5, col),
+                    );
+                }
                 if r.changed() {
                     if r.drag_started() || !r.dragged() {
                         edits.push(MixEdit::Begin);
@@ -659,9 +1103,162 @@ fn strip(
                 ui.label(RichText::new(label).weak().size(10.0));
             });
         });
-    if frame.response.interact(egui::Sense::click()).clicked() {
+    let fr = frame.response.interact(egui::Sense::click());
+    if fr.clicked() {
         state.selected = i;
     }
+    fr.context_menu(|ui| strip_menu(ui, project, i, channel, edits));
+}
+
+/// The right-click menu of a strip.
+fn strip_menu(
+    ui: &mut Ui,
+    project: &Project,
+    i: usize,
+    channel: Selected,
+    edits: &mut Vec<MixEdit>,
+) {
+    let label = match channel {
+        Some((_, name)) => format!("Route selected channel here ({name})"),
+        None => "Route selected channel here".into(),
+    };
+    let r = ui
+        .add_enabled(channel.is_some(), egui::Button::new(label))
+        .on_hover_text(
+            "The channel selected in the channel rack plays through this insert (Ctrl+L)",
+        );
+    if r.clicked() {
+        if let Some((c, _)) = channel {
+            edits.push(MixEdit::Begin);
+            edits.push(MixEdit::RouteChannel {
+                channel: c,
+                insert: i,
+            });
+        }
+        ui.close();
+    }
+    let feeding: Vec<&str> = project
+        .channels
+        .iter()
+        .filter(|c| c.mixer_track == i)
+        .map(|c| c.name.as_str())
+        .collect();
+    if !feeding.is_empty() {
+        ui.label(
+            RichText::new(format!("Channels here: {}", feeding.join(", ")))
+                .weak()
+                .size(11.0),
+        );
+    }
+    ui.separator();
+    let t = &project.mixer[i];
+    if ui
+        .button(if t.invert {
+            "Polarity: normal"
+        } else {
+            "Invert polarity"
+        })
+        .clicked()
+    {
+        edits.push(MixEdit::Begin);
+        edits.push(MixEdit::Invert {
+            insert: i,
+            on: !t.invert,
+        });
+        ui.close();
+    }
+    if ui
+        .button(if t.swap {
+            "Unswap left and right"
+        } else {
+            "Swap left and right"
+        })
+        .clicked()
+    {
+        edits.push(MixEdit::Begin);
+        edits.push(MixEdit::Swap {
+            insert: i,
+            on: !t.swap,
+        });
+        ui.close();
+    }
+    if !t.eq.is_flat() && ui.button("Reset EQ").clicked() {
+        edits.push(MixEdit::Begin);
+        for band in 0..3 {
+            edits.push(MixEdit::Eq {
+                insert: i,
+                band,
+                gain: 0.0,
+            });
+        }
+        ui.close();
+    }
+}
+
+/// The strip's built-in EQ: a small curve and low, mid and high knobs.
+fn eq_strip(ui: &mut Ui, t: &las_project::MixerTrack, i: usize, edits: &mut Vec<MixEdit>) {
+    let p = crate::theme::pal();
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(54.0, 18.0), egui::Sense::hover());
+    let painter = ui.painter_at(r);
+    painter.rect_filled(r, 3.0, p.well_deep);
+    painter.line_segment(
+        [r.left_center(), r.right_center()],
+        egui::Stroke::new(1.0, p.border),
+    );
+    let pts: Vec<egui::Pos2> = (0..=26)
+        .map(|k| {
+            let f = 20.0 * 1000f64.powf(f64::from(k) / 26.0);
+            let db = eq_db(&t.eq, f).clamp(-18.0, 18.0);
+            egui::pos2(
+                r.left() + r.width() * k as f32 / 26.0,
+                r.center().y - (db / 18.0) as f32 * (r.height() / 2.0 - 1.0),
+            )
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        pts,
+        egui::Stroke::new(
+            1.2,
+            if t.eq.is_flat() {
+                p.muted
+            } else {
+                crate::theme::accent()
+            },
+        ),
+    ));
+    resp.on_hover_text(format!(
+        "Built-in EQ: low {:+.1} dB (100 Hz), mid {:+.1} dB (1 kHz), high {:+.1} dB (8 kHz)",
+        t.eq.low, t.eq.mid, t.eq.high
+    ));
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 1.0;
+        let names = ["Low (100 Hz)", "Mid (1 kHz)", "High (8 kHz)"];
+        let cols = [
+            egui::Color32::from_rgb(240, 150, 70),
+            egui::Color32::from_rgb(120, 210, 120),
+            egui::Color32::from_rgb(110, 170, 250),
+        ];
+        for (band, g) in t.eq.gains().into_iter().enumerate() {
+            let mut v = g;
+            let range = las_project::InsertEq::RANGE;
+            let (ch, start, kr) =
+                crate::steps::knob_core(ui, &mut v, (-range, range), 0.0, 17.0, cols[band]);
+            kr.on_hover_text(format!(
+                "EQ {}: {v:+.1} dB\nDrag up or down, double click for 0 dB",
+                names[band]
+            ));
+            if start {
+                edits.push(MixEdit::Begin);
+            }
+            if ch {
+                edits.push(MixEdit::Eq {
+                    insert: i,
+                    band,
+                    gain: v,
+                });
+            }
+        }
+    });
 }
 
 fn db(v: f64) -> f64 {
@@ -983,9 +1580,199 @@ mod tests {
         let mut state = MixerState::default();
         for _ in 0..2 {
             crate::widgets::run_frame(&ctx, egui::RawInput::default(), |ui| {
-                out = draw(ui, &p, &mut state, &[0.5, 0.2]);
+                out = draw(ui, &p, &mut state, &[0.5, 1.4], Some((0, "Kick")));
             });
         }
         assert!(out.is_empty());
+        // the second insert went over 0 dB: its clip light is on, and holds its peak
+        assert!(!state.meters[0].clip && state.meters[1].clip);
+        assert!((state.meters[1].hold - 1.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_built_in_eq_polarity_and_swap_are_set_and_held_to_range() {
+        let mut p = project();
+        apply(
+            &mut p,
+            &MixEdit::Eq {
+                insert: 1,
+                band: 0,
+                gain: 6.0,
+            },
+        );
+        apply(
+            &mut p,
+            &MixEdit::Eq {
+                insert: 1,
+                band: 2,
+                gain: -99.0,
+            },
+        );
+        apply(
+            &mut p,
+            &MixEdit::Eq {
+                insert: 1,
+                band: 1,
+                gain: f64::NAN,
+            },
+        );
+        apply(
+            &mut p,
+            &MixEdit::Eq {
+                insert: 99,
+                band: 0,
+                gain: 1.0,
+            },
+        );
+        let eq = p.mixer[1].eq;
+        assert_eq!((eq.low, eq.mid, eq.high), (6.0, 0.0, -18.0));
+        // the curve shows the boost in the lows and the cut in the highs
+        assert!(eq_db(&eq, 40.0) > 5.0 && eq_db(&eq, 1000.0).abs() < 2.0);
+        assert!(eq_db(&eq, 16000.0) < -15.0);
+        apply(
+            &mut p,
+            &MixEdit::Invert {
+                insert: 1,
+                on: true,
+            },
+        );
+        apply(
+            &mut p,
+            &MixEdit::Swap {
+                insert: 1,
+                on: true,
+            },
+        );
+        assert!(p.mixer[1].invert && p.mixer[1].swap);
+    }
+
+    #[test]
+    fn effects_move_are_replaced_and_chains_round_trip() {
+        let mut p = project();
+        let i = 1;
+        p.mixer[i].slots = vec![None; las_project::MIXER_SLOTS];
+        apply(
+            &mut p,
+            &MixEdit::AddEffect {
+                insert: i,
+                slot: 0,
+                plugin: "las-eq".into(),
+            },
+        );
+        apply(
+            &mut p,
+            &MixEdit::AddEffect {
+                insert: i,
+                slot: 1,
+                plugin: "las-delay".into(),
+            },
+        );
+        let id = |p: &Project, n: usize| p.mixer[i].slots[n].as_ref().map(|s| s.plugin_id.clone());
+        apply(
+            &mut p,
+            &MixEdit::MoveEffect {
+                insert: i,
+                from: 0,
+                to: 1,
+            },
+        );
+        assert_eq!(id(&p, 0).as_deref(), Some("las-delay"));
+        assert_eq!(id(&p, 1).as_deref(), Some("las-eq"));
+        // onto an empty slot it just moves
+        apply(
+            &mut p,
+            &MixEdit::MoveEffect {
+                insert: i,
+                from: 1,
+                to: 5,
+            },
+        );
+        assert_eq!(id(&p, 1), None);
+        assert_eq!(id(&p, 5).as_deref(), Some("las-eq"));
+        apply(
+            &mut p,
+            &MixEdit::MoveEffect {
+                insert: i,
+                from: 5,
+                to: 999,
+            },
+        );
+        assert_eq!(id(&p, 5).as_deref(), Some("las-eq"));
+        apply(
+            &mut p,
+            &MixEdit::ReplaceEffect {
+                insert: i,
+                slot: 0,
+                plugin: "las-reverb".into(),
+                hosted: false,
+            },
+        );
+        assert_eq!(id(&p, 0).as_deref(), Some("las-reverb"));
+        apply(
+            &mut p,
+            &MixEdit::ReplaceEffect {
+                insert: i,
+                slot: 0,
+                plugin: "no-such".into(),
+                hosted: false,
+            },
+        );
+        assert_eq!(id(&p, 0).as_deref(), Some("las-reverb"));
+        // save the chain, load it on another insert: same effects, new ids
+        let text = chain_json(&p.mixer[i]);
+        let slots = parse_chain(&text).unwrap();
+        assert_eq!(slots.len(), las_project::MIXER_SLOTS);
+        apply(&mut p, &MixEdit::SetChain { insert: 2, slots });
+        for n in 0..las_project::MIXER_SLOTS {
+            let (a, b) = (&p.mixer[i].slots[n], &p.mixer[2].slots[n]);
+            assert_eq!(
+                a.as_ref().map(|s| &s.plugin_id),
+                b.as_ref().map(|s| &s.plugin_id)
+            );
+            if let (Some(a), Some(b)) = (a, b) {
+                assert_ne!(a.id, b.id);
+                assert_eq!(a.state, b.state);
+            }
+        }
+        assert!(parse_chain("{}").is_err() && parse_chain("nonsense").is_err());
+    }
+
+    #[test]
+    fn a_channel_is_routed_to_an_insert() {
+        let mut p = project();
+        apply(
+            &mut p,
+            &MixEdit::RouteChannel {
+                channel: 0,
+                insert: 2,
+            },
+        );
+        assert_eq!(p.channels[0].mixer_track, 2);
+        apply(
+            &mut p,
+            &MixEdit::RouteChannel {
+                channel: 0,
+                insert: 999,
+            },
+        );
+        assert_eq!(p.channels[0].mixer_track, 2);
+    }
+
+    #[test]
+    fn the_peak_hold_waits_then_falls_and_the_clip_light_stays_until_reset() {
+        let mut m = MeterHold::default();
+        m.update(0.8, 0.0);
+        m.update(0.2, 1.0);
+        assert_eq!(m.hold, 0.8);
+        m.update(0.2, 2.0);
+        assert!(m.hold < 0.8 && m.hold >= 0.2);
+        assert!(!m.clip);
+        m.update(1.2, 3.0);
+        m.update(0.0, 10.0);
+        assert!(m.clip);
+        m.reset();
+        assert!(!m.clip && m.hold == 0.0);
+        m.update(f32::NAN, 11.0);
+        assert_eq!(m.hold, 0.0);
     }
 }
