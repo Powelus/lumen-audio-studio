@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Linux libraries for audio and MIDI
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config xvfb
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

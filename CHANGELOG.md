@@ -2,6 +2,17 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.48
+
+VST3 plugin windows.
+
+- A VST3 channel or effect has a Plugin window button that opens the plugin's own window. What you turn in it goes into the project as parameter changes (with undo), and the playing plugin follows. The generic sliders and the window stay in step.
+- The window is shown by a second instance of the plugin on the app's thread, so the audio thread is never touched by the plugin's UI. Plugins that talk between their window and their audio part by private messages (meters, waveforms) show only what their parameters hold.
+- New `las-window` crate: a plain native window for a plugin to draw into (X11 on Linux, Win32 on Windows, NSWindow on macOS). On Linux the host also serves the plugin's file descriptors and timers (the VST3 run loop).
+- macOS: VST3 plugins are now entered with their bundle (`bundleEntry`), as the specification asks.
+- The test VST3 plugin has a view, and a test opens it in a real X server (Xvfb) and checks the edits it sends, including one from a run loop timer.
+- Not yet: CLAP plugin windows, and running plugins in a separate process.
+
 ## 0.2.0-alpha.47
 
 Velocity tools.
