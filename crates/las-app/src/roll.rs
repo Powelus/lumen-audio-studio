@@ -46,11 +46,6 @@ pub enum Edit {
     Paste {
         notes: Vec<Note>,
     },
-    /// Set a note's velocity (0 to 1).
-    Velocity {
-        id: String,
-        vel: f64,
-    },
     /// Snap every note's start and length to the grid.
     Quantize {
         snap: f64,
@@ -60,6 +55,14 @@ pub enum Edit {
         op: NoteTool,
         ids: Vec<String>,
     },
+    /// Set one event lane's value of a note (0 to 1 on the lane's scale).
+    Lane {
+        id: String,
+        lane: Lane,
+        value: f64,
+    },
+    /// Replace a note's properties (found by its id), from the note properties window.
+    SetNote(Box<Note>),
     /// Sound a key (a note being placed or moved) or let go of it.
     Audition {
         key: i32,
@@ -294,6 +297,8 @@ pub enum Tool {
     /// Place, move and resize notes.
     #[default]
     Draw,
+    /// FL's brush: drag to draw a note on every grid step the pointer passes.
+    Paint,
     /// Move and resize notes without placing new ones.
     Select,
     /// Delete the note that is clicked.
@@ -316,6 +321,213 @@ enum Drag {
     Group,
     /// A rectangle that selects what it touches.
     Marquee,
+    /// The paint tool laying down notes.
+    Paint,
+    /// A right drag deleting notes (`begun` once it has made the gesture undoable).
+    Erase {
+        begun: bool,
+    },
+}
+
+/// The event lanes under the grid, after FL's: what the bars under the notes show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Lane {
+    #[default]
+    Velocity,
+    Pan,
+    Fine,
+    Release,
+}
+
+/// The lanes, their names and tooltips.
+pub const LANES: [(Lane, &str, &str); 4] = [
+    (Lane::Velocity, "Velocity", "How hard each note is played"),
+    (
+        Lane::Pan,
+        "Pan",
+        "Where each note sits between left and right",
+    ),
+    (
+        Lane::Fine,
+        "Fine pitch",
+        "Tune each note up or down by up to a semitone",
+    ),
+    (
+        Lane::Release,
+        "Release",
+        "Release velocity of each note (for instruments that use it)",
+    ),
+];
+
+/// The fine pitch a note can be tuned by, in cents either way.
+pub const FINE_RANGE: f64 = 100.0;
+
+impl Lane {
+    pub fn name(self) -> &'static str {
+        LANES.iter().find(|l| l.0 == self).map_or("", |l| l.1)
+    }
+
+    /// Whether the lane's bars grow from the middle (pan, fine pitch).
+    pub fn centred(self) -> bool {
+        matches!(self, Lane::Pan | Lane::Fine)
+    }
+
+    /// A note's value on this lane, 0 to 1.
+    pub fn get(self, n: &Note) -> f64 {
+        match self {
+            Lane::Velocity => n.vel.clamp(0.0, 1.0),
+            Lane::Pan => ((n.pan + 1.0) / 2.0).clamp(0.0, 1.0),
+            Lane::Fine => ((n.fine.unwrap_or(0.0) / FINE_RANGE + 1.0) / 2.0).clamp(0.0, 1.0),
+            Lane::Release => n.release.unwrap_or(0.5).clamp(0.0, 1.0),
+        }
+    }
+
+    /// Set a note's value on this lane from 0 to 1 (values near the middle of a centred
+    /// lane snap to the middle, so centre is easy to hit).
+    pub fn set(self, n: &mut Note, v: f64) {
+        let v = v.clamp(0.0, 1.0);
+        let mid = |v: f64| {
+            let c = v * 2.0 - 1.0;
+            if c.abs() < 0.03 {
+                0.0
+            } else {
+                c
+            }
+        };
+        match self {
+            Lane::Velocity => n.vel = v,
+            Lane::Pan => n.pan = mid(v),
+            Lane::Fine => {
+                let c = (mid(v) * FINE_RANGE).round();
+                n.fine = (c != 0.0).then_some(c);
+            }
+            Lane::Release => n.release = Some(v),
+        }
+    }
+
+    /// The value in words, for the lane's readout.
+    pub fn text(self, n: &Note) -> String {
+        match self {
+            Lane::Velocity => format!("Velocity {:.0}%", n.vel * 100.0),
+            Lane::Pan => format!("Pan {}", pan_text(n.pan)),
+            Lane::Fine => format!("Fine pitch {:+.0} cents", n.fine.unwrap_or(0.0)),
+            Lane::Release => format!("Release {:.0}%", n.release.unwrap_or(0.5) * 100.0),
+        }
+    }
+}
+
+/// A pan in words: "Centre", "40% L", "100% R".
+pub fn pan_text(pan: f64) -> String {
+    let p = (pan * 100.0).round();
+    if p == 0.0 {
+        "Centre".into()
+    } else if p < 0.0 {
+        format!("{:.0}% L", -p)
+    } else {
+        format!("{p:.0}% R")
+    }
+}
+
+/// The notes the paint tool lays down as the pointer moves from `last` (the grid step
+/// and key painted last, if any) to `tick` on `key`: one note a grid step long on each
+/// step passed, where that key has no note yet.
+pub fn paint_span(
+    notes: &[Note],
+    last: Option<(f64, i32)>,
+    tick: f64,
+    key: i32,
+    snap: f64,
+) -> Vec<Note> {
+    let g = snap.max(1.0);
+    let cur = (tick.max(0.0) / g).floor() * g;
+    let cells: Vec<f64> = match last {
+        Some((from, k)) if k == key && from != cur => {
+            let (a, b) = if from < cur {
+                (from + g, cur)
+            } else {
+                (cur, from - g)
+            };
+            let n = ((b - a) / g).round().max(0.0) as usize;
+            (0..=n).map(|i| a + g * i as f64).collect()
+        }
+        Some((from, k)) if k == key && from == cur => Vec::new(),
+        _ => vec![cur],
+    };
+    cells
+        .into_iter()
+        .filter(|&c| {
+            !notes
+                .iter()
+                .any(|n| n.key == key && c + 0.5 > n.pos && c < n.pos + n.len - 0.5)
+        })
+        .map(|c| new_note(key, c, g))
+        .collect()
+}
+
+/// Copies of the notes picked by `ids` (every note when it is empty), placed right after
+/// the last of them ends (rounded up to the grid), with new ids: FL's Ctrl+B.
+pub fn duplicate(notes: &[Note], ids: &HashSet<String>, snap: f64) -> Vec<Note> {
+    let sel: Vec<&Note> = notes
+        .iter()
+        .filter(|n| ids.is_empty() || ids.contains(&n.id))
+        .collect();
+    if sel.is_empty() {
+        return Vec::new();
+    }
+    let start = sel.iter().map(|n| n.pos).fold(f64::MAX, f64::min);
+    let end = sel.iter().map(|n| n.pos + n.len).fold(0.0, f64::max);
+    let g = snap.max(1.0);
+    let by = ((end - start) / g).ceil().max(1.0) * g;
+    sel.iter()
+        .map(|n| Note {
+            id: uid("n"),
+            pos: n.pos + by,
+            ..(*n).clone()
+        })
+        .collect()
+}
+
+/// Where Ctrl+V puts the clipboard: right after the selection when there is one, else at
+/// the playhead while playing, else where the roll was last clicked.
+pub fn paste_place(
+    notes: &[Note],
+    selected: &HashSet<String>,
+    playhead: Option<f64>,
+    clicked: f64,
+    snap: f64,
+) -> f64 {
+    let end = notes
+        .iter()
+        .filter(|n| selected.contains(&n.id))
+        .map(|n| n.pos + n.len)
+        .fold(None, |m: Option<f64>, e| Some(m.map_or(e, |m| m.max(e))));
+    let g = snap.max(1.0);
+    match (end, playhead) {
+        (Some(e), _) => (e / g).ceil() * g,
+        (None, Some(t)) => (t / g).floor() * g,
+        (None, None) => clicked,
+    }
+    .max(0.0)
+}
+
+/// The clipboard's notes, with new ids, starting at `at`.
+pub fn place_clipboard(clipboard: &[Note], at: f64) -> Vec<Note> {
+    clipboard
+        .iter()
+        .map(|n| Note {
+            id: uid("n"),
+            pos: n.pos + at,
+            ..n.clone()
+        })
+        .collect()
+}
+
+/// The scroll offset that keeps the point under the pointer still while zooming from
+/// `zoom` to `to` (points per unit). `pointer` is the pointer's distance from the view's
+/// edge and `fixed` the width of a pinned part (the keyboard) before the content.
+pub fn zoom_about(scroll: f32, pointer: f32, fixed: f32, zoom: f32, to: f32) -> f32 {
+    let at = (pointer + scroll - fixed) / zoom.max(1e-6);
+    (fixed + at * to - pointer).max(0.0)
 }
 
 /// How the roll looks and what it is doing; kept between frames.
@@ -348,6 +560,22 @@ pub struct RollState {
     drag: Option<Drag>,
     /// The pattern and channel the view was last centred for.
     centred: Option<(usize, usize)>,
+    /// The event lane shown under the grid.
+    pub lane: Lane,
+    /// The note whose properties window is open.
+    pub props: Option<String>,
+    /// Whether the properties window's change in progress has been made undoable.
+    props_gesture: bool,
+    /// The key of the keyboard at the left held down with the mouse.
+    key_down: Option<i32>,
+    /// The grid step and key the paint tool painted last.
+    paint_last: Option<(f64, i32)>,
+    /// The notes the last click added (a double click on them does not open them).
+    just_added: HashSet<String>,
+    scroll_y: f32,
+    /// Scroll offsets to apply on the next frame (after a zoom around the pointer).
+    want_x: Option<f32>,
+    want_y: Option<f32>,
 }
 
 /// Scales, as steps above the root.
@@ -407,6 +635,15 @@ impl Default for RollState {
             scroll_x: 0.0,
             drag: None,
             centred: None,
+            lane: Lane::Velocity,
+            props: None,
+            props_gesture: false,
+            key_down: None,
+            paint_last: None,
+            just_added: HashSet::new(),
+            scroll_y: 0.0,
+            want_x: None,
+            want_y: None,
         }
     }
 }
@@ -474,12 +711,27 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
         }
         Edit::DeleteMany { ids } => notes.retain(|n| !ids.contains(&n.id)),
         Edit::Paste { notes: add } => notes.extend(add.iter().cloned()),
-        Edit::Velocity { id, vel } => {
+        Edit::Tool { op, ids } => note_tool(notes, *op, ids),
+        Edit::Lane { id, lane, value } => {
             if let Some(n) = notes.iter_mut().find(|n| &n.id == id) {
-                n.vel = vel.clamp(0.0, 1.0);
+                lane.set(n, *value);
             }
         }
-        Edit::Tool { op, ids } => note_tool(notes, *op, ids),
+        Edit::SetNote(m) => {
+            if let Some(n) = notes.iter_mut().find(|n| n.id == m.id) {
+                let fine = m.fine.unwrap_or(0.0).clamp(-FINE_RANGE, FINE_RANGE);
+                *n = Note {
+                    key: m.key.clamp(0, KEYS - 1),
+                    pos: m.pos.max(0.0),
+                    len: m.len.max(1.0),
+                    vel: m.vel.clamp(0.0, 1.0),
+                    pan: m.pan.clamp(-1.0, 1.0),
+                    fine: (fine != 0.0).then_some(fine),
+                    release: m.release.map(|r| r.clamp(0.0, 1.0)),
+                    ..(**m).clone()
+                };
+            }
+        }
         Edit::Quantize { snap } => {
             let g = snap.max(1.0);
             for n in notes.iter_mut() {
@@ -505,38 +757,70 @@ pub fn new_note(key: i32, pos: f64, len: f64) -> Note {
     }
 }
 
-/// Keys that edit the selection while the pointer is over the roll: Delete, Ctrl+A, copy,
-/// cut, paste, Ctrl+D (duplicate) and the arrows (nudge and transpose).
-fn keyboard(ui: &mut Ui, area: Rect, notes: &[Note], state: &mut RollState, edits: &mut Vec<Edit>) {
-    if !ui.rect_contains_pointer(area) || ui.memory(|m| m.focused().is_some()) {
-        return;
-    }
-    let (del, all, copy, cut, paste, dup, up, down, left, right, shift) = ui.input(|i| {
+/// The keys the roll answers, read from one frame's input.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Keys {
+    pub delete: bool,
+    pub all: bool,
+    pub deselect: bool,
+    pub copy: bool,
+    pub cut: bool,
+    pub paste: bool,
+    pub duplicate: bool,
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+    pub shift: bool,
+}
+
+impl Keys {
+    /// FL's keys: Delete, Ctrl+A (all), Ctrl+D (deselect), Ctrl+C, Ctrl+X, Ctrl+V,
+    /// Ctrl+B (duplicate), the arrows (Shift for octaves).
+    pub fn read(i: &egui::InputState) -> Self {
         let c = i.modifiers.command;
         let k = |key| i.key_pressed(key);
-        (
-            k(egui::Key::Delete) || k(egui::Key::Backspace),
-            c && k(egui::Key::A),
-            i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
-            i.events.iter().any(|e| matches!(e, egui::Event::Cut)),
-            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
-            c && k(egui::Key::D),
-            k(egui::Key::ArrowUp),
-            k(egui::Key::ArrowDown),
-            k(egui::Key::ArrowLeft),
-            k(egui::Key::ArrowRight),
-            i.modifiers.shift,
-        )
-    });
+        let ev = |f: fn(&egui::Event) -> bool| i.events.iter().any(f);
+        Self {
+            delete: k(egui::Key::Delete) || k(egui::Key::Backspace),
+            all: c && k(egui::Key::A),
+            deselect: c && k(egui::Key::D),
+            copy: ev(|e| matches!(e, egui::Event::Copy)) || c && k(egui::Key::C),
+            cut: ev(|e| matches!(e, egui::Event::Cut)) || c && k(egui::Key::X),
+            paste: ev(|e| matches!(e, egui::Event::Paste(_) | egui::Event::PasteImage(_)))
+                || c && k(egui::Key::V),
+            duplicate: c && k(egui::Key::B),
+            up: k(egui::Key::ArrowUp),
+            down: k(egui::Key::ArrowDown),
+            left: k(egui::Key::ArrowLeft),
+            right: k(egui::Key::ArrowRight),
+            shift: i.modifiers.shift,
+        }
+    }
+}
+
+/// What the keys do to the notes and the selection: the pure part of the roll's
+/// keyboard, so it can be tested without a window. Returns whether something was copied.
+pub fn keys_edit(
+    keys: Keys,
+    notes: &[Note],
+    state: &mut RollState,
+    playhead: Option<f64>,
+    edits: &mut Vec<Edit>,
+) -> bool {
+    if keys.all {
+        state.selected = notes.iter().map(|n| n.id.clone()).collect();
+    }
+    if keys.deselect {
+        state.selected.clear();
+    }
     let ids: Vec<String> = notes
         .iter()
         .filter(|n| state.selected.contains(&n.id))
         .map(|n| n.id.clone())
         .collect();
-    if all {
-        state.selected = notes.iter().map(|n| n.id.clone()).collect();
-    }
-    if copy || cut {
+    let copied = (keys.copy || keys.cut) && !ids.is_empty();
+    if copied {
         let first = notes
             .iter()
             .filter(|n| state.selected.contains(&n.id))
@@ -551,52 +835,93 @@ fn keyboard(ui: &mut Ui, area: Rect, notes: &[Note], state: &mut RollState, edit
             })
             .collect();
     }
-    if (del || cut) && !ids.is_empty() {
+    if (keys.delete || keys.cut) && !ids.is_empty() {
         edits.push(Edit::Begin);
         edits.push(Edit::DeleteMany { ids: ids.clone() });
         state.selected.clear();
+        return copied;
     }
-    if paste && !state.clipboard.is_empty() {
-        let fresh: Vec<Note> = state
-            .clipboard
-            .iter()
-            .map(|n| Note {
-                id: uid("n"),
-                pos: n.pos + state.paste_at,
-                ..n.clone()
-            })
-            .collect();
+    if keys.paste && !state.clipboard.is_empty() {
+        let at = paste_place(notes, &state.selected, playhead, state.paste_at, state.snap);
+        let fresh = place_clipboard(&state.clipboard, at);
         state.selected = fresh.iter().map(|n| n.id.clone()).collect();
         edits.push(Edit::Begin);
         edits.push(Edit::Paste { notes: fresh });
+        return copied;
     }
-    if dup && !ids.is_empty() {
-        let sel: Vec<&Note> = notes
-            .iter()
-            .filter(|n| state.selected.contains(&n.id))
-            .collect();
-        let start = sel.iter().map(|n| n.pos).fold(f64::MAX, f64::min);
-        let end = sel.iter().map(|n| n.pos + n.len).fold(0.0, f64::max);
-        let g = state.snap.max(1.0);
-        let shift_by = ((end - start) / g).ceil().max(1.0) * g;
-        let fresh: Vec<Note> = sel
-            .iter()
-            .map(|n| Note {
-                id: uid("n"),
-                pos: n.pos + shift_by,
-                ..(*n).clone()
-            })
-            .collect();
+    if keys.duplicate && !notes.is_empty() {
+        let fresh = duplicate(notes, &state.selected, state.snap);
         state.selected = fresh.iter().map(|n| n.id.clone()).collect();
         edits.push(Edit::Begin);
         edits.push(Edit::Paste { notes: fresh });
+        return copied;
     }
-    if !ids.is_empty() && (up || down || left || right) {
-        let dkey = i32::from(up) * if shift { 12 } else { 1 }
-            - i32::from(down) * if shift { 12 } else { 1 };
-        let dpos = (f64::from(i32::from(right)) - f64::from(i32::from(left))) * state.snap.max(1.0);
+    if !ids.is_empty() && (keys.up || keys.down || keys.left || keys.right) {
+        let oct = if keys.shift { 12 } else { 1 };
+        let dkey = (i32::from(keys.up) - i32::from(keys.down)) * oct;
+        let dpos = f64::from(i32::from(keys.right) - i32::from(keys.left)) * state.snap.max(1.0);
         edits.push(Edit::Begin);
         edits.push(Edit::MoveMany { ids, dpos, dkey });
+    }
+    copied
+}
+
+/// The roll's keys, while the pointer is over it and no text field has the keyboard.
+fn keyboard(
+    ui: &mut Ui,
+    area: Rect,
+    notes: &[Note],
+    state: &mut RollState,
+    playhead: Option<f64>,
+    edits: &mut Vec<Edit>,
+) {
+    if !ui.rect_contains_pointer(area) || ui.memory(|m| m.focused().is_some()) {
+        return;
+    }
+    let keys = ui.input(Keys::read);
+    if keys_edit(keys, notes, state, playhead, edits) {
+        // something on the system clipboard, so that Ctrl+V comes back to us
+        ui.ctx().copy_text(format!(
+            "{} notes from Lumen Audio Studio",
+            state.clipboard.len()
+        ));
+    }
+}
+
+/// The height of the event lane under the grid.
+const LANE: f32 = 84.0;
+
+/// Ctrl+wheel zooms the roll in time around the pointer, Alt+wheel (or Shift+wheel)
+/// zooms the keys; `region` is where the roll is about to be drawn.
+fn wheel_zoom(ui: &mut Ui, region: Rect, state: &mut RollState) {
+    let Some(p) = ui
+        .input(|i| i.pointer.hover_pos())
+        .filter(|p| region.contains(*p))
+    else {
+        return;
+    };
+    let (z, scroll, m) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers));
+    if m.command && (z - 1.0).abs() > 1e-4 {
+        let to = (state.zoom * z).clamp(0.1, 2.0);
+        state.want_x = Some(zoom_about(
+            state.scroll_x,
+            p.x - region.left(),
+            GUTTER,
+            state.zoom,
+            to,
+        ));
+        state.zoom = to;
+    } else if (m.alt || m.shift) && !m.command && scroll != egui::Vec2::ZERO {
+        let to = (state.row * ((scroll.x + scroll.y) * 0.004).exp()).clamp(6.0, 40.0);
+        state.want_y = Some(zoom_about(
+            state.scroll_y,
+            p.y - region.top(),
+            0.0,
+            state.row,
+            to,
+        ));
+        state.row = to;
+        ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
     }
 }
 
@@ -621,13 +946,14 @@ pub fn draw(
     let bar = ticks_per_bar(project.time_sig);
     let beat = f64::from(PPQ);
 
+    wheel_zoom(ui, ui.available_rect_before_wrap(), state);
+    let (zoom, rowh) = (state.zoom, state.row);
     // the grid runs at least as wide as the window, like FL's
-    let width = (GUTTER + (ticks as f32 + bar as f32) * state.zoom).max(ui.available_width());
-    let height = KEYS as f32 * state.row;
-    const LANE: f32 = 74.0;
+    let width = (GUTTER + (ticks as f32 + bar as f32) * zoom).max(ui.available_width());
+    let height = KEYS as f32 * rowh;
     let mut area = egui::ScrollArea::both()
         .auto_shrink([false, false])
-        .max_height((ui.available_height() - LANE - 10.0).max(120.0))
+        .max_height((ui.available_height() - LANE - 36.0).max(120.0))
         .id_salt("roll");
     if state.centred != Some((pattern, channel)) {
         // bring the notes into view: the middle of their keys, or middle C
@@ -638,24 +964,30 @@ pub fn draw(
                 + notes.iter().map(|n| n.key).max().unwrap_or(60))
                 / 2
         };
-        let y = ((KEYS - 1 - mid) as f32 * state.row - 140.0).max(0.0);
+        let y = ((KEYS - 1 - mid) as f32 * rowh - 140.0).max(0.0);
         area = area.vertical_scroll_offset(y);
         state.centred = Some((pattern, channel));
+    }
+    if let Some(x) = state.want_x.take() {
+        area = area.horizontal_scroll_offset(x);
+    }
+    if let Some(y) = state.want_y.take() {
+        area = area.vertical_scroll_offset(y);
     }
     let out = area.show_viewport(ui, |ui, viewport| {
         let (resp, painter) =
             ui.allocate_painter(egui::vec2(width, height), Sense::click_and_drag());
         let origin = resp.rect.min;
         let grid_left = origin.x + GUTTER;
-        let x_of = |t: f64| grid_left + t as f32 * state.zoom;
-        let y_of = |k: i32| origin.y + (KEYS - 1 - k) as f32 * state.row;
-        let tick_at = |x: f32| f64::from((x - grid_left) / state.zoom);
+        let x_of = |t: f64| grid_left + t as f32 * zoom;
+        let y_of = |k: i32| origin.y + (KEYS - 1 - k) as f32 * rowh;
+        let tick_at = |x: f32| f64::from((x - grid_left) / zoom);
         let key_at =
-            |y: f32| (KEYS - 1 - ((y - origin.y) / state.row).floor() as i32).clamp(0, KEYS - 1);
+            |y: f32| (KEYS - 1 - ((y - origin.y) / rowh).floor() as i32).clamp(0, KEYS - 1);
 
         // rows
-        let first = (viewport.min.y / state.row).floor() as i32;
-        let last = ((viewport.max.y / state.row).ceil() as i32 + 1).min(KEYS);
+        let first = (viewport.min.y / rowh).floor() as i32;
+        let last = ((viewport.max.y / rowh).ceil() as i32 + 1).min(KEYS);
         for r in first.max(0)..last {
             let k = KEYS - 1 - r;
             let black = matches!(k % 12, 1 | 3 | 6 | 8 | 10);
@@ -671,7 +1003,7 @@ pub fn draw(
             }
             let row = Rect::from_min_size(
                 egui::pos2(grid_left, y_of(k)),
-                egui::vec2(width - GUTTER, state.row),
+                egui::vec2(width - GUTTER, rowh),
             );
             painter.rect_filled(row, 0.0, shade);
             if k % 12 == 0 {
@@ -683,12 +1015,12 @@ pub fn draw(
         }
         // beat and bar lines (and steps when zoomed in)
         let step = f64::from(TICKS_PER_STEP);
-        let end = f64::from((width - GUTTER) / state.zoom).max(ticks + bar);
+        let end = f64::from((width - GUTTER) / zoom).max(ticks + bar);
         let mut t = 0.0;
         while t <= end {
             let on_bar = (t / bar).fract().abs() < 1e-9;
             let on_beat = (t / beat).fract().abs() < 1e-9;
-            if on_bar || on_beat || state.zoom > 0.9 {
+            if on_bar || on_beat || zoom > 0.9 {
                 let g = if on_bar {
                     pl.grid_bar
                 } else if on_beat {
@@ -727,7 +1059,7 @@ pub fn draw(
                             egui::pos2(x_of(n.pos), y_of(n.key) + 2.0),
                             egui::pos2(
                                 (x_of(n.pos + n.len) - 1.0).max(x_of(n.pos) + 3.0),
-                                y_of(n.key) + state.row - 1.0,
+                                y_of(n.key) + rowh - 1.0,
                             ),
                         );
                         painter.rect_filled(r, 2.0, col.gamma_multiply(0.22));
@@ -741,7 +1073,7 @@ pub fn draw(
                 egui::pos2(x_of(n.pos), y_of(n.key) + 1.0),
                 egui::pos2(
                     (x_of(n.pos + n.len) - 1.0).max(x_of(n.pos) + 3.0),
-                    y_of(n.key) + state.row,
+                    y_of(n.key) + rowh,
                 ),
             );
             if r.right() < origin.x + viewport.min.x || r.left() > origin.x + viewport.max.x {
@@ -760,6 +1092,16 @@ pub fn draw(
                 },
                 egui::StrokeKind::Inside,
             );
+            if rowh >= 11.0 && r.width() > 26.0 {
+                // the key's name on the note, as FL shows it
+                painter.with_clip_rect(r).text(
+                    r.left_center() + egui::vec2(3.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    note_name(n.key.clamp(0, 127) as u8),
+                    egui::FontId::proportional((rowh - 4.0).min(10.0)),
+                    Color32::from_black_alpha(200),
+                );
+            }
         }
         if let Some((a, b)) = state.marquee {
             let m = Rect::from_two_pos(a, b);
@@ -780,14 +1122,21 @@ pub fn draw(
                 Stroke::new(1.5, Color32::WHITE),
             );
         }
-        // the keys, pinned to the left of the view
+        // the keys, pinned to the left of the view; the one held down is lit
         let kx = origin.x + viewport.min.x;
         for r in first.max(0)..last {
             let k = KEYS - 1 - r;
             let black = matches!(k % 12, 1 | 3 | 6 | 8 | 10);
-            let cell = Rect::from_min_size(egui::pos2(kx, y_of(k)), egui::vec2(GUTTER, state.row));
-            painter.rect_filled(cell, 0.0, if black { pl.key_black } else { pl.key_white });
-            if k % 12 == 0 || state.row >= 14.0 && !black {
+            let cell = Rect::from_min_size(egui::pos2(kx, y_of(k)), egui::vec2(GUTTER, rowh));
+            let fill = if state.key_down == Some(k) {
+                pl.accent
+            } else if black {
+                pl.key_black
+            } else {
+                pl.key_white
+            };
+            painter.rect_filled(cell, 0.0, fill);
+            if k % 12 == 0 || rowh >= 14.0 && !black {
                 painter.text(
                     cell.right_center() - egui::vec2(4.0, 0.0),
                     egui::Align2::RIGHT_CENTER,
@@ -803,88 +1152,199 @@ pub fn draw(
         }
 
         // the mouse
-        let edge = f64::from(EDGE / state.zoom);
+        let in_keys = |p: egui::Pos2| p.x < kx + GUTTER;
+        let edge = f64::from(EDGE / zoom);
+        let snap = state.snap.max(1.0);
         let pos = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
         let ptr = |p: egui::Pos2| (tick_at(p.x), key_at(p.y));
-        if resp.drag_started_by(egui::PointerButton::Primary) {
-            if let Some(origin_pos) = ui.input(|i| i.pointer.press_origin()) {
-                if origin_pos.x > grid_left {
-                    let (t, k) = ptr(origin_pos);
-                    edits.push(Edit::Begin);
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    match hit(notes, t, k, edge) {
-                        Some((i, false)) if state.tool == Tool::Select => {
-                            let id = notes[i].id.clone();
-                            if !state.selected.contains(&id) {
-                                if !shift {
-                                    state.selected.clear();
-                                }
-                                state.selected.insert(id);
+        let shift = ui.input(|i| i.modifiers.shift);
+        let press = ui.input(|i| i.pointer.press_origin());
+        let on_keys = press.is_some_and(in_keys);
+
+        // the cursor tells what a press would do
+        if let Some(h) = resp.hover_pos().filter(|h| !in_keys(*h)) {
+            let (t, k) = ptr(h);
+            let icon = match (&state.drag, hit(notes, t, k, edge)) {
+                (Some(Drag::Resize { .. }), _) | (None, Some((_, true))) => {
+                    Some(egui::CursorIcon::ResizeHorizontal)
+                }
+                (Some(Drag::Move { .. } | Drag::Group), _) => Some(egui::CursorIcon::Grabbing),
+                (None, Some((_, false))) if state.tool != Tool::Delete => {
+                    Some(egui::CursorIcon::Grab)
+                }
+                _ => None,
+            };
+            if let Some(icon) = icon {
+                ui.ctx().set_cursor_icon(icon);
+            }
+        } else if resp.hover_pos().is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        // the keyboard at the left plays its keys through the channel
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        if primary_down && on_keys && resp.is_pointer_button_down_on() {
+            if let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
+                let k = key_at(p.y);
+                if state.key_down != Some(k) {
+                    if let Some(o) = state.key_down {
+                        edits.push(Edit::Audition { key: o, on: false });
+                    }
+                    edits.push(Edit::Audition { key: k, on: true });
+                    state.key_down = Some(k);
+                }
+            }
+        } else if let Some(o) = state.key_down.take() {
+            edits.push(Edit::Audition { key: o, on: false });
+        }
+
+        if resp.drag_started_by(egui::PointerButton::Primary) && !on_keys {
+            if let Some(op) = press {
+                let (t, k) = ptr(op);
+                state.just_added.clear();
+                match (state.tool, hit(notes, t, k, edge)) {
+                    (Tool::Delete, Some((i, _))) => {
+                        edits.push(Edit::Begin);
+                        edits.push(Edit::Delete {
+                            id: notes[i].id.clone(),
+                        });
+                        state.drag = Some(Drag::Erase { begun: true });
+                    }
+                    (Tool::Delete, None) => state.drag = Some(Drag::Erase { begun: false }),
+                    (_, Some((i, false))) if shift => {
+                        // Shift+drag copies, as in FL: the copy moves, the original stays
+                        let n = &notes[i];
+                        edits.push(Edit::Begin);
+                        if state.selected.contains(&n.id) && state.selected.len() > 1 {
+                            let fresh: Vec<Note> = notes
+                                .iter()
+                                .filter(|m| state.selected.contains(&m.id))
+                                .map(|m| Note {
+                                    id: uid("n"),
+                                    ..m.clone()
+                                })
+                                .collect();
+                            state.selected = fresh.iter().map(|m| m.id.clone()).collect();
+                            edits.push(Edit::Paste { notes: fresh });
+                            state.drag = Some(Drag::Group);
+                            state.group_last = Some((snapped(t, state.snap), k));
+                        } else {
+                            let c = Note {
+                                id: uid("n"),
+                                ..n.clone()
+                            };
+                            state.selected = HashSet::from([c.id.clone()]);
+                            state.drag = Some(Drag::Move {
+                                id: c.id.clone(),
+                                grab: t - n.pos,
+                                key: n.key,
+                            });
+                            edits.push(Edit::Add(c));
+                        }
+                        edits.push(Edit::Audition {
+                            key: n.key,
+                            on: true,
+                        });
+                    }
+                    (_, Some((i, true))) => {
+                        edits.push(Edit::Begin);
+                        state.drag = Some(Drag::Resize {
+                            id: notes[i].id.clone(),
+                        });
+                    }
+                    (tool, Some((i, false))) => {
+                        let n = &notes[i];
+                        edits.push(Edit::Begin);
+                        state.len = n.len;
+                        let many = state.selected.contains(&n.id) && state.selected.len() > 1;
+                        if many || tool == Tool::Select {
+                            if !state.selected.contains(&n.id) {
+                                state.selected.clear();
+                                state.selected.insert(n.id.clone());
                             }
                             state.drag = Some(Drag::Group);
                             state.group_last = Some((snapped(t, state.snap), k));
-                            edits.push(Edit::Audition {
-                                key: notes[i].key,
-                                on: true,
-                            });
-                        }
-                        None if state.tool == Tool::Select => {
-                            if !shift {
-                                state.selected.clear();
-                            }
-                            state.drag = Some(Drag::Marquee);
-                            state.marquee = Some((origin_pos, origin_pos));
-                            // nothing to undo in a selection
-                            edits.pop();
-                        }
-                        Some((i, _)) if state.tool == Tool::Delete => {
-                            edits.push(Edit::Delete {
-                                id: notes[i].id.clone(),
-                            });
-                        }
-                        Some((i, true)) => {
-                            state.drag = Some(Drag::Resize {
-                                id: notes[i].id.clone(),
-                            });
-                        }
-                        Some((i, false)) => {
-                            let n = &notes[i];
-                            state.selected.clear();
-                            state.selected.insert(n.id.clone());
+                        } else {
+                            state.selected = HashSet::from([n.id.clone()]);
                             state.drag = Some(Drag::Move {
                                 id: n.id.clone(),
                                 grab: t - n.pos,
                                 key: n.key,
                             });
-                            edits.push(Edit::Audition {
-                                key: n.key,
-                                on: true,
-                            });
                         }
-                        None if state.tool != Tool::Draw => {}
-                        None => {
-                            let at = snapped(t, state.snap).max(0.0);
-                            let n = new_note(k, at, state.snap.max(1.0));
-                            state.drag = Some(Drag::Resize { id: n.id.clone() });
-                            edits.push(Edit::Audition { key: k, on: true });
+                        edits.push(Edit::Audition {
+                            key: n.key,
+                            on: true,
+                        });
+                    }
+                    (Tool::Select, None) => {
+                        if !shift {
+                            state.selected.clear();
+                        }
+                        state.drag = Some(Drag::Marquee);
+                        state.marquee = Some((op, op));
+                    }
+                    (Tool::Paint, None) => {
+                        edits.push(Edit::Begin);
+                        for n in paint_span(notes, None, t, k, snap) {
                             edits.push(Edit::Add(n));
                         }
+                        state.paint_last = Some(((t.max(0.0) / snap).floor() * snap, k));
+                        state.drag = Some(Drag::Paint);
+                        edits.push(Edit::Audition { key: k, on: true });
+                    }
+                    (Tool::Draw, None) => {
+                        // a new note with the last length, that follows the pointer
+                        edits.push(Edit::Begin);
+                        let at = snapped(t, state.snap).max(0.0);
+                        let fresh: Vec<Note> = chord_keys(k, state.stamp)
+                            .into_iter()
+                            .map(|key| new_note(key, at, state.len))
+                            .collect();
+                        state.selected = fresh.iter().map(|n| n.id.clone()).collect();
+                        state.drag = Some(if fresh.len() == 1 {
+                            Drag::Move {
+                                id: fresh[0].id.clone(),
+                                grab: t - at,
+                                key: k,
+                            }
+                        } else {
+                            state.group_last = Some((snapped(t, state.snap), k));
+                            Drag::Group
+                        });
+                        for n in fresh {
+                            edits.push(Edit::Add(n));
+                        }
+                        edits.push(Edit::Audition { key: k, on: true });
                     }
                 }
             }
-        } else if resp.dragged_by(egui::PointerButton::Primary) {
+        } else if resp.dragged_by(egui::PointerButton::Primary) && !on_keys {
             if let (Some(d), Some(p)) = (state.drag.clone(), pos) {
                 let (t, k) = ptr(p);
                 match d {
+                    Drag::Paint => {
+                        for n in paint_span(notes, state.paint_last, t, k, snap) {
+                            edits.push(Edit::Add(n));
+                        }
+                        if let Some((_, was)) = state.paint_last {
+                            if was != k {
+                                edits.push(Edit::Audition {
+                                    key: was,
+                                    on: false,
+                                });
+                                edits.push(Edit::Audition { key: k, on: true });
+                            }
+                        }
+                        state.paint_last = Some(((t.max(0.0) / snap).floor() * snap, k));
+                    }
                     Drag::Resize { id } => {
                         if let Some(n) = notes.iter().find(|n| n.id == id) {
-                            let end = snapped(t, state.snap) + state.snap.max(1.0);
+                            let end = snapped(t, state.snap) + snap;
                             edits.push(Edit::Resize {
                                 id,
-                                len: (end - n.pos).max(state.snap.max(1.0)),
+                                len: (end - n.pos).max(snap),
                             });
-                        } else {
-                            // the note was only just added; follow it through its first length
                         }
                     }
                     Drag::Group => {
@@ -916,6 +1376,17 @@ pub fn draw(
                             state.marquee = Some((a, p));
                         }
                     }
+                    Drag::Erase { begun } => {
+                        if let Some((i, _)) = hit(notes, t, k, edge) {
+                            if !begun {
+                                edits.push(Edit::Begin);
+                            }
+                            edits.push(Edit::Delete {
+                                id: notes[i].id.clone(),
+                            });
+                            state.drag = Some(Drag::Erase { begun: true });
+                        }
+                    }
                     Drag::Move { id, grab, key } => {
                         let at = snapped(t - grab, state.snap).max(0.0);
                         if k != key {
@@ -936,37 +1407,91 @@ pub fn draw(
                 }
             }
         } else if resp.clicked_by(egui::PointerButton::Primary) {
-            if let Some(p) = resp.interact_pointer_pos() {
-                if p.x > grid_left {
-                    let (t, k) = ptr(p);
-                    state.paste_at = snapped(t, state.snap).max(0.0);
-                    if state.tool == Tool::Select {
-                        let shift = ui.input(|i| i.modifiers.shift);
-                        match hit(notes, t, k, edge) {
-                            Some((i, _)) => {
-                                let id = notes[i].id.clone();
-                                if shift && state.selected.contains(&id) {
-                                    state.selected.remove(&id);
-                                } else {
-                                    if !shift {
-                                        state.selected.clear();
-                                    }
-                                    state.selected.insert(id);
+            if let Some(p) = resp.interact_pointer_pos().filter(|p| !in_keys(*p)) {
+                let (t, k) = ptr(p);
+                state.paste_at = snapped(t, state.snap).max(0.0);
+                let under = hit(notes, t, k, edge);
+                let added_before = std::mem::take(&mut state.just_added);
+                match state.tool {
+                    Tool::Select => match under {
+                        Some((i, _)) => {
+                            let id = notes[i].id.clone();
+                            if shift && state.selected.contains(&id) {
+                                state.selected.remove(&id);
+                            } else {
+                                if !shift {
+                                    state.selected.clear();
                                 }
+                                state.selected.insert(id);
                             }
-                            None if !shift => state.selected.clear(),
-                            None => {}
+                        }
+                        None if !shift => state.selected.clear(),
+                        None => {}
+                    },
+                    Tool::Delete => {
+                        if let Some((i, _)) = under {
+                            edits.push(Edit::Begin);
+                            edits.push(Edit::Delete {
+                                id: notes[i].id.clone(),
+                            });
                         }
                     }
-                    if state.tool == Tool::Draw && hit(notes, t, k, edge).is_none() {
+                    Tool::Draw | Tool::Paint => match under {
+                        None => {
+                            edits.push(Edit::Begin);
+                            let at = snapped(t, state.snap).max(0.0);
+                            let len = if state.tool == Tool::Paint {
+                                snap
+                            } else {
+                                state.len
+                            };
+                            state.selected.clear();
+                            for key in chord_keys(k, state.stamp) {
+                                let n = new_note(key, at, len);
+                                state.just_added.insert(n.id.clone());
+                                edits.push(Edit::Add(n));
+                            }
+                            edits.push(Edit::Audition { key: k, on: true });
+                            edits.push(Edit::Audition { key: k, on: false });
+                        }
+                        Some((i, _)) => {
+                            // a click on a note picks up its length for the next ones
+                            state.len = notes[i].len;
+                            state.just_added = added_before;
+                        }
+                    },
+                }
+            }
+        }
+        if resp.double_clicked_by(egui::PointerButton::Primary) {
+            if let Some(p) = resp.interact_pointer_pos().filter(|p| !in_keys(*p)) {
+                let (t, k) = ptr(p);
+                if let Some((i, _)) = hit(notes, t, k, edge) {
+                    if !state.just_added.contains(&notes[i].id) {
+                        state.props = Some(notes[i].id.clone());
+                        state.props_gesture = false;
+                    }
+                }
+            }
+        }
+        // a right click deletes the note under it; a right drag deletes all it passes
+        if resp.dragged_by(egui::PointerButton::Secondary)
+            || resp.clicked_by(egui::PointerButton::Secondary)
+        {
+            if let Some(p) = pos.filter(|p| !in_keys(*p)) {
+                let (t, k) = ptr(p);
+                if let Some((i, _)) = hit(notes, t, k, edge) {
+                    let begun = matches!(state.drag, Some(Drag::Erase { begun: true }));
+                    if !begun {
                         edits.push(Edit::Begin);
-                        let at = snapped(t, state.snap).max(0.0);
-                        for key in chord_keys(k, state.stamp) {
-                            edits.push(Edit::Add(new_note(key, at, state.len)));
-                        }
-                        edits.push(Edit::Audition { key: k, on: true });
-                        edits.push(Edit::Audition { key: k, on: false });
                     }
+                    if resp.dragged_by(egui::PointerButton::Secondary) {
+                        state.drag = Some(Drag::Erase { begun: true });
+                    }
+                    state.selected.remove(&notes[i].id);
+                    edits.push(Edit::Delete {
+                        id: notes[i].id.clone(),
+                    });
                 }
             }
         }
@@ -983,12 +1508,17 @@ pub fn draw(
                         for n in notes {
                             let r = Rect::from_min_max(
                                 egui::pos2(x_of(n.pos), y_of(n.key)),
-                                egui::pos2(x_of(n.pos + n.len), y_of(n.key) + state.row),
+                                egui::pos2(x_of(n.pos + n.len), y_of(n.key) + rowh),
                             );
                             if r.intersects(area) {
                                 state.selected.insert(n.id.clone());
                             }
                         }
+                    }
+                }
+                Some(Drag::Paint) => {
+                    if let Some((_, key)) = state.paint_last.take() {
+                        edits.push(Edit::Audition { key, on: false });
                     }
                 }
                 Some(Drag::Move { key, .. }) => edits.push(Edit::Audition { key, on: false }),
@@ -1001,53 +1531,102 @@ pub fn draw(
                         });
                     }
                 }
-                None => {}
-            }
-        }
-        if resp.clicked_by(egui::PointerButton::Secondary) {
-            if let Some(p) = resp.interact_pointer_pos() {
-                let (t, k) = ptr(p);
-                if let Some((i, _)) = hit(notes, t, k, edge) {
-                    edits.push(Edit::Begin);
-                    edits.push(Edit::Delete {
-                        id: notes[i].id.clone(),
-                    });
-                }
+                Some(Drag::Erase { .. }) | None => {}
             }
         }
     });
     state.scroll_x = out.state.clamped_offset().x;
-    keyboard(ui, out.inner_rect, notes, state, &mut edits);
-    // the velocity lane under the grid
-    let (lane, lresp) = ui.allocate_exact_size(
+    state.scroll_y = out.state.clamped_offset().y;
+    keyboard(ui, out.inner_rect, notes, state, playhead, &mut edits);
+    lanes(ui, notes, state, &mut edits);
+    properties(ui, notes, state, &mut edits);
+    edits
+}
+
+/// The event lane under the grid: a row of lane names to pick from, and a bar for each
+/// note that a drag sets (only the selected notes' bars when some are selected).
+fn lanes(ui: &mut Ui, notes: &[Note], state: &mut RollState, edits: &mut Vec<Edit>) {
+    let pl = crate::theme::pal();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Event lane").weak().size(11.0));
+        for (lane, name, tip) in LANES {
+            ui.selectable_value(&mut state.lane, lane, name)
+                .on_hover_text(tip);
+        }
+        ui.label(
+            egui::RichText::new(
+                "Drag over the bars to set them. Double click a note for all its properties.",
+            )
+            .weak()
+            .size(11.0),
+        );
+    });
+    let lane = state.lane;
+    let (rect, lresp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), LANE),
         Sense::click_and_drag(),
     );
-    let painter = ui.painter_at(lane);
-    painter.rect_filled(lane, 0.0, pl.well_deep);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, pl.well_deep);
     painter.text(
-        lane.left_top() + egui::vec2(6.0, 4.0),
+        rect.left_top() + egui::vec2(6.0, 4.0),
         egui::Align2::LEFT_TOP,
-        "VELOCITY",
+        lane.name().to_uppercase(),
         egui::FontId::proportional(9.5),
         pl.muted,
     );
-    let lx = |t: f64| lane.left() + GUTTER + t as f32 * state.zoom - state.scroll_x;
-    let bar_h = LANE - 16.0;
+    let (top, bottom) = (rect.top() + 6.0, rect.bottom() - 4.0);
+    let bar_h = bottom - top;
+    let y_of = |v: f64| bottom - bar_h * v as f32;
+    if lane.centred() {
+        painter.line_segment(
+            [
+                egui::pos2(rect.left() + GUTTER, y_of(0.5)),
+                egui::pos2(rect.right(), y_of(0.5)),
+            ],
+            Stroke::new(1.0, pl.grid_bar),
+        );
+    }
+    let lx = |t: f64| rect.left() + GUTTER + t as f32 * state.zoom - state.scroll_x;
+    let some_selected = notes.iter().any(|n| state.selected.contains(&n.id));
     for n in notes {
         let x = lx(n.pos);
-        if x > lane.right() || lx(n.pos + n.len) < lane.left() + GUTTER {
+        if x > rect.right() || x < rect.left() + GUTTER - 2.0 {
             continue;
         }
-        let h = bar_h * n.vel.clamp(0.0, 1.0) as f32;
-        let r = Rect::from_min_max(
-            egui::pos2(x.max(lane.left() + GUTTER), lane.bottom() - 4.0 - h),
-            egui::pos2(
-                (lx(n.pos + n.len) - 1.0).max(x + 3.0).min(lane.right()),
-                lane.bottom() - 4.0,
-            ),
+        let v = lane.get(n);
+        let base = if lane.centred() { 0.5 } else { 0.0 };
+        let (a, b) = (y_of(base), y_of(v));
+        let picked = !some_selected || state.selected.contains(&n.id);
+        let col = if picked {
+            pl.accent
+        } else {
+            pl.accent.gamma_multiply(0.35)
+        };
+        // a stem from the note's start and a knob at its value, like FL's lanes
+        painter.line_segment(
+            [egui::pos2(x + 1.0, a), egui::pos2(x + 1.0, b)],
+            Stroke::new(2.0, col),
         );
-        painter.rect_filled(r, 2.0, pl.accent.gamma_multiply(0.85));
+        let w = (n.len as f32 * state.zoom - 2.0).clamp(3.0, 14.0);
+        painter.rect_filled(
+            Rect::from_min_max(egui::pos2(x, b - 1.5), egui::pos2(x + w, b + 1.5)),
+            1.0,
+            col,
+        );
+    }
+    let (zoom, scroll) = (state.zoom, state.scroll_x);
+    let at = |p: egui::Pos2| f64::from((p.x - rect.left() - GUTTER + scroll) / zoom);
+    let under = |tick: f64| {
+        notes.iter().filter(move |n| {
+            let w = f64::from(4.0 / zoom).max(n.len);
+            tick >= n.pos - f64::from(2.0 / zoom) && tick < n.pos + w
+        })
+    };
+    if let Some(p) = lresp.hover_pos() {
+        if let Some(n) = under(at(p)).next() {
+            lresp.clone().on_hover_text_at_pointer(lane.text(n));
+        }
     }
     if lresp.drag_started_by(egui::PointerButton::Primary)
         || lresp.clicked_by(egui::PointerButton::Primary)
@@ -1059,20 +1638,155 @@ pub fn draw(
         || lresp.drag_started_by(egui::PointerButton::Primary)
     {
         if let Some(p) = lresp.interact_pointer_pos() {
-            let tick = f64::from((p.x - lane.left() - GUTTER + state.scroll_x) / state.zoom);
-            let vel = f64::from(((lane.bottom() - 4.0 - p.y) / bar_h).clamp(0.0, 1.0));
-            if let Some(n) = notes
-                .iter()
-                .find(|n| tick >= n.pos && tick < n.pos + n.len.max(1.0))
-            {
-                edits.push(Edit::Velocity {
+            let value = f64::from(((bottom - p.y) / bar_h).clamp(0.0, 1.0));
+            for n in under(at(p)).filter(|n| !some_selected || state.selected.contains(&n.id)) {
+                edits.push(Edit::Lane {
                     id: n.id.clone(),
-                    vel,
+                    lane,
+                    value,
                 });
             }
         }
     }
-    edits
+}
+
+/// The note properties window a double click on a note opens.
+fn properties(ui: &mut Ui, notes: &[Note], state: &mut RollState, edits: &mut Vec<Edit>) {
+    let Some(id) = state.props.clone() else {
+        return;
+    };
+    let Some(n) = notes.iter().find(|n| n.id == id) else {
+        state.props = None;
+        return;
+    };
+    let mut m = n.clone();
+    let mut open = true;
+    let mut changed = false;
+    let step = f64::from(TICKS_PER_STEP);
+    egui::Window::new("Note properties")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Grid::new("roll-note-props")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    let mut row = |ui: &mut Ui, name: &str, tip: &str, w: egui::DragValue| {
+                        ui.label(name).on_hover_text(tip);
+                        changed |= ui.add(w).on_hover_text(tip).changed();
+                        ui.end_row();
+                    };
+                    let mut vel = m.vel * 100.0;
+                    row(
+                        ui,
+                        "Velocity",
+                        "How hard the note is played",
+                        egui::DragValue::new(&mut vel)
+                            .range(0.0..=100.0)
+                            .suffix("%")
+                            .speed(0.5),
+                    );
+                    m.vel = vel / 100.0;
+                    let mut pan = m.pan * 100.0;
+                    row(
+                        ui,
+                        "Pan",
+                        "Left (negative) to right (positive)",
+                        egui::DragValue::new(&mut pan)
+                            .range(-100.0..=100.0)
+                            .speed(0.5)
+                            .custom_formatter(|v, _| pan_text(v / 100.0))
+                            .custom_parser(|s| {
+                                let t = s.trim().to_lowercase();
+                                if t.starts_with('c') {
+                                    return Some(0.0);
+                                }
+                                let num: f64 = t
+                                    .trim_end_matches(['l', 'r', ' ', '%'])
+                                    .trim_end_matches('%')
+                                    .trim()
+                                    .parse()
+                                    .ok()?;
+                                Some(if t.ends_with('l') { -num } else { num })
+                            }),
+                    );
+                    m.pan = pan / 100.0;
+                    let mut fine = m.fine.unwrap_or(0.0);
+                    row(
+                        ui,
+                        "Fine pitch",
+                        "Tune the note up or down, in cents (100 is a semitone)",
+                        egui::DragValue::new(&mut fine)
+                            .range(-FINE_RANGE..=FINE_RANGE)
+                            .suffix(" cents")
+                            .speed(0.5),
+                    );
+                    m.fine = Some(fine);
+                    let mut rel = m.release.unwrap_or(0.5) * 100.0;
+                    let was = rel;
+                    row(
+                        ui,
+                        "Release",
+                        "Release velocity (for instruments that use it)",
+                        egui::DragValue::new(&mut rel)
+                            .range(0.0..=100.0)
+                            .suffix("%")
+                            .speed(0.5),
+                    );
+                    if rel != was {
+                        m.release = Some(rel / 100.0);
+                    }
+                    let mut start = m.pos / step + 1.0;
+                    row(
+                        ui,
+                        "Start (step)",
+                        "Where the note starts, in steps from the start of the pattern (step 1)",
+                        egui::DragValue::new(&mut start)
+                            .range(1.0..=100_000.0)
+                            .speed(0.05)
+                            .max_decimals(2),
+                    );
+                    m.pos = (start - 1.0) * step;
+                    let mut len = m.len / step;
+                    row(
+                        ui,
+                        "Length (steps)",
+                        "How long the note is, in steps (4 steps make a beat)",
+                        egui::DragValue::new(&mut len)
+                            .range(0.05..=10_000.0)
+                            .speed(0.05)
+                            .max_decimals(2),
+                    );
+                    m.len = len * step;
+                    row(
+                        ui,
+                        "Key",
+                        "The note's key",
+                        egui::DragValue::new(&mut m.key)
+                            .range(0..=KEYS - 1)
+                            .speed(0.2)
+                            .custom_formatter(|v, _| note_name(v.round().clamp(0.0, 127.0) as u8)),
+                    );
+                });
+            ui.label(
+                egui::RichText::new("Drag a value or double click it to type. Ctrl+Z undoes.")
+                    .weak()
+                    .size(11.0),
+            );
+        });
+    if !open {
+        state.props = None;
+    }
+    if changed {
+        if !state.props_gesture {
+            edits.push(Edit::Begin);
+            state.props_gesture = true;
+        }
+        edits.push(Edit::SetNote(Box::new(m)));
+    } else if !ui.input(|i| i.pointer.any_down()) {
+        state.props_gesture = false;
+    }
 }
 
 #[cfg(test)]
@@ -1280,9 +1994,10 @@ mod tests {
             &mut p,
             0,
             &ch,
-            &Edit::Velocity {
+            &Edit::Lane {
                 id: id.clone(),
-                vel: 0.3,
+                lane: Lane::Velocity,
+                value: 0.3,
             },
         );
         assert_eq!(p.patterns[0].notes[&ch][0].vel, 0.3);
@@ -1290,9 +2005,10 @@ mod tests {
             &mut p,
             0,
             &ch,
-            &Edit::Velocity {
+            &Edit::Lane {
                 id: id.clone(),
-                vel: 7.0,
+                lane: Lane::Velocity,
+                value: 7.0,
             },
         );
         assert_eq!(p.patterns[0].notes[&ch][0].vel, 1.0);
@@ -1300,9 +2016,10 @@ mod tests {
             &mut p,
             0,
             &ch,
-            &Edit::Velocity {
+            &Edit::Lane {
                 id: "nope".into(),
-                vel: 0.1,
+                lane: Lane::Velocity,
+                value: 0.1,
             },
         );
         assert_eq!(p.patterns[0].notes[&ch][0].vel, 1.0);
@@ -1421,6 +2138,329 @@ mod tests {
         assert!(
             edits.iter().any(|e| matches!(e, Edit::Add(_))),
             "a drag on empty space starts a note: {edits:?}"
+        );
+    }
+    #[test]
+    fn paint_lays_a_note_on_every_step_passed_and_skips_taken_ones() {
+        let snap = 24.0;
+        let first = paint_span(&[], None, 30.0, 60, snap);
+        assert_eq!(first.len(), 1);
+        assert_eq!((first[0].pos, first[0].len, first[0].key), (24.0, 24.0, 60));
+        // a jump of three steps fills the steps between
+        let more = paint_span(&first, Some((24.0, 60)), 100.0, 60, snap);
+        assert_eq!(
+            more.iter().map(|n| n.pos).collect::<Vec<_>>(),
+            [48.0, 72.0, 96.0]
+        );
+        // backwards too
+        let back = paint_span(&[], Some((96.0, 60)), 30.0, 60, snap);
+        assert_eq!(
+            back.iter().map(|n| n.pos).collect::<Vec<_>>(),
+            [24.0, 48.0, 72.0]
+        );
+        // the same step adds nothing; a note already there is not doubled
+        assert!(paint_span(&first, Some((24.0, 60)), 40.0, 60, snap).is_empty());
+        assert!(paint_span(&first, None, 30.0, 60, snap).is_empty());
+        // another key starts afresh on the step under the pointer
+        let other = paint_span(&first, Some((24.0, 60)), 100.0, 62, snap);
+        assert_eq!(other.len(), 1);
+        assert_eq!((other[0].pos, other[0].key), (96.0, 62));
+    }
+
+    #[test]
+    fn ctrl_b_duplicates_the_selection_or_everything_right_after_itself() {
+        let a = new_note(60, 0.0, 24.0);
+        let b = new_note(64, 48.0, 30.0);
+        let notes = vec![a.clone(), b.clone()];
+        let all = duplicate(&notes, &HashSet::new(), 24.0);
+        // 0 to 78 rounds up to 96
+        assert_eq!(all.iter().map(|n| n.pos).collect::<Vec<_>>(), [96.0, 144.0]);
+        assert!(all.iter().all(|n| n.id != a.id && n.id != b.id));
+        let one = duplicate(&notes, &HashSet::from([b.id.clone()]), 24.0);
+        assert_eq!(one.len(), 1);
+        assert_eq!((one[0].pos, one[0].key, one[0].len), (96.0, 64, 30.0));
+        assert!(duplicate(&[], &HashSet::new(), 24.0).is_empty());
+    }
+
+    #[test]
+    fn paste_goes_after_the_selection_else_the_playhead_else_the_last_click() {
+        let a = new_note(60, 0.0, 30.0);
+        let notes = vec![a.clone()];
+        let sel = HashSet::from([a.id.clone()]);
+        assert_eq!(paste_place(&notes, &sel, Some(500.0), 7.0, 24.0), 48.0);
+        assert_eq!(
+            paste_place(&notes, &HashSet::new(), Some(500.0), 7.0, 24.0),
+            480.0
+        );
+        assert_eq!(paste_place(&notes, &HashSet::new(), None, 7.0, 24.0), 7.0);
+        let placed = place_clipboard(&[new_note(60, 24.0, 24.0)], 96.0);
+        assert_eq!(placed[0].pos, 120.0);
+    }
+
+    #[test]
+    fn the_keys_select_copy_paste_duplicate_delete_and_move() {
+        let notes = vec![new_note(60, 0.0, 24.0), new_note(64, 24.0, 24.0)];
+        let mut st = RollState::default();
+        let mut e = Vec::new();
+        let press = |f: fn(&mut Keys)| {
+            let mut k = Keys::default();
+            f(&mut k);
+            k
+        };
+        keys_edit(press(|k| k.all = true), &notes, &mut st, None, &mut e);
+        assert_eq!(st.selected.len(), 2);
+        assert!(e.is_empty(), "selecting changes nothing");
+        assert!(keys_edit(
+            press(|k| k.copy = true),
+            &notes,
+            &mut st,
+            None,
+            &mut e
+        ));
+        assert_eq!(st.clipboard.len(), 2);
+        keys_edit(press(|k| k.paste = true), &notes, &mut st, None, &mut e);
+        let Some(Edit::Paste { notes: got }) = e.last() else {
+            panic!("{e:?}")
+        };
+        // right after the selection, which ends at 48
+        assert_eq!(got.iter().map(|n| n.pos).collect::<Vec<_>>(), [48.0, 72.0]);
+        assert!(got.iter().all(|n| st.selected.contains(&n.id)));
+        e.clear();
+        st.selected.clear();
+        keys_edit(press(|k| k.duplicate = true), &notes, &mut st, None, &mut e);
+        assert!(matches!(&e[..], [Edit::Begin, Edit::Paste { notes }] if notes.len() == 2));
+        e.clear();
+        st.selected = HashSet::from([notes[0].id.clone()]);
+        keys_edit(
+            press(|k| {
+                k.up = true;
+                k.shift = true;
+            }),
+            &notes,
+            &mut st,
+            None,
+            &mut e,
+        );
+        assert!(matches!(&e[1], Edit::MoveMany { dkey: 12, dpos, .. } if *dpos == 0.0));
+        e.clear();
+        keys_edit(press(|k| k.right = true), &notes, &mut st, None, &mut e);
+        assert!(matches!(&e[1], Edit::MoveMany { dkey: 0, dpos, .. } if *dpos == 24.0));
+        e.clear();
+        keys_edit(press(|k| k.delete = true), &notes, &mut st, None, &mut e);
+        assert!(matches!(&e[1], Edit::DeleteMany { ids } if ids.len() == 1));
+        assert!(st.selected.is_empty());
+        st.selected = HashSet::from([notes[0].id.clone()]);
+        keys_edit(press(|k| k.deselect = true), &notes, &mut st, None, &mut e);
+        assert!(st.selected.is_empty(), "Ctrl+D deselects, as in FL");
+    }
+
+    #[test]
+    fn lanes_read_and_set_velocity_pan_fine_pitch_and_release() {
+        let mut n = new_note(60, 0.0, 24.0);
+        assert_eq!(Lane::Pan.get(&n), 0.5);
+        assert_eq!(Lane::Fine.get(&n), 0.5);
+        assert_eq!(Lane::Release.get(&n), 0.5);
+        Lane::Pan.set(&mut n, 0.0);
+        assert_eq!(n.pan, -1.0);
+        Lane::Pan.set(&mut n, 0.51);
+        assert_eq!(n.pan, 0.0, "the middle is easy to hit");
+        Lane::Fine.set(&mut n, 1.0);
+        assert_eq!(n.fine, Some(FINE_RANGE));
+        Lane::Fine.set(&mut n, 0.5);
+        assert_eq!(n.fine, None);
+        Lane::Release.set(&mut n, 0.2);
+        assert_eq!(n.release, Some(0.2));
+        Lane::Velocity.set(&mut n, 3.0);
+        assert_eq!(n.vel, 1.0);
+        assert_eq!(pan_text(-0.4), "40% L");
+        assert_eq!(pan_text(0.0), "Centre");
+        assert!(Lane::Fine.text(&n).contains("cents"));
+        for (l, name, _) in LANES {
+            assert_eq!(l.name(), name);
+        }
+    }
+
+    #[test]
+    fn note_properties_replace_a_note_within_range() {
+        let mut p = project();
+        let ch = p.channels[0].id.clone();
+        p.patterns[0].notes.remove(&ch);
+        let n = new_note(60, 0.0, 24.0);
+        apply(&mut p, 0, &ch, &Edit::Add(n.clone()));
+        let m = Note {
+            key: 300,
+            pos: -5.0,
+            len: 0.0,
+            vel: 0.5,
+            pan: -3.0,
+            fine: Some(250.0),
+            release: Some(0.25),
+            ..n.clone()
+        };
+        apply(&mut p, 0, &ch, &Edit::SetNote(Box::new(m)));
+        let got = &p.patterns[0].notes[&ch][0];
+        assert_eq!(
+            (
+                got.key,
+                got.pos,
+                got.len,
+                got.vel,
+                got.pan,
+                got.fine,
+                got.release
+            ),
+            (127, 0.0, 1.0, 0.5, -1.0, Some(FINE_RANGE), Some(0.25))
+        );
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Lane {
+                id: n.id.clone(),
+                lane: Lane::Pan,
+                value: 1.0,
+            },
+        );
+        assert_eq!(p.patterns[0].notes[&ch][0].pan, 1.0);
+    }
+
+    #[test]
+    fn zoom_keeps_the_point_under_the_pointer_still() {
+        // tick under the pointer: (300 + 100 - 56) / 0.5 = 688
+        let s = zoom_about(100.0, 300.0, GUTTER, 0.5, 1.0);
+        assert!(((300.0 + s - GUTTER) / 1.0 - 688.0).abs() < 1e-3);
+        assert_eq!(
+            zoom_about(0.0, 100.0, GUTTER, 1.0, 0.1),
+            0.0,
+            "never past the start"
+        );
+    }
+
+    fn drive_with(
+        p: &Project,
+        state: &mut RollState,
+        frames: Vec<Vec<egui::Event>>,
+        modifiers: egui::Modifiers,
+    ) -> Vec<Edit> {
+        let ctx = egui::Context::default();
+        let mut all = Vec::new();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 600.0));
+        for mut events in frames {
+            events.insert(0, egui::Event::ModifiersChanged(modifiers));
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            crate::widgets::run_frame(&ctx, input, |ui| {
+                all.extend(draw(ui, p, 0, 0, state, None));
+            });
+        }
+        all
+    }
+
+    fn drag_frames(a: egui::Pos2, b: egui::Pos2) -> Vec<Vec<egui::Event>> {
+        let mid = egui::pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        vec![
+            vec![egui::Event::PointerMoved(a)],
+            vec![button(a, true)],
+            vec![egui::Event::PointerMoved(egui::pos2(a.x + 12.0, a.y))],
+            vec![egui::Event::PointerMoved(mid)],
+            vec![egui::Event::PointerMoved(b)],
+            vec![button(b, false)],
+            vec![],
+        ]
+    }
+
+    #[test]
+    fn the_paint_tool_draws_notes_along_a_drag() {
+        let mut p = project();
+        let ch = p.channels[0].id.clone();
+        p.patterns[0].notes.remove(&ch);
+        let mut state = RollState {
+            tool: Tool::Paint,
+            ..Default::default()
+        };
+        // 200 points at half a point a tick is 400 ticks: many sixteenths
+        let a = at(GUTTER + 4.0, 300.0);
+        let edits = drive(&p, &mut state, drag_frames(a, at(a.x + 200.0, a.y)));
+        let added = edits.iter().filter(|e| matches!(e, Edit::Add(_))).count();
+        assert!(added >= 10, "{added}: {edits:?}");
+        assert_eq!(
+            edits.iter().filter(|e| matches!(e, Edit::Begin)).count(),
+            1,
+            "one undo step for the whole stroke"
+        );
+    }
+
+    #[test]
+    fn shift_drag_copies_a_note_and_a_double_click_opens_its_properties() {
+        let mut p = project();
+        let ch = p.channels[0].id.clone();
+        let n = new_note(100, 0.0, 96.0);
+        p.patterns[0].notes.insert(ch.clone(), vec![n.clone()]);
+        // the view is not scrolled, so key 100 is drawn 27 rows down
+        let fresh = || RollState {
+            centred: Some((0, 0)),
+            ..Default::default()
+        };
+        let mut state = fresh();
+        let y = (KEYS - 1 - 100) as f32 * state.row + state.row / 2.0;
+        let a = at(GUTTER + 10.0, y);
+        let edits = drive_with(
+            &p,
+            &mut state,
+            drag_frames(a, at(a.x + 100.0, a.y)),
+            egui::Modifiers::SHIFT,
+        );
+        let copy = edits.iter().find_map(|e| match e {
+            Edit::Add(c) => Some(c.clone()),
+            _ => None,
+        });
+        let copy = copy.unwrap_or_else(|| panic!("{edits:?}"));
+        assert_ne!(copy.id, n.id);
+        assert!(edits
+            .iter()
+            .any(|e| matches!(e, Edit::Move { id, .. } if *id == copy.id)));
+
+        let mut state = fresh();
+        let frames = vec![
+            vec![egui::Event::PointerMoved(a)],
+            vec![button(a, true)],
+            vec![button(a, false)],
+            vec![button(a, true)],
+            vec![button(a, false)],
+            vec![],
+        ];
+        let got = drive(&p, &mut state, frames);
+        assert_eq!(state.props, Some(n.id.clone()), "{got:?}");
+        assert_eq!(state.props.as_deref(), Some(n.id.as_str()));
+    }
+
+    #[test]
+    fn a_click_on_the_keyboard_plays_the_key() {
+        let p = project();
+        let mut state = RollState::default();
+        let k = at(20.0, 300.0);
+        let frames = vec![
+            vec![egui::Event::PointerMoved(k)],
+            vec![button(k, true)],
+            vec![],
+            vec![button(k, false)],
+            vec![],
+        ];
+        let edits = drive(&p, &mut state, frames);
+        assert!(edits
+            .iter()
+            .any(|e| matches!(e, Edit::Audition { on: true, .. })));
+        assert!(edits
+            .iter()
+            .any(|e| matches!(e, Edit::Audition { on: false, .. })));
+        assert!(
+            !edits
+                .iter()
+                .any(|e| matches!(e, Edit::Add(_) | Edit::Begin)),
+            "{edits:?}"
         );
     }
 }

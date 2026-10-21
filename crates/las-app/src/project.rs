@@ -598,12 +598,26 @@ impl App {
                 ui.selectable_value(&mut self.project.channel, i, &c.name);
             }
             ui.separator();
-            for (t, name) in [
-                (roll::Tool::Draw, "Draw"),
-                (roll::Tool::Select, "Select"),
-                (roll::Tool::Delete, "Delete"),
+            for (t, name, tip) in [
+                (
+                    roll::Tool::Draw,
+                    "Draw",
+                    "Click to add a note (with the last length used), drag a note to move it, drag its right edge to resize it, Shift+drag to copy it, right click to delete",
+                ),
+                (
+                    roll::Tool::Paint,
+                    "Paint",
+                    "Drag to paint a note on every grid step you pass (the snap sets the length)",
+                ),
+                (
+                    roll::Tool::Select,
+                    "Select",
+                    "Drag a box to select notes, then drag them together; Shift adds to the selection",
+                ),
+                (roll::Tool::Delete, "Delete", "Click or drag over notes to delete them"),
             ] {
-                ui.selectable_value(&mut self.project.roll.tool, t, name);
+                ui.selectable_value(&mut self.project.roll.tool, t, name)
+                    .on_hover_text(tip);
             }
             ui.separator();
             ui.label("Snap");
@@ -723,7 +737,8 @@ impl App {
             .response
             .on_hover_text("Each click draws this chord on the key clicked");
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false));
+            ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false))
+                .on_hover_text("Ctrl+wheel zooms in time around the pointer, Alt+wheel zooms the keys");
         });
         let edits = roll::draw(
             ui,
