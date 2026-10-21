@@ -150,6 +150,11 @@ pub fn default_state(plugin_id: &str) -> Value {
         }
         "nebula" => las_dsp::presets::bank("nebula")
             .and_then(|b| b.find("Init").map(|i| b.presets[i].state.clone()))
+            .map(|mut s| {
+                // the display shows the preset loaded
+                s["preset"] = json!("Init");
+                s
+            })
             .unwrap_or_else(|| json!({})),
         _ => json!({}),
     }

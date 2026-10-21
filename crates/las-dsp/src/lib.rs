@@ -14,6 +14,7 @@ pub mod fx;
 pub mod loudness;
 pub mod mist;
 pub mod modular;
+mod nebula_gen;
 pub mod param;
 pub mod patch;
 pub mod presets;
