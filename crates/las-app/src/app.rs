@@ -111,6 +111,8 @@ pub struct App {
     pub(crate) synth_dirty: bool,
     /// Set when the user asked to quit and it is allowed.
     pub(crate) quit: bool,
+    /// The hosted plugins' own windows that are open.
+    pub(crate) editors: Vec<crate::hosted::OpenEditor>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,6 +175,7 @@ impl App {
             bound: None,
             synth_dirty: false,
             quit: false,
+            editors: Vec::new(),
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
@@ -1623,6 +1626,7 @@ impl eframe::App for App {
         if let Some(a) = &mut self.audio {
             a.collect_garbage();
         }
+        self.serve_editors();
         // meters move on their own
         ctx.request_repaint_after(Duration::from_millis(16));
     }

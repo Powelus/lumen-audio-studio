@@ -739,3 +739,39 @@ pub fn params_of(id: &str) -> Arc<Vec<Param>> {
         .push((id.to_string(), list.clone()));
     list
 }
+
+/// A hosted plugin's own window, open on the app's thread.
+pub enum Editor {
+    Vst3(vst3::Vst3Editor),
+}
+
+impl Editor {
+    /// Open the window of the plugin `info`, showing `params` (the project's values).
+    pub fn open(info: &PluginInfo, params: &[(u32, f64)], title: &str) -> Result<Self, String> {
+        match info.format {
+            Format::Vst3 => vst3::Vst3Editor::open(info, params, title).map(Self::Vst3),
+            Format::Clap => Err("CLAP plugin windows are not hosted yet".into()),
+        }
+    }
+
+    /// Serve the window; what the user changed in it since the last call.
+    pub fn idle(&mut self) -> Vec<(u32, f64)> {
+        match self {
+            Self::Vst3(e) => e.idle(),
+        }
+    }
+
+    /// Show a value that changed elsewhere.
+    pub fn set_param(&mut self, id: u32, value: f64) {
+        match self {
+            Self::Vst3(e) => e.set_param(id, value),
+        }
+    }
+
+    /// Whether the user closed the window.
+    pub fn closed(&self) -> bool {
+        match self {
+            Self::Vst3(e) => e.closed(),
+        }
+    }
+}
