@@ -66,7 +66,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p las-cli -p las-app --target ${{ matrix.target }}
+      - run: cargo build --release --locked -p las-cli -p las-app -p las-host --bins --target ${{ matrix.target }}
       - name: Smoke test the built binary
         if: matrix.smoke
         shell: bash
@@ -78,6 +78,7 @@ jobs:
             "target/${{ matrix.target }}/release/lumen" --version | grep -F "$VERSION"
           fi
           test -f "target/${{ matrix.target }}/release/lumen${{ matrix.ext }}"
+          test -f "target/${{ matrix.target }}/release/lumen-plugin-host${{ matrix.ext }}"
           "$bin" render-facet examples/facet-bell.json -o smoke.wav
           # a 32-bit float stereo WAV with real audio in it (header is 44 bytes plus fact/data chunks)
           test "$(wc -c < smoke.wav)" -gt 100000
@@ -96,7 +97,7 @@ jobs:
         run: |
           name="las-$VERSION-${{ matrix.name }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/las${{ matrix.ext }}" "target/${{ matrix.target }}/release/lumen${{ matrix.ext }}" LICENSE README.md CHANGELOG.md "dist/$name/"
+          cp "target/${{ matrix.target }}/release/las${{ matrix.ext }}" "target/${{ matrix.target }}/release/lumen${{ matrix.ext }}" "target/${{ matrix.target }}/release/lumen-plugin-host${{ matrix.ext }}" LICENSE README.md CHANGELOG.md "dist/$name/"
           cp -r examples "dist/$name/examples"
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then

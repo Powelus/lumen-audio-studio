@@ -10,6 +10,14 @@ CLAP plugin windows.
 - The host side serves what CLAP windows need: size requests and closing, parameter flushes, timers, and on Linux and macOS the file descriptors that drive a plugin's event loop.
 - The test CLAP plugin has a window, and a test opens it in a real X server and checks the edits it sends, including one from a timer.
 
+## 0.2.0-alpha.51
+
+Plugins in their own process.
+
+- Each CLAP or VST3 plugin now runs in its own small program, `lumen-plugin-host`, which ships next to the app. A plugin that crashes takes only that program with it: its channel or effect goes silent and the app, the project and the other plugins keep playing. A plugin that hangs for two seconds is treated the same way.
+- Notes, audio, parameters and state go to the plugin over a pipe, block by block. The result is the same as running it inside the app (a test checks this sample for sample with both test plugins).
+- Set `LUMEN_PLUGINS_IN_PROCESS=1` to run plugins inside the app as before. The plugin windows still open inside the app.
+
 ## 0.2.0-alpha.49
 
 Weave, a modular synth with patch cables.
