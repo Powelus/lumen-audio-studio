@@ -2,6 +2,17 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.52
+
+Settings: your own sample and plugin folders.
+
+- Options > Settings: add as many sample folders as you like; they show in the browser's Samples tab under My folders, as folders you can open. Click a WAV file to hear it, double click it to add it as a sampler channel. The search box searches them too. The + next to My folders adds one straight from the browser.
+- Plugin folders: add folders to look for CLAP and VST3 plugins in, besides the standard ones (which can be switched off). Rescan plugins now, or the Rescan button in the Plugins tab, uses them. A folder that is not there is shown struck through.
+- Autosave: a project with changes is copied to the app's autosave folder every 5 minutes (0 turns it off). Its own file is left alone.
+- File > Open recent lists the last ten projects opened or saved.
+- The windows that were open (browser, rack, playlist, piano roll, mixer) open again at the next start.
+- Settings are kept in `settings.json` in the app's folder.
+
 ## 0.2.0-alpha.49
 
 Weave, a modular synth with patch cables.

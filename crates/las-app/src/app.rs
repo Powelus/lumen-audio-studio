@@ -111,6 +111,11 @@ pub struct App {
     pub(crate) synth_dirty: bool,
     /// Set when the user asked to quit and it is allowed.
     pub(crate) quit: bool,
+    /// The app's settings (Options > Settings).
+    pub(crate) settings: crate::settings::Settings,
+    /// The browser's listings of the user's sample folders.
+    pub(crate) folders: crate::settings::FolderCache,
+    pub(crate) autosaved: crate::settings::Autosave,
     /// Where Weave's patch editor is scrolled and what it is doing.
     pub(crate) weave: crate::weave_ui::WeaveEditor,
     /// The hosted plugins' own windows that are open.
@@ -177,6 +182,9 @@ impl App {
             bound: None,
             synth_dirty: false,
             quit: false,
+            settings: crate::settings::Settings::load(),
+            folders: Default::default(),
+            autosaved: Default::default(),
             weave: Default::default(),
             editors: Vec::new(),
         };
@@ -193,6 +201,11 @@ impl App {
             app.switch(Instrument::Facet);
         }
         app.new_project();
+        // the windows of last time, unless the command line chooses
+        let chooses = std::env::args().any(|a| a == "--open" || a == "--close" || a == "--add");
+        if !chooses {
+            app.restore_windows();
+        }
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
@@ -245,6 +258,7 @@ impl App {
                     "mixer" => o.mixer = true,
                     "synth" => o.synth = true,
                     "export" => o.export = true,
+                    "settings" => o.settings = true,
                     _ => {}
                 }
             }
@@ -1630,6 +1644,8 @@ impl eframe::App for App {
             a.collect_garbage();
         }
         self.serve_editors();
+        self.autosave();
+        self.remember_windows();
         // meters move on their own
         ctx.request_repaint_after(Duration::from_millis(16));
     }

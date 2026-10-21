@@ -37,6 +37,7 @@ pub struct Windows {
     /// The keyboard shortcuts window.
     pub keys: bool,
     pub history: bool,
+    pub settings: bool,
 }
 
 /// What the export window holds.
@@ -90,6 +91,8 @@ pub struct Shell {
     pub status: String,
     /// An action waiting for an answer about unsaved changes.
     pub pending: Option<crate::menus::Action>,
+    /// The project File > Open recent is to open.
+    pub recent_target: Option<String>,
     placed: bool,
 }
 
@@ -108,6 +111,7 @@ impl Shell {
                 about: false,
                 keys: false,
                 history: false,
+                settings: false,
             },
             song_mode: true,
             metronome: false,
@@ -133,6 +137,7 @@ impl Shell {
             },
             status: "Ready".into(),
             pending: None,
+            recent_target: None,
             placed: false,
         }
     }
@@ -764,6 +769,8 @@ impl App {
                 ui.label(RichText::new("Nothing matches.").weak());
             }
             ui.add_space(10.0);
+            self.folders_ui(ui, &query);
+            ui.add_space(10.0);
             ui.label(
                 RichText::new("MY SAMPLES")
                     .size(11.0)
@@ -1043,6 +1050,7 @@ impl App {
         self.about_window(ctx);
         self.keys_window(ctx);
         self.history_window(ctx);
+        self.settings_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
     }

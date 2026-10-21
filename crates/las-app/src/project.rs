@@ -466,6 +466,8 @@ impl App {
         match self.project.open(path) {
             Ok(()) => {
                 self.project.error = None;
+                self.settings.remember(path);
+                self.settings.save();
                 // ready for keys played live
                 if let Some(rate) = self.audio.as_ref().map(|a| a.sample_rate as f64) {
                     self.project.start(PlayMode::Song, Start::Ready, rate);
@@ -482,7 +484,12 @@ impl App {
             return;
         }
         match self.project.save() {
-            Ok(()) => self.project.error = None,
+            Ok(()) => {
+                self.project.error = None;
+                let path = self.project.path.clone();
+                self.settings.remember(&path);
+                self.settings.save();
+            }
             Err(e) => self.project.error = Some(e),
         }
     }

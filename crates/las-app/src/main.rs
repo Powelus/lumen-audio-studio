@@ -22,6 +22,7 @@ mod rack;
 mod record;
 mod roll;
 mod samplerui;
+mod settings;
 mod shell;
 mod skin;
 mod skin_tables;
@@ -37,9 +38,12 @@ fn main() -> eframe::Result {
     }
     // plugins are looked for in the background; the browser lists what is found
     las_host::install();
-    std::thread::spawn(|| {
-        las_host::rescan(&las_host::all_search_paths());
-    });
+    {
+        let dirs = settings::Settings::load().plugin_dirs();
+        std::thread::spawn(move || {
+            las_host::rescan(&dirs);
+        });
+    }
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Lumen Audio Studio")
