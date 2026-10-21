@@ -88,6 +88,12 @@ pub enum MixEdit {
         slot: usize,
         on: bool,
     },
+    /// Smart disable of an effect slot (on by default).
+    SlotSmart {
+        insert: usize,
+        slot: usize,
+        on: bool,
+    },
 }
 
 /// Whether feeding `to` from `from` would make a loop: `to` is `from`, or `from` is
@@ -263,6 +269,15 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
                 s.enabled = *on;
             }
         }
+        MixEdit::SlotSmart { insert, slot, on } => {
+            if let Some(Some(s)) = project
+                .mixer
+                .get_mut(*insert)
+                .and_then(|t| t.slots.get_mut(*slot))
+            {
+                crate::steps::set_smart(&mut s.extra, *on);
+            }
+        }
     }
 }
 
@@ -342,6 +357,15 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                         edits.push(MixEdit::OpenEffect { insert: i, slot: n });
                     }
                     b.context_menu(|ui| {
+                        let mut smart = las_engine::render::smart_disable(&s.extra);
+                        if ui
+                            .checkbox(&mut smart, "Smart disable (save CPU when silent)")
+                            .on_hover_text("The insert sleeps once nothing comes in and its tail has died away. Turn off for effects that make sound on their own.")
+                            .changed()
+                        {
+                            edits.push(MixEdit::Begin);
+                            edits.push(MixEdit::SlotSmart { insert: i, slot: n, on: smart });
+                        }
                         if ui.button("Remove").clicked() {
                             edits.push(MixEdit::Begin);
                             edits.push(MixEdit::RemoveEffect { insert: i, slot: n });

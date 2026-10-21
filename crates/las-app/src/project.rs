@@ -524,7 +524,12 @@ impl App {
             .filter(|id| !self.project.playlist.waves.contains_key(id))
             .collect();
         if !missing.is_empty() {
-            let mut lib = las_engine::library::Library::new(22_050.0, &l.samples);
+            // at the rate the player uses, so the outline reuses the audio it decodes
+            let rate = self
+                .audio
+                .as_ref()
+                .map_or(44_100.0, |a| a.sample_rate as f64);
+            let mut lib = las_engine::library::Library::new(rate, &l.samples);
             for id in missing {
                 let wave = lib.get(&id).map_or_else(
                     || playlist::Wave {

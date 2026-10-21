@@ -342,32 +342,45 @@ pub fn resample(a: Audio, rate: f64) -> Audio {
     let frames = (a.frames() as f64 * ratio).round() as usize;
     let cutoff = ratio.min(1.0);
     let half = 16.0 / cutoff;
-    let channels = a
-        .channels
-        .iter()
-        .map(|src| {
-            (0..frames)
-                .map(|i| {
-                    let t = i as f64 / ratio;
-                    let lo = ((t - half).ceil().max(0.0)) as usize;
-                    let hi = ((t + half).floor() as usize).min(src.len().saturating_sub(1));
-                    let mut acc = 0.0;
-                    for (k, &s) in src.iter().enumerate().take(hi + 1).skip(lo) {
-                        let x = k as f64 - t;
-                        let w = 0.5 + 0.5 * (std::f64::consts::PI * x / half).cos();
-                        // low pass at the lower of the two Nyquist frequencies
-                        let sinc = if x == 0.0 {
-                            cutoff
-                        } else {
-                            (std::f64::consts::PI * x * cutoff).sin() / (std::f64::consts::PI * x)
-                        };
-                        acc += f64::from(s) * sinc * w;
-                    }
-                    acc as f32
-                })
-                .collect()
-        })
-        .collect();
+    let pi = std::f64::consts::PI;
+    // the window and the sinc are sines of x, which steps by one from tap to tap: they
+    // are turned on by a rotation rather than computed again for every tap
+    let (dc, ds) = ((pi / half).cos(), (pi / half).sin());
+    let (ec, es) = ((pi * cutoff).cos(), (pi * cutoff).sin());
+    let one = |src: &[f32]| -> Vec<f32> {
+        (0..frames)
+            .map(|i| {
+                let t = i as f64 / ratio;
+                let lo = ((t - half).ceil().max(0.0)) as usize;
+                let hi = ((t + half).floor() as usize).min(src.len().saturating_sub(1));
+                let x0 = lo as f64 - t;
+                let (mut wc, mut ws) = ((pi * x0 / half).cos(), (pi * x0 / half).sin());
+                let (mut sc, mut ss) = ((pi * x0 * cutoff).cos(), (pi * x0 * cutoff).sin());
+                let mut acc = 0.0;
+                for (k, &s) in src.iter().enumerate().take(hi + 1).skip(lo) {
+                    let x = k as f64 - t;
+                    let w = 0.5 + 0.5 * wc;
+                    // low pass at the lower of the two Nyquist frequencies
+                    let sinc = if x == 0.0 { cutoff } else { ss / (pi * x) };
+                    acc += f64::from(s) * sinc * w;
+                    (wc, ws) = (wc * dc - ws * ds, ws * dc + wc * ds);
+                    (sc, ss) = (sc * ec - ss * es, ss * ec + sc * es);
+                }
+                acc as f32
+            })
+            .collect()
+    };
+    // the channels side by side
+    let channels: Vec<Vec<f32>> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = a
+            .channels
+            .iter()
+            .map(|src| scope.spawn(|| one(src)))
+            .collect();
+        jobs.into_iter()
+            .map(|j| j.join().unwrap_or_default())
+            .collect()
+    });
     Audio {
         channels,
         sample_rate: rate,

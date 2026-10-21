@@ -766,6 +766,23 @@ impl External for Automated {
     }
 }
 
+/// Make the processor treat denormal numbers as zero on the calling thread (the audio
+/// thread): the tails of filters and reverbs decay into them, and they are many times
+/// slower to compute. Hosts do this for the plugins they run, too.
+pub fn flush_denormals() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut csr: u32 = 0;
+        // SAFETY: reads and writes this thread's floating point control register only;
+        // FTZ (bit 15) and DAZ (bit 6) change nothing but how tiny numbers round
+        unsafe {
+            std::arch::asm!("stmxcsr [{}]", in(reg) &mut csr, options(nostack));
+            csr |= 0x8040;
+            std::arch::asm!("ldmxcsr [{}]", in(reg) &csr, options(nostack));
+        }
+    }
+}
+
 /// The `pluginId` a channel or an effect slot has when it is a hosted plugin.
 pub const HOSTED: &str = PLUGIN_ID;
 

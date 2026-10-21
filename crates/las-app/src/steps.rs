@@ -53,6 +53,11 @@ pub enum ChanEdit {
     },
     /// Ask for a new name for a channel.
     AskRename(usize),
+    /// Let the channel sleep while it has nothing to play (FL's smart disable).
+    SmartDisable {
+        channel: usize,
+        on: bool,
+    },
 }
 
 /// Carry out a channel edit.
@@ -120,6 +125,20 @@ pub fn apply(project: &mut Project, e: &ChanEdit) {
                 c.swing = value.filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0));
             }
         }
+        ChanEdit::SmartDisable { channel, on } => {
+            if let Some(c) = project.channels.get_mut(*channel) {
+                set_smart(&mut c.extra, *on);
+            }
+        }
+    }
+}
+
+/// Smart disable is on unless the project says `"smartDisable": false`.
+pub(crate) fn set_smart(extra: &mut las_project::Extra, on: bool) {
+    if on {
+        extra.remove("smartDisable");
+    } else {
+        extra.insert("smartDisable".into(), serde_json::Value::Bool(false));
     }
 }
 
@@ -483,6 +502,15 @@ pub fn draw(
                                 ui.close();
                             }
                         });
+                        let mut smart = las_engine::render::smart_disable(&c.extra);
+                        if ui
+                            .checkbox(&mut smart, "Smart disable (save CPU when silent)")
+                            .on_hover_text("The channel stops working while it has no notes to play and is silent, and wakes at the next note")
+                            .changed()
+                        {
+                            out.chans.push(ChanEdit::Begin);
+                            out.chans.push(ChanEdit::SmartDisable { channel: i, on: smart });
+                        }
                         ui.menu_button("Swing", |ui| {
                             let now = c.swing;
                             if ui.selectable_label(now.is_none(), "Song's swing").clicked() {

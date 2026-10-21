@@ -287,6 +287,25 @@ impl App {
         if std::env::args().any(|a| a == "--demo-song") {
             app.open_demo();
         }
+        // `--demo-audio` adds an audio clip to the playlist (screenshots of waveforms)
+        if std::env::args().any(|a| a == "--demo-audio") {
+            let frames = 44_100 * 8;
+            let a = las_engine::factory::Audio {
+                channels: vec![(0..frames)
+                    .map(|i| {
+                        let t = i as f32 / 44_100.0;
+                        let beat = (t * 2.0).fract();
+                        (t * 220.0 * std::f32::consts::TAU).sin() * (-beat * 6.0).exp() * 0.8
+                    })
+                    .collect()],
+                sample_rate: 44_100.0,
+            };
+            let wav = las_engine::library::encode_wav(&a);
+            app.project.modify_with_samples(true, |p, samples| {
+                let track = p.playlist.tracks.len().min(6).saturating_sub(1);
+                let _ = crate::menus::import_audio_clip(p, samples, "Demo audio", wav, 0.0, track);
+            });
+        }
         if std::env::args().any(|a| a == "--analyser-demo") {
             app.analyser_demo();
         }
@@ -1642,6 +1661,30 @@ impl App {
     }
 }
 
+impl App {
+    /// When the window must be drawn again by itself: often while sound plays (meters,
+    /// the playhead), now and then while something works in the background, and
+    /// otherwise only when the user does something, so an idle program costs nothing.
+    pub(crate) fn next_repaint(&self) -> Option<Duration> {
+        let sounding = self.audio.as_ref().is_some_and(|a| {
+            let (l, r) = a.meters.peaks();
+            a.meters.playing()
+                || a.meters.voices() > 0
+                || l.max(r) > 1e-4
+                || (0..32).any(|i| a.meters.insert_peak(i) > 1e-4)
+        });
+        let demo = self.analyser.as_ref().is_some_and(|a| a.demo.is_some());
+        if sounding || demo || self.shell.recorder.is_some() {
+            return Some(Duration::from_millis(33));
+        }
+        if !self.editors.is_empty() || self.project.is_building() {
+            return Some(Duration::from_millis(50));
+        }
+        // a slow heartbeat: autosave, a MIDI keyboard played while nothing else moves
+        Some(Duration::from_secs(1))
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.scale_ui(ctx);
@@ -1693,8 +1736,9 @@ impl eframe::App for App {
         self.autosave();
         self.feed_analyser();
         self.remember_windows();
-        // meters move on their own
-        ctx.request_repaint_after(Duration::from_millis(16));
+        if let Some(wait) = self.next_repaint() {
+            ctx.request_repaint_after(wait);
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
