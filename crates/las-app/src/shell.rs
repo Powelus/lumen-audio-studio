@@ -819,15 +819,19 @@ impl App {
                         ))
                         .color(if load > 0.7 { p.hot } else { p.muted })
                     }
-                    None => RichText::new(format!(
-                        "No sound: {} (click for audio settings)",
+                    None => RichText::new("No sound: click to set up audio").color(p.hot),
+                };
+                let tip = if self.audio.is_some() {
+                    "Click to choose the audio device in Settings".to_string()
+                } else {
+                    format!(
+                        "The audio output could not be opened: {}\nClick to choose a device in Settings.",
                         self.status_audio()
-                    ))
-                    .color(p.hot),
+                    )
                 };
                 let r = ui
                     .add(egui::Label::new(audio.size(12.0)).sense(Sense::click()))
-                    .on_hover_text("Click to choose the audio device in Settings");
+                    .on_hover_text(tip);
                 if r.clicked() {
                     self.shell.open.settings = true;
                 }

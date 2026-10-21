@@ -546,7 +546,17 @@ impl App {
                 }
             }
             None => {
-                ui.label(RichText::new(format!("No sound: {}", self.status)).color(p.hot));
+                ui.label(
+                    RichText::new(
+                        "No sound: the audio output could not be opened. Check that speakers or headphones are connected and not in use by another program, then choose a device below or click Restart audio.",
+                    )
+                    .color(p.hot),
+                );
+                ui.label(
+                    RichText::new(format!("Details: {}", self.status))
+                        .color(p.muted)
+                        .size(11.0),
+                );
             }
         }
         let a = &mut self.settings.audio;
