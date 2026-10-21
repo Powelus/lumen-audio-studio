@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.47
+
+Velocity tools.
+
+- The piano roll's Tools menu has Softer, Louder and Random velocity, on the selected notes (or all of them), each one undo step.
+
 ## 0.2.0-alpha.46
 
 Random steps and taller tracks.

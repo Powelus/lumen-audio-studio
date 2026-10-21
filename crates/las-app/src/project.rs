@@ -624,6 +624,11 @@ impl App {
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map_or(1, |d| d.as_nanos() as u64),
                             ),
+                            roll::NoteTool::VelRandom(_) => roll::NoteTool::VelRandom(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(1, |d| d.as_nanos() as u64),
+                            ),
                             o => o,
                         });
                     }

@@ -88,10 +88,14 @@ pub enum NoteTool {
     Ramp,
     /// Double or halve the lengths and places, from the first note.
     Stretch(f64),
+    /// Multiply the velocities.
+    VelScale(f64),
+    /// Spread the velocities around their values at random (the seed makes it repeatable).
+    VelRandom(u64),
 }
 
 /// The Tools menu's entries.
-pub const NOTE_TOOLS: [(&str, NoteTool, &str); 9] = [
+pub const NOTE_TOOLS: [(&str, NoteTool, &str); 12] = [
     (
         "Legato",
         NoteTool::Legato,
@@ -128,6 +132,21 @@ pub const NOTE_TOOLS: [(&str, NoteTool, &str); 9] = [
         "Half length",
         NoteTool::Stretch(0.5),
         "Half as long and half as far apart",
+    ),
+    (
+        "Softer",
+        NoteTool::VelScale(0.8),
+        "Velocities down by a fifth",
+    ),
+    (
+        "Louder",
+        NoteTool::VelScale(1.25),
+        "Velocities up by a quarter",
+    ),
+    (
+        "Random velocity",
+        NoteTool::VelRandom(0),
+        "Spread the velocities at random",
     ),
 ];
 
@@ -243,6 +262,21 @@ pub fn note_tool(notes: &mut Vec<Note>, op: NoteTool, ids: &[String]) {
             let n = idx.len().max(2) - 1;
             for (k, &i) in idx.iter().enumerate() {
                 notes[i].vel = 0.3 + 0.7 * k as f64 / n as f64;
+            }
+        }
+        NoteTool::VelScale(f) => {
+            for &i in &idx {
+                notes[i].vel = (notes[i].vel * f).clamp(0.02, 1.0);
+            }
+        }
+        NoteTool::VelRandom(seed) => {
+            let mut x = seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1;
+            for &i in &idx {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let r = (x >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+                notes[i].vel = (notes[i].vel + r * 0.25).clamp(0.05, 1.0);
             }
         }
         NoteTool::Stretch(f) => {
@@ -1079,6 +1113,18 @@ mod tests {
         assert_eq!((m[0].len, m[1].len, m[2].len), (24.0, 48.0, 24.0));
         note_tool(&mut m, NoteTool::Ramp, &[]);
         assert!(m[0].vel < m[2].vel);
+        let before: Vec<f64> = m.iter().map(|x| x.vel).collect();
+        note_tool(&mut m, NoteTool::VelScale(0.5), &[]);
+        assert!(m
+            .iter()
+            .zip(&before)
+            .all(|(a, b)| (a.vel - (b * 0.5).max(0.02)).abs() < 1e-9));
+        note_tool(&mut m, NoteTool::VelScale(10.0), &[]);
+        assert!(m.iter().all(|x| x.vel <= 1.0));
+        let mut r = vec![n(60, 0.0, 24.0); 16];
+        note_tool(&mut r, NoteTool::VelRandom(9), &[]);
+        assert!(r.iter().all(|x| (0.05..=1.0).contains(&x.vel)));
+        assert!(r.iter().any(|x| (x.vel - 0.78).abs() > 1e-6));
     }
 
     #[test]
