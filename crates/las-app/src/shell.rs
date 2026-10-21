@@ -80,6 +80,10 @@ pub struct Shell {
     /// LumaPad: the selected pad, and whether one is held.
     pub pad: usize,
     pub pad_held: Option<u8>,
+    /// Nebula: the page shown, the browser's category (empty for all) and search.
+    pub nebula_page: usize,
+    pub nebula_cat: String,
+    pub nebula_find: String,
     /// The memory the app uses, megabytes, and when it was last read.
     ram: (Option<Instant>, f64),
     pub search: String,
@@ -122,6 +126,9 @@ impl Shell {
             record_from: 0.0,
             pad: 0,
             pad_held: None,
+            nebula_page: 0,
+            nebula_cat: String::new(),
+            nebula_find: String::new(),
             ram: (None, 0.0),
             search: String::new(),
             theme: theme::saved_choice(),

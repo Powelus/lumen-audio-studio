@@ -17,7 +17,7 @@ pub struct Preset {
     /// Only what differs from the bank's init patch.
     pub patch: Value,
     /// The rest of the preset's state: effects rack, arpeggiator, and for Nebula
-    /// the layers and macros. Not used by the engines yet.
+    /// the layers, macros and effects.
     pub state: Value,
 }
 
@@ -104,7 +104,14 @@ pub fn bank(id: &str) -> Option<&'static Bank> {
         "triosc" => bank!("triosc.json"),
         "facet" => bank!("facet.json"),
         "mist" => bank!("mist.json"),
-        "nebula" => bank!("nebula.json"),
+        "nebula" => {
+            static CELL: OnceLock<Bank> = OnceLock::new();
+            CELL.get_or_init(|| {
+                let mut b = parse(include_str!("../presets/nebula.json"));
+                b.presets.extend(crate::nebula_gen::presets());
+                b
+            })
+        }
         _ => return None,
     })
 }
@@ -123,8 +130,10 @@ mod tests {
             assert!(b.init.is_object());
             total += b.presets.len();
         }
-        // the web version ships about 440 factory presets (Nebula 230 of them)
+        // the web version ships about 440 factory presets (Nebula 230 of them),
+        // and Nebula has its generated families on top
         assert!(total >= 440, "{total}");
+        assert!(bank("nebula").unwrap().presets.len() >= 300);
         assert!(bank("nope").is_none());
     }
 

@@ -72,9 +72,45 @@ pub fn knob_mapped(
     label: &str,
     show: &dyn Fn(f64) -> String,
 ) -> bool {
+    knob_scaled(ui, value, to_norm, from_norm, default, label, show, 1.0)
+}
+
+/// A larger knob, for the main controls of a plugin face.
+pub fn big_knob(
+    ui: &mut Ui,
+    value: &mut f64,
+    range: RangeInclusive<f64>,
+    default: f64,
+    label: &str,
+    show: &dyn Fn(f64) -> String,
+) -> bool {
+    knob_scaled(
+        ui,
+        value,
+        &|v| to_unit(v, &range, false),
+        &|t| from_unit(t, &range, false),
+        default,
+        label,
+        show,
+        1.45,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn knob_scaled(
+    ui: &mut Ui,
+    value: &mut f64,
+    to_norm: &dyn Fn(f64) -> f64,
+    from_norm: &dyn Fn(f64) -> f64,
+    default: f64,
+    label: &str,
+    show: &dyn Fn(f64) -> String,
+    k: f32,
+) -> bool {
     let skin = crate::skin::current();
     let k = KNOB_SCALE.with(std::cell::Cell::get);
     let size = vec2(54.0 * k.max(0.8), 30.0 + 46.0 * k);
+    let size = vec2(54.0 * k, 76.0 * k);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut changed = false;
     if resp.double_clicked() {
@@ -145,7 +181,7 @@ pub fn knob_mapped(
     let a = a0 + sweep * t;
     painter.line_segment(
         [
-            pos2(centre.x + 6.0 * a.cos(), centre.y + 6.0 * a.sin()),
+            pos2(centre.x + 6.0 * k * a.cos(), centre.y + 6.0 * k * a.sin()),
             pos2(
                 centre.x + (radius - 3.0) * a.cos(),
                 centre.y + (radius - 3.0) * a.sin(),
@@ -155,16 +191,18 @@ pub fn knob_mapped(
     );
     painter.text(
         pos2(rect.center().x, rect.top() + 49.0 * k + (1.0 - k) * 4.0),
+        pos2(rect.center().x, rect.top() + 49.0 * k),
         Align2::CENTER_CENTER,
         show(*value),
-        FontId::proportional(11.0),
+        FontId::proportional(11.0 * k.sqrt()),
         text,
     );
     painter.text(
         pos2(rect.center().x, rect.top() + 49.0 * k + 15.0),
+        pos2(rect.center().x, rect.top() + 64.0 * k),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(11.0),
+        FontId::proportional(11.0 * k.sqrt()),
         skin.map_or(crate::theme::pal().muted, |s| s.text),
     );
     resp.on_hover_text(format!(

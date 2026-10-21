@@ -17,6 +17,7 @@ mod menus;
 mod mfx;
 mod midi;
 mod mixer;
+mod nebulawin;
 mod playlist;
 mod presets;
 mod project;
