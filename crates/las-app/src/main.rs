@@ -62,6 +62,12 @@ fn main() -> eframe::Result {
             .with_inner_size(size.unwrap_or([1280.0, 800.0]))
             .with_maximized(size.is_none())
             .with_min_inner_size([1024.0, 576.0]),
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .unwrap_or_default(),
+            )
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([960.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native(
