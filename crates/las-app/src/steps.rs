@@ -154,6 +154,29 @@ pub fn toggle(notes: &[Note], step: usize) -> Edit {
     }
 }
 
+/// The edits that leave a channel with a step on every `every`th step of `steps` (FL's
+/// "Fill each N steps"); with `every` 0, the edits that clear its steps. Notes that were
+/// not entered with the step sequencer are left as they are.
+pub fn fill_steps(notes: &[Note], steps: usize, every: usize) -> Vec<Edit> {
+    let mut out: Vec<Edit> = notes
+        .iter()
+        .filter(|n| n.step == Some(true))
+        .map(|n| Edit::Delete { id: n.id.clone() })
+        .collect();
+    if every > 0 {
+        for s in (0..steps).step_by(every) {
+            let mut n = new_note(
+                60,
+                s as f64 * f64::from(TICKS_PER_STEP),
+                f64::from(TICKS_PER_STEP),
+            );
+            n.step = Some(true);
+            out.push(Edit::Add(n));
+        }
+    }
+    out
+}
+
 /// A small rotary knob: drag up and down, double-click to reset. Returns
 /// (changed, gesture started).
 pub fn mini_knob(
@@ -372,6 +395,29 @@ pub fn draw(
                                 }
                             }
                         });
+                        ui.menu_button("Fill", |ui| {
+                            for every in [1usize, 2, 4, 8] {
+                                let label = if every == 1 {
+                                    "Every step".to_string()
+                                } else {
+                                    format!("Each {every} steps")
+                                };
+                                if ui.button(label).clicked() {
+                                    out.notes.push((i, Edit::Begin));
+                                    for e in fill_steps(notes, steps, every) {
+                                        out.notes.push((i, e));
+                                    }
+                                    ui.close();
+                                }
+                            }
+                            if ui.button("Clear steps").clicked() {
+                                out.notes.push((i, Edit::Begin));
+                                for e in fill_steps(notes, steps, 0) {
+                                    out.notes.push((i, e));
+                                }
+                                ui.close();
+                            }
+                        });
                         ui.menu_button("Swing", |ui| {
                             let now = c.swing;
                             if ui.selectable_label(now.is_none(), "Song's swing").clicked() {
@@ -520,6 +566,38 @@ mod tests {
     fn project() -> Project {
         let bytes = include_bytes!("../../las-engine/tests/fixtures/mixer.las");
         las_project::decode(bytes).unwrap().project
+    }
+
+    #[test]
+    fn fill_puts_a_step_on_every_nth_and_leaves_piano_roll_notes() {
+        let mut p = project();
+        let ch = p.channels[0].id.clone();
+        let mut roll = new_note(64, 5.0, 10.0);
+        roll.step = None;
+        p.patterns[0].notes.insert(ch.clone(), vec![roll]);
+        let run = |p: &mut Project, every| {
+            let notes = p.patterns[0].notes.get(&ch).cloned().unwrap_or_default();
+            for e in fill_steps(&notes, 16, every) {
+                crate::roll::apply(p, 0, &ch, &e);
+            }
+        };
+        run(&mut p, 4);
+        let steps = |p: &Project| {
+            let mut v: Vec<f64> = p.patterns[0].notes[&ch]
+                .iter()
+                .filter(|n| n.step == Some(true))
+                .map(|n| n.pos / f64::from(TICKS_PER_STEP))
+                .collect();
+            v.sort_by(f64::total_cmp);
+            v
+        };
+        assert_eq!(steps(&p), [0.0, 4.0, 8.0, 12.0]);
+        run(&mut p, 2);
+        assert_eq!(steps(&p).len(), 8);
+        run(&mut p, 0);
+        assert!(steps(&p).is_empty());
+        // the note from the piano roll is still there
+        assert_eq!(p.patterns[0].notes[&ch].len(), 1);
     }
 
     #[test]

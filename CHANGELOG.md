@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.44
+
+Fill steps.
+
+- Right-click a channel in the step sequencer, Fill: a step on every step, or each 2, 4 or 8 steps, as FL's "Fill each N steps" does; "Clear steps" removes them. Notes drawn in the piano roll are left alone. One undo step.
+
 ## 0.2.0-alpha.43
 
 Fit the song in the playlist.
