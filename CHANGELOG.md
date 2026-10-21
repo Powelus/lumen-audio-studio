@@ -2,6 +2,13 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.46
+
+Random steps and taller tracks.
+
+- The step sequencer's Fill menu has "Randomize": about a third of the channel's steps, picked at random (one undo step).
+- The playlist has a Height slider for its tracks, next to Zoom.
+
 ## 0.2.0-alpha.45
 
 Shift steps.

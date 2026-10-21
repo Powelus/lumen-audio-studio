@@ -543,6 +543,9 @@ impl App {
                 });
             ui.label("Zoom");
             ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false));
+            ui.label("Height");
+            ui.add(egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
+                .on_hover_text("The height of the playlist's tracks");
             if ui
                 .button("Fit")
                 .on_hover_text("Zoom so that the whole song fits the window")

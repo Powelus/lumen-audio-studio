@@ -177,6 +177,28 @@ pub fn fill_steps(notes: &[Note], steps: usize, every: usize) -> Vec<Edit> {
     out
 }
 
+/// The edits that leave a channel with steps on about `density` (0 to 1) of its `steps`,
+/// picked from `seed` (the same seed always picks the same steps).
+pub fn random_steps(notes: &[Note], steps: usize, density: f64, seed: u64) -> Vec<Edit> {
+    let mut out = fill_steps(notes, 0, 0);
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    for s in 0..steps {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        if ((x >> 11) as f64 / (1u64 << 53) as f64) < density {
+            let mut n = new_note(
+                60,
+                s as f64 * f64::from(TICKS_PER_STEP),
+                f64::from(TICKS_PER_STEP),
+            );
+            n.step = Some(true);
+            out.push(Edit::Add(n));
+        }
+    }
+    out
+}
+
 /// The edits that rotate a channel's steps by `by` steps (negative is left) around a
 /// pattern of `steps` steps, as FL's shift left and right do.
 pub fn shift_steps(notes: &[Note], steps: usize, by: i64) -> Vec<Edit> {
@@ -429,6 +451,20 @@ pub fn draw(
                                     ui.close();
                                 }
                             }
+                            if ui
+                                .button("Randomize")
+                                .on_hover_text("About a third of the steps, picked at random")
+                                .clicked()
+                            {
+                                let seed = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(1, |d| d.as_nanos() as u64);
+                                out.notes.push((i, Edit::Begin));
+                                for e in random_steps(notes, steps, 0.35, seed) {
+                                    out.notes.push((i, e));
+                                }
+                                ui.close();
+                            }
                             ui.separator();
                             for (label, by) in [("Shift left", -1i64), ("Shift right", 1)] {
                                 if ui.button(label).clicked() {
@@ -638,6 +674,25 @@ mod tests {
         assert!(steps(&p).is_empty());
         // the note from the piano roll is still there
         assert_eq!(p.patterns[0].notes[&ch].len(), 1);
+    }
+
+    #[test]
+    fn random_steps_repeat_for_a_seed_and_follow_the_density() {
+        let count = |e: &[Edit]| e.iter().filter(|x| matches!(x, Edit::Add(_))).count();
+        let a = random_steps(&[], 64, 0.35, 42);
+        let b = random_steps(&[], 64, 0.35, 42);
+        let pos = |e: &[Edit]| {
+            e.iter()
+                .filter_map(|x| match x {
+                    Edit::Add(n) => Some(n.pos),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pos(&a), pos(&b));
+        assert!((10..=36).contains(&count(&a)), "{}", count(&a));
+        assert_eq!(count(&random_steps(&[], 64, 0.0, 1)), 0);
+        assert_eq!(count(&random_steps(&[], 64, 1.0, 1)), 64);
     }
 
     #[test]
