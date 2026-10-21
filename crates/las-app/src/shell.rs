@@ -996,7 +996,20 @@ impl App {
             });
         }
         if open.synth {
-            win("Synth", a.min + vec2(160.0, 30.0), vec2(900.0, 680.0))
+            // each face has its own window size (TriOsc is a small one)
+            let face = match self.bound {
+                None | Some(crate::inst::Bound::Synth(_)) => self.face_id(),
+                _ => String::new(),
+            };
+            let size = match face.as_str() {
+                "triosc" => vec2(640.0, 560.0),
+                "monolith" => vec2(1060.0, 740.0),
+                "zenith" => vec2(1000.0, 790.0),
+                _ => vec2(900.0, 680.0),
+            };
+            let first_pos = a.min + vec2(160.0, 30.0);
+            win("Synth", first_pos, size)
+                .id(egui::Id::unique(("synth-window", face)))
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
                     Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
@@ -1273,7 +1286,12 @@ impl App {
             match self.inst {
                 Instrument::Facet => self.synth(ui),
                 Instrument::Mist => self.mist_panel(ui),
-                Instrument::Polaris => self.polaris_panel(ui),
+                Instrument::Polaris => match self.face_id().as_str() {
+                    "monolith" => self.monolith_panel(ui),
+                    "zenith" => self.zenith_panel(ui),
+                    "triosc" => self.triosc_panel(ui),
+                    _ => self.polaris_panel(ui),
+                },
             }
         });
         ui.separator();

@@ -81,6 +81,8 @@ pub struct App {
     /// The preset lists (Init, factory, user) and the one each instrument is on.
     pub(crate) entries: [Vec<Entry>; 3],
     pub(crate) presets: [usize; 3],
+    /// The bank Polaris's list was made from (each face of the engine has its own).
+    pub(crate) face_bank: String,
     /// What is typed in the preset search box, and the name for a new preset.
     pub(crate) search: String,
     pub(crate) new_name: String,
@@ -167,6 +169,7 @@ impl App {
                 presets::entries(bank_id(Instrument::Polaris), &full_defaults()[2]),
             ],
             presets: [0, 0, 0],
+            face_bank: "polaris".into(),
             search: String::new(),
             new_name: String::new(),
             tab: Tab::Oscillators,
@@ -338,7 +341,7 @@ impl App {
             }
         };
         self.presets[k] = at;
-        self.error = presets::save_user(bank_id(self.inst), &self.entries[k]).err();
+        self.error = presets::save_user(&self.bank_name(), &self.entries[k]).err();
     }
 
     fn delete_preset(&mut self, i: usize) {
@@ -348,7 +351,7 @@ impl App {
             if self.presets[k] >= i {
                 self.presets[k] = self.presets[k].saturating_sub(1);
             }
-            self.error = presets::save_user(bank_id(self.inst), &self.entries[k]).err();
+            self.error = presets::save_user(&self.bank_name(), &self.entries[k]).err();
         }
     }
 
@@ -416,21 +419,21 @@ impl App {
         }
     }
 
-    fn num(&self, path: &str) -> f64 {
+    pub(crate) fn num(&self, path: &str) -> f64 {
         self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_f64)
             .unwrap_or(0.0)
     }
 
-    fn set(&mut self, path: &str, v: Value) {
+    pub(crate) fn set(&mut self, path: &str, v: Value) {
         if let Some(t) = self.patches[index(self.inst)].pointer_mut(path) {
             *t = v;
         }
     }
 
     /// A knob bound to one number of the patch. Returns true on change.
-    fn knob(
+    pub(crate) fn knob(
         &mut self,
         ui: &mut Ui,
         path: &str,
@@ -451,7 +454,7 @@ impl App {
         changed
     }
 
-    fn toggle(&mut self, ui: &mut Ui, path: &str, label: &str) -> bool {
+    pub(crate) fn toggle(&mut self, ui: &mut Ui, path: &str, label: &str) -> bool {
         let mut on = self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_bool)
@@ -463,7 +466,13 @@ impl App {
         changed
     }
 
-    fn choice(&mut self, ui: &mut Ui, path: &str, id: &str, options: &[(&str, &str)]) -> bool {
+    pub(crate) fn choice(
+        &mut self,
+        ui: &mut Ui,
+        path: &str,
+        id: &str,
+        options: &[(&str, &str)],
+    ) -> bool {
         let cur = self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_str)
@@ -524,8 +533,39 @@ impl App {
         c
     }
 
+    /// The preset bank of what the window shows: the face's own bank for the
+    /// instruments built on the Polaris engine.
+    pub(crate) fn bank_name(&self) -> String {
+        let face = self.face_id();
+        if self.inst == Instrument::Polaris
+            && las_dsp::presets::BANK_IDS.contains(&face.as_str())
+            && crate::inst::panel_for(&face) == Some(Instrument::Polaris)
+        {
+            return face;
+        }
+        bank_id(self.inst).to_string()
+    }
+
+    /// Make Polaris's preset list the one of the face being shown.
+    pub(crate) fn sync_bank(&mut self) {
+        let name = self.bank_name();
+        if self.inst != Instrument::Polaris || name == self.face_bank {
+            return;
+        }
+        let mut defaults = full_defaults()[2].clone();
+        if name != "polaris" {
+            if let Some(b) = las_dsp::presets::bank(&name) {
+                defaults = merge_patch(&defaults, &b.init);
+            }
+        }
+        self.entries[2] = presets::entries(&name, &defaults);
+        self.presets[2] = 0;
+        self.face_bank = name;
+    }
+
     /// Previous and next buttons and a searchable list of the presets.
     pub(crate) fn preset_picker(&mut self, ui: &mut Ui) {
+        self.sync_bank();
         let inst = self.inst;
         let k = index(inst);
         let count = self.entries[k].len();

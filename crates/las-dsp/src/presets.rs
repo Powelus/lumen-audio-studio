@@ -150,4 +150,46 @@ mod tests {
         assert_eq!(p["filterRouting"], "parallel");
         assert!(b.categories().contains(&"Lead"));
     }
+
+    #[test]
+    fn the_faces_of_the_polaris_engine_have_their_own_presets_that_all_play() {
+        use crate::engine::Event;
+        for id in ["monolith", "zenith", "triosc"] {
+            let b = bank(id).unwrap();
+            assert!(b.presets.len() > 30, "{id} has {}", b.presets.len());
+            for i in 0..b.presets.len() {
+                let name = &b.presets[i].name;
+                let mut e = crate::synth::synth_engine(48000.0, 1);
+                e.set_patch(&b.patch(i).unwrap())
+                    .unwrap_or_else(|err| panic!("{id} {name}: {err:?}"));
+                e.queue(&[
+                    Event::On {
+                        time: 0.0,
+                        key: 60.0,
+                        vel: 1.0,
+                        fine: 0.0,
+                        pan: 0.0,
+                    },
+                    Event::Off {
+                        time: 0.6,
+                        key: 60.0,
+                    },
+                ]);
+                let n = 48000;
+                let (mut l, mut r) = (vec![0f32; n], vec![0f32; n]);
+                let mut at = 0;
+                while at < n {
+                    let end = (at + 128).min(n);
+                    e.process(&mut l[at..end], &mut r[at..end], at as f64 / 48000.0);
+                    at = end;
+                }
+                assert!(
+                    l.iter().chain(&r).all(|x| x.is_finite()),
+                    "{id} {name} is not finite"
+                );
+                let peak = l.iter().chain(&r).fold(0f32, |m, x| m.max(x.abs()));
+                assert!(peak > 0.01, "{id} {name} is silent ({peak})");
+            }
+        }
+    }
 }

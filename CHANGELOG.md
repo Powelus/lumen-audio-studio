@@ -30,6 +30,12 @@ Settings: your own sample and plugin folders.
 - The app opens maximised and sizes everything to the screen: the layout fits a 1280 by 720 screen and grows on bigger ones (about 135% at 1080p, 180% at 1440p, 270% at 4K), drawn at the screen's real resolution so it stays sharp. Settings > Display sets your own size from 50% to 200% on top. `--size 1920x1080` opens the window at a given size instead.
 - Settings are kept in `settings.json` in the app's folder.
 - Analyser (the Analyser button in the top bar): what the master output sounds like, four ways. A heat map scrolls the spectrum by in time, low notes at the bottom and loud in bright yellow. A spectrum shows the level of each frequency with a slowly falling peak line. A goniometer draws left against right (a mono sound is an upright line, a wide one a cloud) with correlation and balance bars. Loudness shows momentary, short term and integrated LUFS, true peak, and left and right peak meters. The audio thread hands the output over without waiting or allocating.
+## 0.2.0-alpha.53
+
+Monolith, Zenith and TriOsc get their own faces.
+
+- Monolith, Zenith and TriOsc are now instruments in their own right instead of recoloured copies of Polaris. Monolith is a one page virtual analogue laid out like a classic hardware synth between wooden side panels, with three oscillators, a mixer with noise, a big filter cutoff, two contour envelopes and an LFO. Zenith is built for supersaws and pads, with a big unison section that draws the detuned voices, an XY pad for detune and brightness, quick chorus, echo and reverb controls, a saw layer and a pad and sub layer. TriOsc is a small window with three simple oscillator rows and a compact filter and envelope strip.
+- Each comes with 32 new presets of its own, and the preset list now shows the presets of the instrument you are looking at. Polaris and Vortex keep the full wavetable panel.
 
 ## 0.2.0-alpha.49
 
