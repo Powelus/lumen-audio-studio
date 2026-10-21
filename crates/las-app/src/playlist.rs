@@ -925,10 +925,17 @@ pub fn draw(
                 3.0,
                 Color32::from_black_alpha(40),
             );
+            // a small triangle: the clip's menu
+            let m = r.left_top() + egui::vec2(4.0, 6.0);
+            painter.with_clip_rect(r).add(egui::Shape::convex_polygon(
+                vec![m, m + egui::vec2(7.0, 0.0), m + egui::vec2(3.5, 5.0)],
+                Color32::from_black_alpha(170),
+                Stroke::NONE,
+            ));
             painter.with_clip_rect(r).text(
-                r.left_top() + egui::vec2(5.0, 2.0),
+                r.left_top() + egui::vec2(14.0, 2.0),
                 egui::Align2::LEFT_TOP,
-                format!("\u{25BE} {name}"),
+                name,
                 egui::FontId::proportional(11.5),
                 Color32::from_gray(15),
             );
