@@ -180,13 +180,14 @@ pub fn automation_value_at(clip: &AutomationClip, t: f64) -> f64 {
 
 /// An automation clip placed in the playlist that drives the tempo.
 fn tempo_clips(p: &Project) -> Vec<(&Clip, &AutomationClip)> {
+    let silent = p.playlist.silent_tracks();
     p.playlist
         .clips
         .iter()
         .filter(|c| {
             c.kind == ClipKind::Automation
                 && c.muted != Some(true)
-                && !p.playlist.tracks.get(c.track).is_some_and(|t| t.mute)
+                && !silent.get(c.track).copied().unwrap_or(false)
         })
         .filter_map(|c| {
             let auto = p.automation.iter().find(|a| a.id == c.ref_id)?;

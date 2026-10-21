@@ -51,6 +51,9 @@ pub struct Note {
     /// Fine pitch, cents.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fine: Option<f64>,
+    /// Release velocity, 0 to 1 (FL's note release); 0.5 when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slide: Option<bool>,
     /// Entered with the step sequencer.
@@ -179,9 +182,16 @@ pub struct PlaylistTrack {
     pub name: String,
     pub color: String,
     pub mute: bool,
+    /// Only soloed tracks play while any track is soloed.
+    #[serde(skip_serializing_if = "is_false")]
+    pub solo: bool,
     pub height: f64,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +449,22 @@ pub struct ProjectMeta {
 pub struct Playlist {
     pub tracks: Vec<PlaylistTrack>,
     pub clips: Vec<Clip>,
+}
+
+impl Playlist {
+    /// For each track (as many as the tracks listed or used by a clip), whether it is
+    /// silent: muted, or not soloed while another track is.
+    pub fn silent_tracks(&self) -> Vec<bool> {
+        let used = self.clips.iter().map(|c| c.track + 1).max().unwrap_or(0);
+        let n = self.tracks.len().max(used);
+        let any_solo = self.tracks.iter().any(|t| t.solo);
+        (0..n)
+            .map(|i| match self.tracks.get(i) {
+                Some(t) => t.mute || (any_solo && !t.solo),
+                None => any_solo,
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
