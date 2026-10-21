@@ -7,7 +7,9 @@
 use crate::app::App;
 use crate::theme::pal;
 use eframe::egui::{self, pos2, vec2, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
-use las_dsp::modular::{Cable, Kind, Node, Patch, FILTER_MODES, MAX_VOICES, WAVES};
+use las_dsp::modular::{
+    factory, param_id, Cable, Kind, Node, Patch, FILTER_MODES, MAX_VOICES, WAVES,
+};
 use serde_json::{json, Value};
 
 const NODE_W: f32 = 180.0;
@@ -145,12 +147,12 @@ fn kind_color(k: Kind) -> Color32 {
 impl App {
     /// The window of a Weave channel.
     pub(crate) fn weave_window(&mut self, ui: &mut Ui, channel: usize) {
-        let Some((name, state)) = self
+        let Some((name, state, channel_id)) = self
             .project
             .loaded
             .as_ref()
             .and_then(|l| l.project.channels.get(channel))
-            .map(|c| (c.name.clone(), c.state.clone()))
+            .map(|c| (c.name.clone(), c.state.clone(), c.id.clone()))
         else {
             return;
         };
@@ -162,6 +164,15 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&name).size(16.0).strong());
             ui.label(RichText::new("Weave modular").color(p.muted));
+            ui.menu_button("Patches", |ui| {
+                for (pname, fp) in factory() {
+                    if ui.button(pname).clicked() {
+                        patch = fp;
+                        ed.selected = None;
+                        ui.close();
+                    }
+                }
+            });
             ui.menu_button("Add module", |ui| {
                 for k in Kind::ALL {
                     if ui.button(kind_name(k)).clicked() {
@@ -271,6 +282,7 @@ impl App {
 
         // the modules
         let mut remove = None;
+        let mut automate: Option<(u32, String, f64)> = None;
         let mut drop_on: Option<(u32, usize)> = None;
         for n in patch.nodes.iter_mut() {
             let rect = node_rect(n, origin);
@@ -401,7 +413,16 @@ impl App {
                         v = ps.default;
                     }
                     let changed = r.changed() || r.double_clicked();
-                    r.on_hover_text(format!("{} {v:.3}", ps.name));
+                    let pid = param_id(id, k - spec.inputs.len());
+                    let label = format!("{} {}", kind_name(n.kind), ps.name);
+                    let at = ps.normalize(v);
+                    r.on_hover_text(format!("{} {v:.3}", ps.name))
+                        .context_menu(|ui| {
+                            if ui.button("Create automation clip").clicked() {
+                                automate = Some((pid, label.clone(), at));
+                                ui.close();
+                            }
+                        });
                     changed
                 };
                 if changed {
@@ -437,6 +458,13 @@ impl App {
             ui.ctx().request_repaint();
         }
 
+        if let Some((pid, label, start)) = automate {
+            self.project.create_automation(&crate::auto::AutoRequest {
+                target: crate::auto::plugin_target(&channel_id, &format!("p.{pid}")),
+                name: format!("{name} {label}"),
+                start,
+            });
+        }
         if patch != before {
             let value = patch.to_json();
             self.project.modify_coalesced("weave", move |p| {

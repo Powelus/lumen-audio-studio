@@ -427,6 +427,148 @@ impl Patch {
     }
 }
 
+/// The factory patches: a name and the patch.
+pub fn factory() -> Vec<(&'static str, Patch)> {
+    let n = Node::new;
+    let c = Cable::new;
+    let keys_env = |extra_nodes: Vec<Node>, extra: Vec<Cable>, voices: usize| {
+        let mut p = Patch {
+            nodes: extra_nodes,
+            cables: extra,
+            voices,
+        };
+        p.nodes.sort_by_key(|x| x.id);
+        p
+    };
+    vec![
+        ("Saw lead", Patch::default()),
+        (
+            "Wobble bass",
+            keys_env(
+                vec![
+                    n(1, Kind::Keys, [20.0, 140.0]),
+                    n(2, Kind::Osc, [240.0, 20.0]).with("tune", -12.0),
+                    n(3, Kind::Osc, [240.0, 300.0])
+                        .with("wave", 3.0)
+                        .with("tune", -12.0)
+                        .with("fine", 7.0),
+                    n(4, Kind::Mix, [460.0, 20.0]),
+                    n(5, Kind::Lfo, [460.0, 300.0]).with("rate", 3.0),
+                    n(6, Kind::Filter, [680.0, 20.0])
+                        .with("cutoff", 300.0)
+                        .with("res", 0.6),
+                    n(7, Kind::Env, [680.0, 300.0]).with("release", 0.1),
+                    n(8, Kind::Vca, [900.0, 140.0]),
+                    n(9, Kind::Output, [1120.0, 140.0]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(2, "out", 4, "a", 0.6),
+                    c(3, "out", 4, "b", 0.6),
+                    c(4, "out", 6, "in", 1.0),
+                    c(5, "out", 6, "cutoff", 0.3),
+                    c(1, "gate", 7, "gate", 1.0),
+                    c(6, "out", 8, "in", 1.0),
+                    c(7, "out", 8, "cv", 1.0),
+                    c(8, "out", 9, "left", 1.0),
+                ],
+                4,
+            ),
+        ),
+        (
+            "Pluck",
+            keys_env(
+                vec![
+                    n(1, Kind::Keys, [20.0, 140.0]),
+                    n(2, Kind::Osc, [240.0, 20.0])
+                        .with("wave", 3.0)
+                        .with("pw", 0.3),
+                    n(3, Kind::Env, [240.0, 300.0])
+                        .with("decay", 0.25)
+                        .with("sustain", 0.0)
+                        .with("release", 0.2),
+                    n(4, Kind::Filter, [460.0, 20.0])
+                        .with("cutoff", 400.0)
+                        .with("res", 0.3),
+                    n(5, Kind::Vca, [680.0, 140.0]),
+                    n(6, Kind::Output, [900.0, 140.0]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "gate", 3, "gate", 1.0),
+                    c(2, "out", 4, "in", 1.0),
+                    c(3, "out", 4, "cutoff", 0.5),
+                    c(4, "out", 5, "in", 1.0),
+                    c(3, "out", 5, "cv", 1.0),
+                    c(1, "velocity", 5, "gain", 0.5),
+                    c(5, "out", 6, "left", 1.0),
+                ],
+                8,
+            ),
+        ),
+        (
+            "Slow pad",
+            keys_env(
+                vec![
+                    n(1, Kind::Keys, [20.0, 140.0]),
+                    n(2, Kind::Osc, [240.0, 20.0]).with("fine", -8.0),
+                    n(3, Kind::Osc, [240.0, 300.0]).with("fine", 8.0),
+                    n(4, Kind::Lfo, [460.0, 300.0]).with("rate", 0.2),
+                    n(5, Kind::Filter, [460.0, 20.0]).with("cutoff", 1200.0),
+                    n(6, Kind::Env, [680.0, 300.0])
+                        .with("attack", 1.2)
+                        .with("sustain", 0.9)
+                        .with("release", 2.0),
+                    n(7, Kind::Vca, [680.0, 20.0]),
+                    n(8, Kind::Output, [900.0, 140.0]).with("level", 0.6),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(2, "out", 5, "in", 0.5),
+                    c(3, "out", 5, "in", 0.5),
+                    c(4, "out", 5, "cutoff", 0.1),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(5, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "left", 1.0),
+                ],
+                8,
+            ),
+        ),
+        (
+            "Noise sweep",
+            keys_env(
+                vec![
+                    n(1, Kind::Keys, [20.0, 140.0]),
+                    n(2, Kind::Noise, [240.0, 20.0]),
+                    n(3, Kind::Env, [240.0, 300.0])
+                        .with("attack", 0.5)
+                        .with("decay", 1.5)
+                        .with("sustain", 0.0)
+                        .with("release", 0.5),
+                    n(4, Kind::Filter, [460.0, 20.0])
+                        .with("mode", 1.0)
+                        .with("cutoff", 200.0)
+                        .with("res", 0.7),
+                    n(5, Kind::Vca, [680.0, 140.0]),
+                    n(6, Kind::Output, [900.0, 140.0]),
+                ],
+                vec![
+                    c(1, "gate", 3, "gate", 1.0),
+                    c(2, "out", 4, "in", 1.0),
+                    c(3, "out", 4, "cutoff", 0.7),
+                    c(4, "out", 5, "in", 1.0),
+                    c(3, "out", 5, "cv", 1.0),
+                    c(5, "out", 6, "left", 1.0),
+                ],
+                4,
+            ),
+        ),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // The compiled graph
 // ---------------------------------------------------------------------------
@@ -1128,6 +1270,18 @@ mod tests {
         p.cables.pop();
         m.set_patch(&p);
         assert_eq!(m.active_voices(), 0);
+    }
+
+    #[test]
+    fn every_factory_patch_plays_and_has_only_good_cables() {
+        for (name, p) in factory() {
+            assert!(p.cables.iter().all(|c| p.is_valid(c)), "{name}");
+            let mut m = Modular::new(&p, SR);
+            m.note_on(57, 0.8);
+            let (l, r) = run(&mut m, 48_000);
+            assert!(rms(&l) > 0.01 && rms(&r) > 0.01, "{name} {}", rms(&l));
+            assert!(l.iter().chain(&r).all(|v| v.is_finite() && v.abs() <= 4.0));
+        }
     }
 
     #[test]

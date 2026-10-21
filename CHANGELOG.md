@@ -10,7 +10,8 @@ Weave, a modular synth with patch cables.
 - Modules: keys, oscillator (sine, triangle, saw, square with polyBLEP), noise, LFO, ADSR envelope, state variable filter (lowpass, bandpass, highpass), VCA, four input mixer, math (scale and offset) and output.
 - Every parameter is also an input: a cable into a parameter modulates it over its range, scaled by the cable's own amount. Loops of cables are allowed and run one sample late, and signals are kept finite.
 - Each voice runs its own copy of the graph (8 voices by default, up to 32, the oldest is taken when all play). Notes start on their exact sample.
-- Every parameter of every module can be automated by the engine (id: module id times 64 plus the parameter's place).
+- Five factory patches (Patches menu): Saw lead, Wobble bass, Pluck, Slow pad, Noise sweep.
+- Right click any knob: Create automation clip. Every parameter of every module can be automated (the id is the module id times 64 plus the parameter's place).
 - Engine: `las_dsp::modular` (the synth) and `las_engine::weave` (the channel instrument), with tests for pitch, release, modulation, loops, polyphony, patches, note timing and automation; the editor's patch edits are tested too.
 
 ## 0.2.0-alpha.47

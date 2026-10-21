@@ -142,4 +142,27 @@ mod tests {
         let state = serde_json::json!({ "patch": Patch::default().to_json() });
         assert_eq!(patch_of(&state), Patch::default());
     }
+
+    #[test]
+    fn a_weave_channel_plays_and_takes_automation_by_path() {
+        let mut tables = las_dsp::wavetable::TableLibrary::new();
+        let mut inst = crate::instrument::Instrument::new(
+            WEAVE_ID,
+            &Value::Null,
+            SR,
+            &mut tables,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(!inst.is_silent());
+        // the default patch's filter cutoff: node 4, parameter 1
+        let path = format!("p.{}", param_id(4, 1));
+        assert!(inst.automate(&path, &[(0.0, 0.2)], true, 0));
+        assert!(!inst.automate("p.99999", &[(0.0, 0.2)], true, 0));
+        inst.note_on(60.0, 1.0, 0.0);
+        let (mut l, mut r) = (vec![0.0; 1024], vec![0.0; 1024]);
+        inst.render(0.0, &mut l, &mut r);
+        assert!(l.iter().any(|&v| v != 0.0));
+    }
 }
