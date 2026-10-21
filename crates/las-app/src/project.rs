@@ -188,6 +188,11 @@ impl ProjectState {
                     self.stale = true;
                 }
                 PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
+                PlEdit::ChoosePattern(id) => {
+                    if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
+                        self.pattern = i;
+                    }
+                }
                 PlEdit::OpenPattern(id) => {
                     if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
                         self.pattern = i;
@@ -537,14 +542,31 @@ impl App {
             }
         }
         ui.horizontal(|ui| {
-            for (t, name) in [
-                (playlist::Tool::Draw, "Draw"),
-                (playlist::Tool::Select, "Select"),
-                (playlist::Tool::Slice, "Slice"),
-                (playlist::Tool::Mute, "Mute"),
-                (playlist::Tool::Delete, "Delete"),
+            ui.toggle_value(&mut self.project.playlist.show_picker, "Picker")
+                .on_hover_text("Show or hide the list of patterns, audio clips and automation clips");
+            ui.separator();
+            for (t, name, tip) in [
+                (
+                    playlist::Tool::Draw,
+                    "Draw",
+                    "Click to place the picked clip, drag a clip to move it, drag an edge to resize it, Shift+drag to copy, right click to delete",
+                ),
+                (
+                    playlist::Tool::Paint,
+                    "Paint",
+                    "Drag along a track to place the picked clip again and again",
+                ),
+                (
+                    playlist::Tool::Select,
+                    "Select",
+                    "Drag a box to select clips, then drag them together",
+                ),
+                (playlist::Tool::Slice, "Slice", "Click a clip to cut it in two at the grid line"),
+                (playlist::Tool::Mute, "Mute", "Click a clip to mute or unmute it"),
+                (playlist::Tool::Delete, "Delete", "Click a clip to delete it"),
             ] {
-                ui.selectable_value(&mut self.project.playlist.tool, t, name);
+                ui.selectable_value(&mut self.project.playlist.tool, t, name)
+                    .on_hover_text(tip);
             }
             ui.separator();
             ui.label("Snap");
@@ -557,7 +579,8 @@ impl App {
                     }
                 });
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false));
+            ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false))
+                .on_hover_text("Ctrl+wheel zooms around the pointer");
             ui.label("Height");
             ui.add(egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
                 .on_hover_text("The height of the playlist's tracks");
@@ -570,7 +593,7 @@ impl App {
                 self.project.playlist.zoom = playlist::fit_zoom(&project, w);
             }
             ui.label(
-                RichText::new("Double click places the pattern, drag moves, right click for markers, loops and clip options, click the ruler to set the start. Drop a WAV file here for an audio clip.")
+                RichText::new("Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Right click the ruler for markers and loops. Drop a sound file here for an audio clip.")
                     .weak()
                     .size(11.0),
             );
