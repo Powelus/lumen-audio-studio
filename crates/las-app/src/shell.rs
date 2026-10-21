@@ -832,6 +832,7 @@ impl App {
                 ("Nebula", "nebula", "Layered macro instrument"),
                 ("Sampler", "sampler", "Plays a sample across the keys"),
                 ("LumaPad", "lumapad", "16 pads with choke groups"),
+                ("Weave", "weave", "Modular synth: modules and patch cables"),
             ] {
                 ui.horizontal(|ui| {
                     let r = ui
@@ -995,6 +996,7 @@ impl App {
                             self.nebula_window(ui, c)
                         })
                     }
+                    Some(crate::inst::Bound::Weave(c)) => self.weave_window(ui, c),
                     Some(crate::inst::Bound::Pads(c)) => {
                         crate::skin::face(ui, crate::skin::skin_for("lumapad"), |ui| {
                             self.pads_window(ui, c)

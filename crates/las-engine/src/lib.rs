@@ -14,6 +14,7 @@ pub mod pluginparams;
 pub mod render;
 pub mod sampler;
 pub mod timeline;
+pub mod weave;
 pub use player::{PlayMode, Player};
 pub use render::{
     render_mix, render_mix_with, render_stems, used_inserts, Mode, RenderOptions, Rendered, Stem,

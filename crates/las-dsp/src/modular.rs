@@ -360,6 +360,16 @@ fn voices() -> usize {
     8
 }
 
+/// The id a parameter is automated by: the node's id and the parameter's place.
+pub fn param_id(node: u32, index: usize) -> u32 {
+    node * 64 + index as u32
+}
+
+/// The node and the parameter's place an automation id names.
+pub fn split_param_id(id: u32) -> (u32, usize) {
+    (id / 64, (id % 64) as usize)
+}
+
 /// The most voices a patch can have.
 pub const MAX_VOICES: usize = 32;
 
@@ -369,12 +379,12 @@ impl Default for Patch {
     fn default() -> Self {
         Self {
             nodes: vec![
-                Node::new(1, Kind::Keys, [20.0, 120.0]),
-                Node::new(2, Kind::Osc, [200.0, 40.0]),
-                Node::new(3, Kind::Env, [200.0, 240.0]),
-                Node::new(4, Kind::Filter, [400.0, 40.0]).with("cutoff", 800.0),
-                Node::new(5, Kind::Vca, [600.0, 120.0]),
-                Node::new(6, Kind::Output, [800.0, 120.0]),
+                Node::new(1, Kind::Keys, [20.0, 140.0]),
+                Node::new(2, Kind::Osc, [240.0, 20.0]),
+                Node::new(3, Kind::Env, [240.0, 300.0]),
+                Node::new(4, Kind::Filter, [460.0, 20.0]).with("cutoff", 800.0),
+                Node::new(5, Kind::Vca, [680.0, 140.0]),
+                Node::new(6, Kind::Output, [900.0, 140.0]),
             ],
             cables: vec![
                 Cable::new(1, "pitch", 2, "pitch", 1.0),

@@ -111,6 +111,8 @@ pub struct App {
     pub(crate) synth_dirty: bool,
     /// Set when the user asked to quit and it is allowed.
     pub(crate) quit: bool,
+    /// Where Weave's patch editor is scrolled and what it is doing.
+    pub(crate) weave: crate::weave_ui::WeaveEditor,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,6 +175,7 @@ impl App {
             bound: None,
             synth_dirty: false,
             quit: false,
+            weave: Default::default(),
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
