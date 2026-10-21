@@ -2157,7 +2157,7 @@ dependencies = [
 
 [[package]]
 name = "las-app"
-version = "0.2.0-alpha.46"
+version = "0.2.0-alpha.47"
 dependencies = [
  "cpal",
  "eframe",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "las-cli"
-version = "0.2.0-alpha.46"
+version = "0.2.0-alpha.47"
 dependencies = [
  "hound",
  "las-dsp",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "las-dsp"
-version = "0.2.0-alpha.46"
+version = "0.2.0-alpha.47"
 dependencies = [
  "serde",
  "serde_json",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "las-engine"
-version = "0.2.0-alpha.46"
+version = "0.2.0-alpha.47"
 dependencies = [
  "claxon",
  "flacenc",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "las-host"
-version = "0.2.0-alpha.46"
+version = "0.2.0-alpha.47"
 dependencies = [
  "clack-extensions",
  "clack-host",
@@ -2221,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "las-project"
-version = "0.2.0-alpha.46"
+version = "0.2.0-alpha.47"
 dependencies = [
  "aes-gcm",
  "crc32fast",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "las-testplug"
-version = "0.2.0-alpha.46"
+version = "0.2.0-alpha.47"
 dependencies = [
  "clack-extensions",
  "clack-plugin",
@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "las-testvst3"
-version = "0.2.0-alpha.46"
+version = "0.2.0-alpha.47"
 dependencies = [
  "vst3",
 ]
