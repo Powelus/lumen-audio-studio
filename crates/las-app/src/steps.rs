@@ -580,7 +580,7 @@ fn top_bar(
         }
         ui.separator();
         let g = ui
-            .selectable_label(state.graph, "\u{2581}\u{2583}\u{2585} Graph")
+            .selectable_label(state.graph, "Graph editor")
             .on_hover_text(
                 "The graph editor: bars under the selected channel's steps for each step's velocity, pan and fine pitch",
             );

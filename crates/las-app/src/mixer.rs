@@ -758,7 +758,7 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
             });
         }
         if ui
-            .selectable_label(t.swap, "L \u{21c4} R")
+            .selectable_label(t.swap, "Swap L/R")
             .on_hover_text("Swap the left and right sides of this insert")
             .clicked()
         {
