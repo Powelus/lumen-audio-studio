@@ -7,7 +7,7 @@ use crate::rack::channel_colour;
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui};
 use las_engine::timeline::{pattern_length, song_length, ticks_per_bar};
 use las_project::create::uid;
-use las_project::{Clip, ClipKind, Project, PPQ};
+use las_project::{AudioClipEdit, Clip, ClipKind, Project, PPQ};
 use std::collections::HashSet;
 
 const RULER: f32 = 24.0;
@@ -80,6 +80,11 @@ pub enum PlEdit {
     },
     /// Start playing from here.
     Seek(f64),
+    /// Replace the edits of an audio clip (fades, gain, reverse, pitch, stretch).
+    AudioEdit {
+        id: String,
+        edit: Box<AudioClipEdit>,
+    },
 }
 
 /// What a click on the playlist does, as in FL Studio's tool row.
@@ -106,6 +111,11 @@ enum Drag {
     },
     Resize {
         id: String,
+    },
+    /// The fade in (or out) handle of an audio clip.
+    Fade {
+        id: String,
+        out: bool,
     },
     Seek,
     /// The selected clips together.
@@ -262,6 +272,82 @@ fn hit(p: &Project, tick: f64, track: usize, edge_ticks: f64) -> Option<(usize, 
                 tick >= c.start + c.length - edge_ticks && c.length > edge_ticks * 1.5,
             )
         })
+}
+
+/// Where the fade handles of an audio clip are: the top corners, moved in by the fades.
+/// `x_of` turns ticks into x; returns the (fade in, fade out) handle centres' x.
+fn fade_handles(c: &Clip, x_of: impl Fn(f64) -> f32) -> (f32, f32) {
+    let e = c.audio.as_ref();
+    let fi = e.and_then(|a| a.fade_in).unwrap_or(0.0).clamp(0.0, c.length);
+    let fo = e.and_then(|a| a.fade_out).unwrap_or(0.0).clamp(0.0, c.length);
+    (
+        x_of(c.start + fi) + HANDLE / 2.0,
+        x_of(c.start + c.length - fo) - HANDLE / 2.0 - 1.0,
+    )
+}
+
+/// The size of a fade handle, points.
+const HANDLE: f32 = 8.0;
+
+/// The audio clip whose fade handle is under `p`: its id and whether it is the fade out.
+fn fade_handle_at(
+    p: &Project,
+    pos: egui::Pos2,
+    x_of: impl Fn(f64) -> f32 + Copy,
+    top: f32,
+    row: f32,
+) -> Option<(String, bool)> {
+    p.playlist.clips.iter().rev().find_map(|c| {
+        if c.kind != ClipKind::Audio {
+            return None;
+        }
+        let y = top + c.track as f32 * row + 2.0 + HANDLE / 2.0;
+        if (pos.y - y).abs() > HANDLE {
+            return None;
+        }
+        let (a, b) = fade_handles(c, x_of);
+        if (pos.x - b).abs() <= HANDLE {
+            Some((c.id.clone(), true))
+        } else if (pos.x - a).abs() <= HANDLE {
+            Some((c.id.clone(), false))
+        } else {
+            None
+        }
+    })
+}
+
+/// The audio clip part of the playlist's right click menu: the clip's edits.
+fn audio_clip_menu(ui: &mut Ui, project: &Project, c: &Clip, edits: &mut Vec<PlEdit>) {
+    ui.label(egui::RichText::new("Audio clip").strong());
+    let seconds = sample_seconds(project, c);
+    let before = c.audio.clone().unwrap_or_default();
+    let out = crate::clipedit::panel(ui, &before, seconds, project.bpm, c.length);
+    if out.begin {
+        edits.push(PlEdit::Begin);
+    }
+    if let Some(e) = out.edit {
+        // stretching to the tempo makes the clip as long as the sample then plays
+        let tempo = |x: &AudioClipEdit| x.stretch.as_ref().map(|s| s.bpm);
+        if let Some(sec) = seconds.filter(|_| tempo(&e) != tempo(&before)) {
+                let own = tempo(&e).unwrap_or(project.bpm);
+                let len = crate::clipedit::stretched_length(sec, own);
+                edits.push(PlEdit::Resize {
+                    id: c.id.clone(),
+                    length: (len - c.offset).max(1.0),
+                });
+        }
+        edits.push(PlEdit::AudioEdit {
+            id: c.id.clone(),
+            edit: Box::new(e),
+        });
+    }
+}
+
+/// How long the sample an audio clip plays is, seconds.
+pub fn sample_seconds(project: &Project, c: &Clip) -> Option<f64> {
+    let ch = project.channels.iter().find(|x| x.id == c.ref_id)?;
+    let id = ch.sample_id.as_ref()?;
+    project.samples.iter().find(|s| &s.id == id)?.duration
 }
 
 /// The name and colour a clip is drawn with.
@@ -458,6 +544,11 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
             }
         }
         PlEdit::Delete { id } => clips.retain(|c| &c.id != id),
+        PlEdit::AudioEdit { id, edit } => {
+            if let Some(c) = clips.iter_mut().find(|c| &c.id == id) {
+                c.audio = (!crate::clipedit::is_plain(edit)).then(|| (**edit).clone());
+            }
+        }
         PlEdit::Mute { id } => {
             if let Some(c) = clips.iter_mut().find(|c| &c.id == id) {
                 c.muted = Some(c.muted != Some(true));
@@ -650,6 +741,32 @@ pub fn draw(
                             x += 1.0;
                         }
                     }
+                    // the fades as lines, and their handles on the top corners
+                    let (ha, hb) = fade_handles(c, x_of);
+                    let inner = painter.with_clip_rect(r);
+                    let line = Stroke::new(1.5, Color32::from_black_alpha(200));
+                    let e = c.audio.as_ref();
+                    if e.and_then(|a| a.fade_in).unwrap_or(0.0) > 0.0 {
+                        inner.line_segment([r.left_bottom(), egui::pos2(ha, r.top())], line);
+                    }
+                    if e.and_then(|a| a.fade_out).unwrap_or(0.0) > 0.0 {
+                        inner.line_segment([egui::pos2(hb, r.top()), r.right_bottom()], line);
+                    }
+                    if r.width() > HANDLE * 3.0 {
+                        for x in [ha, hb] {
+                            let h = Rect::from_center_size(
+                                egui::pos2(x, r.top() + HANDLE / 2.0),
+                                egui::vec2(HANDLE, HANDLE),
+                            );
+                            inner.rect_filled(h, 1.0, Color32::from_white_alpha(220));
+                            inner.rect_stroke(
+                                h,
+                                1.0,
+                                Stroke::new(1.0, Color32::from_black_alpha(200)),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                    }
                 }
                 if c.kind == ClipKind::Automation {
                     if let Some(a) = project.automation.iter().find(|a| a.id == c.ref_id) {
@@ -796,6 +913,13 @@ pub fn draw(
             // song markers: a flag and a name on the ruler; a click jumps to one
             let mut near_marker = None;
             let pointer = ui.input(|i| i.pointer.hover_pos());
+            if let Some(hp) = pointer.filter(|p| resp.rect.contains(*p)) {
+                if fade_handle_at(project, hp, x_of, top, state.row).is_some()
+                    || matches!(state.drag, Some(Drag::Fade { .. }))
+                {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+            }
             for m in project.markers.iter().flatten() {
                 let x = x_of(m.tick);
                 if x < vl + HEAD - 80.0 || x > vr {
@@ -843,6 +967,12 @@ pub fn draw(
                         .iter()
                         .find(|c| c.id == id)
                         .is_some_and(|c| c.kind == ClipKind::Audio);
+                    if audio {
+                        if let Some(c) = project.playlist.clips.iter().find(|c| c.id == id) {
+                            audio_clip_menu(ui, project, c, &mut edits);
+                            ui.separator();
+                        }
+                    }
                     if !audio {
                         ui.label("Colour");
                         ui.horizontal_wrapped(|ui| {
@@ -940,9 +1070,15 @@ pub fn draw(
                 if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
                     if p.x > left || in_ruler(p) {
                         let (t, tr) = (tick_at(p.x), track_at(p.y));
+                        let handle = fade_handle_at(project, p, x_of, top, state.row);
                         if in_ruler(p) {
                             state.drag = Some(Drag::Seek);
                             edits.push(PlEdit::Seek(snapped(t, state.snap).max(0.0)));
+                        } else if let Some((id, out)) =
+                            handle.filter(|_| matches!(state.tool, Tool::Draw | Tool::Select))
+                        {
+                            edits.push(PlEdit::Begin);
+                            state.drag = Some(Drag::Fade { id, out });
                         } else if !matches!(state.tool, Tool::Draw | Tool::Select) {
                             // the other tools act on a click, not a drag
                         } else if let Some((i, false)) =
@@ -995,6 +1131,23 @@ pub fn draw(
                                 edits.push(PlEdit::Resize {
                                     id,
                                     length: (end - c.start).max(state.snap.max(1.0)),
+                                });
+                            }
+                        }
+                        Drag::Fade { id, out } => {
+                            if let Some(c) = project.playlist.clips.iter().find(|c| c.id == id) {
+                                let mut e = c.audio.clone().unwrap_or_default();
+                                let v = if out { c.start + c.length - t } else { t - c.start };
+                                let v = v.clamp(0.0, c.length);
+                                let v = (v > 1.0).then_some(v);
+                                if out {
+                                    e.fade_out = v;
+                                } else {
+                                    e.fade_in = v;
+                                }
+                                edits.push(PlEdit::AudioEdit {
+                                    id,
+                                    edit: Box::new(e),
                                 });
                             }
                         }

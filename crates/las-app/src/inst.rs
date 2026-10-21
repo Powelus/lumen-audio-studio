@@ -245,6 +245,10 @@ impl App {
         let Some(c) = l.project.channels.get(channel) else {
             return;
         };
+        if c.plugin_id == "audioclip" {
+            self.audio_clip_window(ui, channel);
+            return;
+        }
         let state = c.state.clone();
         ui.label(RichText::new(&c.name).size(16.0).strong());
         ui.label(
@@ -363,5 +367,64 @@ mod tests {
         assert_eq!(v["layers"][0]["pan"], 0.25);
         assert!(!set_at(&mut v, "layers.5.pan", json!(1)));
         assert!(!set_at(&mut v, "gain.deep", json!(1)));
+    }
+}
+
+impl App {
+    /// The window of an audio clip channel: the edits of its clips, as FL Studio's audio
+    /// clip channel settings. They apply to every clip of this sound in the playlist.
+    pub(crate) fn audio_clip_window(&mut self, ui: &mut Ui, channel: usize) {
+        let Some(l) = &self.project.loaded else {
+            return;
+        };
+        let project = l.project.clone();
+        let Some(c) = project.channels.get(channel) else {
+            return;
+        };
+        ui.label(RichText::new(&c.name).size(16.0).strong());
+        let clips: Vec<&las_project::Clip> = project
+            .playlist
+            .clips
+            .iter()
+            .filter(|x| x.kind == las_project::ClipKind::Audio && x.ref_id == c.id)
+            .collect();
+        let Some(first) = clips.first() else {
+            ui.label(
+                RichText::new("This sound is not in the playlist yet. Drag it from the browser to a playlist track.")
+                    .weak(),
+            );
+            return;
+        };
+        let seconds = crate::playlist::sample_seconds(&project, first);
+        ui.label(
+            RichText::new(format!(
+                "{}{} in the playlist. Changes here apply to all of them; right click one clip in the playlist to change only that one.",
+                seconds.map_or(String::new(), |s| format!("{s:.2} s, ")),
+                if clips.len() == 1 {
+                    "1 clip".to_string()
+                } else {
+                    format!("{} clips", clips.len())
+                }
+            ))
+            .weak()
+            .size(11.0),
+        );
+        ui.separator();
+        let before = first.audio.clone().unwrap_or_default();
+        let out = crate::clipedit::panel(ui, &before, seconds, project.bpm, first.length);
+        let ids: Vec<String> = clips.iter().map(|x| x.id.clone()).collect();
+        if let Some(e) = out.edit {
+            let plain = crate::clipedit::is_plain(&e);
+            let edit = move |p: &mut las_project::Project| {
+                for x in p.playlist.clips.iter_mut().filter(|x| ids.contains(&x.id)) {
+                    x.audio = (!plain).then(|| e.clone());
+                }
+            };
+            if out.begin {
+                self.project.modify(true, edit);
+            } else {
+                self.project.modify(false, edit);
+            }
+        }
     }
 }

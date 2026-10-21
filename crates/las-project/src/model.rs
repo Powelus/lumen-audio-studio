@@ -219,14 +219,14 @@ pub enum StretchMode {
     Resample,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stretch {
     pub bpm: f64,
     pub mode: StretchMode,
 }
 
 /// Non-destructive edits of one audio clip.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioClipEdit {
     /// dB.

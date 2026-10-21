@@ -8,6 +8,7 @@ mod analyser;
 mod app;
 mod audio;
 mod auto;
+mod clipedit;
 mod faces;
 mod fxui;
 mod hosted;
