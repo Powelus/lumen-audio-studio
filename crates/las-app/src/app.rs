@@ -116,6 +116,8 @@ pub struct App {
     /// The browser's listings of the user's sample folders.
     pub(crate) folders: crate::settings::FolderCache,
     pub(crate) autosaved: crate::settings::Autosave,
+    /// The analyser window's views, made when it first opens.
+    pub(crate) analyser: Option<crate::analyser::Analyser>,
     /// Where Weave's patch editor is scrolled and what it is doing.
     pub(crate) weave: crate::weave_ui::WeaveEditor,
     /// The hosted plugins' own windows that are open.
@@ -185,6 +187,7 @@ impl App {
             settings: crate::settings::Settings::load(),
             folders: Default::default(),
             autosaved: Default::default(),
+            analyser: None,
             weave: Default::default(),
             editors: Vec::new(),
         };
@@ -259,6 +262,7 @@ impl App {
                     "synth" => o.synth = true,
                     "export" => o.export = true,
                     "settings" => o.settings = true,
+                    "analyser" => o.analyser = true,
                     _ => {}
                 }
             }
@@ -274,6 +278,14 @@ impl App {
                     _ => {}
                 }
             }
+        }
+        // `--demo-song` opens the demo song; `--analyser-demo` plays it into the analyser
+        // silently, for screenshots on machines without sound
+        if std::env::args().any(|a| a == "--demo-song") {
+            app.open_demo();
+        }
+        if std::env::args().any(|a| a == "--analyser-demo") {
+            app.analyser_demo();
         }
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
@@ -1646,6 +1658,7 @@ impl eframe::App for App {
         }
         self.serve_editors();
         self.autosave();
+        self.feed_analyser();
         self.remember_windows();
         // meters move on their own
         ctx.request_repaint_after(Duration::from_millis(16));

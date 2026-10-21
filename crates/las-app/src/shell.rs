@@ -38,6 +38,7 @@ pub struct Windows {
     pub keys: bool,
     pub history: bool,
     pub settings: bool,
+    pub analyser: bool,
 }
 
 /// What the export window holds.
@@ -112,6 +113,7 @@ impl Shell {
                 keys: false,
                 history: false,
                 settings: false,
+                analyser: false,
             },
             song_mode: true,
             metronome: false,
@@ -542,13 +544,16 @@ impl App {
             }
             // windows
             let o = self.shell.open;
-            let labels = ["Rack", "Playlist", "Roll", "Mixer", "Synth", "Browser"];
+            let labels = [
+                "Rack", "Playlist", "Roll", "Mixer", "Synth", "Analyser", "Browser",
+            ];
             let act = [
                 o.rack,
                 o.playlist,
                 o.roll,
                 o.mixer,
                 o.synth,
+                o.analyser,
                 self.shell.browser,
             ];
             if let Some(i) = segmented(ui, &labels, &act) {
@@ -558,6 +563,7 @@ impl App {
                     2 => self.shell.open.roll = !o.roll,
                     3 => self.shell.open.mixer = !o.mixer,
                     4 => self.shell.open.synth = !o.synth,
+                    5 => self.shell.open.analyser = !o.analyser,
                     _ => self.shell.browser = !self.shell.browser,
                 }
             }
@@ -1048,6 +1054,7 @@ impl App {
         self.keys_window(ctx);
         self.history_window(ctx);
         self.settings_window(ctx);
+        self.analyser_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
     }

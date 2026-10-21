@@ -14,6 +14,7 @@ Settings: your own sample and plugin folders.
 - A menu bar across the top (File, Edit, Add, Patterns, View, Options, Help) with a Settings button at its right replaces the menu button in the top bar.
 - The app opens maximised and sizes everything to the screen: the layout fits a 1280 by 720 screen and grows on bigger ones (about 135% at 1080p, 180% at 1440p, 270% at 4K), drawn at the screen's real resolution so it stays sharp. Settings > Display sets your own size from 50% to 200% on top. `--size 1920x1080` opens the window at a given size instead.
 - Settings are kept in `settings.json` in the app's folder.
+- Analyser (the Analyser button in the top bar): what the master output sounds like, four ways. A heat map scrolls the spectrum by in time, low notes at the bottom and loud in bright yellow. A spectrum shows the level of each frequency with a slowly falling peak line. A goniometer draws left against right (a mono sound is an upright line, a wide one a cloud) with correlation and balance bars. Loudness shows momentary, short term and integrated LUFS, true peak, and left and right peak meters. The audio thread hands the output over without waiting or allocating.
 
 ## 0.2.0-alpha.49
 

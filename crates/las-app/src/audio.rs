@@ -119,6 +119,59 @@ pub struct Meters {
     playing: AtomicU32,
     /// The peak of each mixer insert, master first (bits of an `f32`).
     inserts: [AtomicU32; 32],
+    /// The last moments of what goes out, for the analyser.
+    pub scope: Scope,
+}
+
+/// The newest frames of the output, written by the audio thread and read by the
+/// analyser: a fixed ring of atomics and a count of frames written, so the audio thread
+/// never waits or allocates. A reader that falls behind just sees the newest frames.
+pub struct Scope {
+    left: Box<[AtomicU32]>,
+    right: Box<[AtomicU32]>,
+    written: AtomicU64,
+}
+
+impl Scope {
+    /// Frames kept.
+    pub const LEN: usize = 1 << 15;
+
+    pub fn push(&self, l: f32, r: f32) {
+        let n = self.written.load(Ordering::Relaxed);
+        let at = (n as usize) & (Self::LEN - 1);
+        self.left[at].store(l.to_bits(), Ordering::Relaxed);
+        self.right[at].store(r.to_bits(), Ordering::Relaxed);
+        self.written.store(n + 1, Ordering::Release);
+    }
+
+    /// How many frames have been written so far.
+    pub fn written(&self) -> u64 {
+        self.written.load(Ordering::Acquire)
+    }
+
+    /// Copy the frames from `from` (a count of frames written) up to now into `l` and
+    /// `r`, at most the ring's length; the count reached.
+    pub fn read_since(&self, from: u64, l: &mut Vec<f32>, r: &mut Vec<f32>) -> u64 {
+        let end = self.written();
+        let start = from.max(end.saturating_sub(Self::LEN as u64 - 1024));
+        for n in start..end {
+            let at = (n as usize) & (Self::LEN - 1);
+            l.push(f32::from_bits(self.left[at].load(Ordering::Relaxed)));
+            r.push(f32::from_bits(self.right[at].load(Ordering::Relaxed)));
+        }
+        end
+    }
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        let ring = || (0..Self::LEN).map(|_| AtomicU32::new(0)).collect();
+        Self {
+            left: ring(),
+            right: ring(),
+            written: AtomicU64::new(0),
+        }
+    }
 }
 
 impl Meters {
@@ -572,6 +625,7 @@ impl Renderer {
                 let (a, b) = (l[i] * self.volume, r[i] * self.volume);
                 pl = pl.max(a.abs());
                 pr = pr.max(b.abs());
+                self.meters.scope.push(a, b);
                 let frame = &mut out[(done + i) * self.channels..(done + i + 1) * self.channels];
                 for (ch, s) in frame.iter_mut().enumerate() {
                     let v = match ch {
