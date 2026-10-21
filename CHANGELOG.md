@@ -2,6 +2,17 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.49
+
+Weave, a modular synth with patch cables.
+
+- Add it from the browser's Plugins tab (Weave). Its window is the patch: modules on a canvas joined by cables. Drag a module by its title, drag the canvas to move around, drag from an output (right) to an input or a parameter (left) to plug a cable in. Click a cable's handle to set its amount (-1 to 1) or pull it out; right click a handle to pull it out at once; right click a title to remove a module. Add module, Voices and Reset are on top. Every edit is one undo step and is saved in the project.
+- Modules: keys, oscillator (sine, triangle, saw, square with polyBLEP), noise, LFO, ADSR envelope, state variable filter (lowpass, bandpass, highpass), VCA, four input mixer, math (scale and offset) and output.
+- Every parameter is also an input: a cable into a parameter modulates it over its range, scaled by the cable's own amount. Loops of cables are allowed and run one sample late, and signals are kept finite.
+- Each voice runs its own copy of the graph (8 voices by default, up to 32, the oldest is taken when all play). Notes start on their exact sample.
+- Five factory patches (Patches menu): Saw lead, Wobble bass, Pluck, Slow pad, Noise sweep.
+- Right click any knob: Create automation clip. Every parameter of every module can be automated (the id is the module id times 64 plus the parameter's place).
+- Engine: `las_dsp::modular` (the synth) and `las_engine::weave` (the channel instrument), with tests for pitch, release, modulation, loops, polyphony, patches, note timing and automation; the editor's patch edits are tested too.
 ## 0.2.0-alpha.48
 
 VST3 plugin windows.

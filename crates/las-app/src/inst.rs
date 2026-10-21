@@ -25,6 +25,8 @@ pub enum Bound {
     Nebula(usize),
     /// LumaPad's window.
     Pads(usize),
+    /// Weave's patch editor.
+    Weave(usize),
 }
 
 impl Bound {
@@ -35,7 +37,8 @@ impl Bound {
             | Bound::Basic(c)
             | Bound::Hosted(c)
             | Bound::Nebula(c)
-            | Bound::Pads(c) => c,
+            | Bound::Pads(c)
+            | Bound::Weave(c) => c,
         }
     }
 }
@@ -186,6 +189,9 @@ impl App {
             None if plugin == las_host::HOSTED => self.bound = Some(Bound::Hosted(channel)),
             None if plugin == "nebula" => self.bound = Some(Bound::Nebula(channel)),
             None if plugin == "lumapad" => self.bound = Some(Bound::Pads(channel)),
+            None if plugin == las_engine::weave::WEAVE_ID => {
+                self.bound = Some(Bound::Weave(channel))
+            }
             None => self.bound = Some(Bound::Basic(channel)),
         }
         // loading is not an edit

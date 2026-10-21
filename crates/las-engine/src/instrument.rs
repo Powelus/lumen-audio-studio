@@ -257,6 +257,10 @@ impl Instrument {
                 }
                 Core::Layers(layers)
             }
+            crate::weave::WEAVE_ID => Core::Hosted(Box::new(Hosted::new(
+                Box::new(crate::weave::Weave::new(state, sr)),
+                sr,
+            ))),
             "sampler" => Core::Sampler(Box::new(Sampler::new(state, sample, sr))),
             "lumapad" => Core::Pads(Box::new(PadBank::new(state, pad_samples, sr))),
             "audioclip" => Core::AudioClip(Box::new(AudioClipper::new(state, sample, sr))),

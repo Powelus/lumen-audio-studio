@@ -27,6 +27,7 @@ mod skin;
 mod skin_tables;
 mod steps;
 mod theme;
+mod weave_ui;
 mod widgets;
 
 fn main() -> eframe::Result {
