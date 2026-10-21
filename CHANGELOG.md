@@ -2,6 +2,16 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.49
+
+Weave, a modular synth: the sound engine.
+
+- `las_dsp::modular`: modules joined by cables. Keys, oscillator (sine, triangle, saw, square with polyBLEP), noise, LFO, ADSR envelope, state variable filter (lowpass, bandpass, highpass), VCA, four input mixer, math (scale and offset) and output.
+- Every parameter is also an input: a cable into a parameter modulates it over its range, scaled by the cable's own amount. Loops of cables are allowed and run one sample late, and signals are kept finite.
+- Each voice runs its own copy of the graph (8 voices by default, up to 32, the oldest is taken when all play). Moving a parameter keeps the voices playing.
+- Patches are plain JSON (modules, their places and parameters, cables). Cables to ports that do not exist are left out.
+- Not yet: the patch editor with cables in the app, and Weave as a channel instrument. Those come next.
+
 ## 0.2.0-alpha.47
 
 Velocity tools.
