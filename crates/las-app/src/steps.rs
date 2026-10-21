@@ -177,6 +177,25 @@ pub fn fill_steps(notes: &[Note], steps: usize, every: usize) -> Vec<Edit> {
     out
 }
 
+/// The edits that rotate a channel's steps by `by` steps (negative is left) around a
+/// pattern of `steps` steps, as FL's shift left and right do.
+pub fn shift_steps(notes: &[Note], steps: usize, by: i64) -> Vec<Edit> {
+    let n = steps.max(1) as i64;
+    let tps = f64::from(TICKS_PER_STEP);
+    notes
+        .iter()
+        .filter(|x| x.step == Some(true))
+        .map(|x| {
+            let i = (x.pos / tps).round() as i64;
+            Edit::Move {
+                id: x.id.clone(),
+                pos: ((i + by).rem_euclid(n)) as f64 * tps,
+                key: x.key,
+            }
+        })
+        .collect()
+}
+
 /// A small rotary knob: drag up and down, double-click to reset. Returns
 /// (changed, gesture started).
 pub fn mini_knob(
@@ -410,6 +429,16 @@ pub fn draw(
                                     ui.close();
                                 }
                             }
+                            ui.separator();
+                            for (label, by) in [("Shift left", -1i64), ("Shift right", 1)] {
+                                if ui.button(label).clicked() {
+                                    out.notes.push((i, Edit::Begin));
+                                    for e in shift_steps(notes, steps, by) {
+                                        out.notes.push((i, e));
+                                    }
+                                    ui.close();
+                                }
+                            }
                             if ui.button("Clear steps").clicked() {
                                 out.notes.push((i, Edit::Begin));
                                 for e in fill_steps(notes, steps, 0) {
@@ -594,6 +623,17 @@ mod tests {
         assert_eq!(steps(&p), [0.0, 4.0, 8.0, 12.0]);
         run(&mut p, 2);
         assert_eq!(steps(&p).len(), 8);
+        run(&mut p, 4);
+        let notes = p.patterns[0].notes[&ch].clone();
+        for e in shift_steps(&notes, 16, -1) {
+            crate::roll::apply(&mut p, 0, &ch, &e);
+        }
+        assert_eq!(steps(&p), [3.0, 7.0, 11.0, 15.0]);
+        let notes = p.patterns[0].notes[&ch].clone();
+        for e in shift_steps(&notes, 16, 2) {
+            crate::roll::apply(&mut p, 0, &ch, &e);
+        }
+        assert_eq!(steps(&p), [1.0, 5.0, 9.0, 13.0]);
         run(&mut p, 0);
         assert!(steps(&p).is_empty());
         // the note from the piano roll is still there

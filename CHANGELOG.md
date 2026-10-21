@@ -2,6 +2,12 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.45
+
+Shift steps.
+
+- The step sequencer's Fill menu can shift a channel's steps one step left or right; steps that fall off one end come back at the other, as in FL.
+
 ## 0.2.0-alpha.44
 
 Fill steps.
