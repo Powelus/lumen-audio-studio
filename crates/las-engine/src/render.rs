@@ -219,10 +219,18 @@ impl Engine {
             return;
         };
         let edit = clip.audio.as_ref();
+        // normalize brings the source's peak to 0 dB, then the clip gain applies
+        let mut gain = plan.gain;
+        if edit.and_then(|e| e.normalize) == Some(true) {
+            let peak = f64::from(self.library.peak(&sample_id));
+            if peak > 1e-6 {
+                gain /= peak;
+            }
+        }
         let playback = ClipPlayback {
             buffer,
             rate: plan.rate,
-            gain: plan.gain,
+            gain,
             clip_pos: info.clip_pos,
             clip_len: info.clip_len,
             fade_in: info.fade_in,

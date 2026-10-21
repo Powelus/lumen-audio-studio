@@ -249,6 +249,9 @@ pub struct AudioClipEdit {
     pub pitch: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stretch: Option<Stretch>,
+    /// Bring the loudest peak of the source to 0 dB (before the clip gain).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalize: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
