@@ -37,6 +37,8 @@ pub struct Windows {
     /// The keyboard shortcuts window.
     pub keys: bool,
     pub history: bool,
+    pub settings: bool,
+    pub analyser: bool,
 }
 
 /// What the export window holds.
@@ -90,6 +92,8 @@ pub struct Shell {
     pub status: String,
     /// An action waiting for an answer about unsaved changes.
     pub pending: Option<crate::menus::Action>,
+    /// The project File > Open recent is to open.
+    pub recent_target: Option<String>,
     placed: bool,
 }
 
@@ -108,6 +112,8 @@ impl Shell {
                 about: false,
                 keys: false,
                 history: false,
+                settings: false,
+                analyser: false,
             },
             song_mode: true,
             metronome: false,
@@ -133,6 +139,7 @@ impl Shell {
             },
             status: "Ready".into(),
             pending: None,
+            recent_target: None,
             placed: false,
         }
     }
@@ -436,9 +443,6 @@ impl App {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
             logo(ui);
-            ui.menu_button(RichText::new("\u{2630}").size(16.0), |ui| {
-                ui.horizontal(|ui| self.main_menu(ui));
-            });
             ui.add_space(4.0);
             // transport
             let song = self.shell.song_mode;
@@ -540,13 +544,16 @@ impl App {
             }
             // windows
             let o = self.shell.open;
-            let labels = ["Rack", "Playlist", "Roll", "Mixer", "Synth", "Browser"];
+            let labels = [
+                "Rack", "Playlist", "Roll", "Mixer", "Synth", "Analyser", "Browser",
+            ];
             let act = [
                 o.rack,
                 o.playlist,
                 o.roll,
                 o.mixer,
                 o.synth,
+                o.analyser,
                 self.shell.browser,
             ];
             if let Some(i) = segmented(ui, &labels, &act) {
@@ -556,6 +563,7 @@ impl App {
                     2 => self.shell.open.roll = !o.roll,
                     3 => self.shell.open.mixer = !o.mixer,
                     4 => self.shell.open.synth = !o.synth,
+                    5 => self.shell.open.analyser = !o.analyser,
                     _ => self.shell.browser = !self.shell.browser,
                 }
             }
@@ -763,6 +771,8 @@ impl App {
             if hits.is_empty() {
                 ui.label(RichText::new("Nothing matches.").weak());
             }
+            ui.add_space(10.0);
+            self.folders_ui(ui, &query);
             ui.add_space(10.0);
             ui.label(
                 RichText::new("MY SAMPLES")
@@ -1043,6 +1053,8 @@ impl App {
         self.about_window(ctx);
         self.keys_window(ctx);
         self.history_window(ctx);
+        self.settings_window(ctx);
+        self.analyser_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
     }

@@ -4,7 +4,7 @@ members = ["crates/las-dsp", "crates/las-project", "crates/las-engine", "crates/
     "crates/las-testvst3", "crates/las-window"]
 
 [workspace.package]
-version = "0.2.0-alpha.50"
+version = "0.2.0-alpha.56"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Powelus/lumen-audio-studio"

@@ -111,6 +111,13 @@ pub struct App {
     pub(crate) synth_dirty: bool,
     /// Set when the user asked to quit and it is allowed.
     pub(crate) quit: bool,
+    /// The app's settings (Options > Settings).
+    pub(crate) settings: crate::settings::Settings,
+    /// The browser's listings of the user's sample folders.
+    pub(crate) folders: crate::settings::FolderCache,
+    pub(crate) autosaved: crate::settings::Autosave,
+    /// The analyser window's views, made when it first opens.
+    pub(crate) analyser: Option<crate::analyser::Analyser>,
     /// Where Weave's patch editor is scrolled and what it is doing.
     pub(crate) weave: crate::weave_ui::WeaveEditor,
     /// The hosted plugins' own windows that are open.
@@ -177,6 +184,10 @@ impl App {
             bound: None,
             synth_dirty: false,
             quit: false,
+            settings: crate::settings::Settings::load(),
+            folders: Default::default(),
+            autosaved: Default::default(),
+            analyser: None,
             weave: Default::default(),
             editors: Vec::new(),
         };
@@ -193,6 +204,11 @@ impl App {
             app.switch(Instrument::Facet);
         }
         app.new_project();
+        // the windows of last time, unless the command line chooses
+        let chooses = std::env::args().any(|a| a == "--open" || a == "--close" || a == "--add");
+        if !chooses {
+            app.restore_windows();
+        }
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
@@ -245,6 +261,8 @@ impl App {
                     "mixer" => o.mixer = true,
                     "synth" => o.synth = true,
                     "export" => o.export = true,
+                    "settings" => o.settings = true,
+                    "analyser" => o.analyser = true,
                     _ => {}
                 }
             }
@@ -260,6 +278,14 @@ impl App {
                     _ => {}
                 }
             }
+        }
+        // `--demo-song` opens the demo song; `--analyser-demo` plays it into the analyser
+        // silently, for screenshots on machines without sound
+        if std::env::args().any(|a| a == "--demo-song") {
+            app.open_demo();
+        }
+        if std::env::args().any(|a| a == "--analyser-demo") {
+            app.analyser_demo();
         }
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
@@ -1578,6 +1604,7 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.scale_ui(ctx);
         self.keys(ctx);
         self.shortcuts(ctx);
         let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));
@@ -1630,6 +1657,9 @@ impl eframe::App for App {
             a.collect_garbage();
         }
         self.serve_editors();
+        self.autosave();
+        self.feed_analyser();
+        self.remember_windows();
         // meters move on their own
         ctx.request_repaint_after(Duration::from_millis(16));
     }
@@ -1638,6 +1668,27 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.paint_theme(&ctx);
         let p = crate::theme::pal();
+        // the menu bar across the top, as a desktop program has it
+        egui::Panel::top("menubar")
+            .frame(
+                egui::Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
+            )
+            .show(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    self.main_menu(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("\u{2699} Settings")
+                            .on_hover_text("Folders, autosave and the size of everything")
+                            .clicked()
+                        {
+                            self.shell.open.settings = true;
+                        }
+                    });
+                });
+            });
         egui::Panel::top("top")
             .frame(
                 egui::Frame::new()

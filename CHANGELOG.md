@@ -17,6 +17,19 @@ Plugins in their own process.
 - Each CLAP or VST3 plugin now runs in its own small program, `lumen-plugin-host`, which ships next to the app. A plugin that crashes takes only that program with it: its channel or effect goes silent and the app, the project and the other plugins keep playing. A plugin that hangs for two seconds is treated the same way.
 - Notes, audio, parameters and state go to the plugin over a pipe, block by block. The result is the same as running it inside the app (a test checks this sample for sample with both test plugins).
 - Set `LUMEN_PLUGINS_IN_PROCESS=1` to run plugins inside the app as before. The plugin windows still open inside the app.
+## 0.2.0-alpha.52
+
+Settings: your own sample and plugin folders.
+
+- Options > Settings: add as many sample folders as you like; they show in the browser's Samples tab under My folders, as folders you can open. Click a WAV file to hear it, double click it to add it as a sampler channel. The search box searches them too. The + next to My folders adds one straight from the browser.
+- Plugin folders: add folders to look for CLAP and VST3 plugins in, besides the standard ones (which can be switched off). Rescan plugins now, or the Rescan button in the Plugins tab, uses them. A folder that is not there is shown struck through.
+- Autosave: a project with changes is copied to the app's autosave folder every 5 minutes (0 turns it off). Its own file is left alone.
+- File > Open recent lists the last ten projects opened or saved.
+- The windows that were open (browser, rack, playlist, piano roll, mixer) open again at the next start.
+- A menu bar across the top (File, Edit, Add, Patterns, View, Options, Help) with a Settings button at its right replaces the menu button in the top bar.
+- The app opens maximised and sizes everything to the screen: the layout fits a 1280 by 720 screen and grows on bigger ones (about 135% at 1080p, 180% at 1440p, 270% at 4K), drawn at the screen's real resolution so it stays sharp. Settings > Display sets your own size from 50% to 200% on top. `--size 1920x1080` opens the window at a given size instead.
+- Settings are kept in `settings.json` in the app's folder.
+- Analyser (the Analyser button in the top bar): what the master output sounds like, four ways. A heat map scrolls the spectrum by in time, low notes at the bottom and loud in bright yellow. A spectrum shows the level of each frequency with a slowly falling peak line. A goniometer draws left against right (a mono sound is an upright line, a wide one a cloud) with correlation and balance bars. Loudness shows momentary, short term and integrated LUFS, true peak, and left and right peak meters. The audio thread hands the output over without waiting or allocating.
 
 ## 0.2.0-alpha.49
 

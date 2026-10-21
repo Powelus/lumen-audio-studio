@@ -358,9 +358,7 @@ impl App {
                 .on_hover_text("Look for plugins again")
                 .clicked()
             {
-                std::thread::spawn(|| {
-                    las_host::rescan(&las_host::all_search_paths());
-                });
+                self.rescan_plugins();
             }
         });
         let list = las_host::known();
