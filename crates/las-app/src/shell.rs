@@ -441,9 +441,6 @@ impl App {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
             logo(ui);
-            ui.menu_button(RichText::new("\u{2630}").size(16.0), |ui| {
-                ui.horizontal(|ui| self.main_menu(ui));
-            });
             ui.add_space(4.0);
             // transport
             let song = self.shell.song_mode;

@@ -11,6 +11,8 @@ Settings: your own sample and plugin folders.
 - Autosave: a project with changes is copied to the app's autosave folder every 5 minutes (0 turns it off). Its own file is left alone.
 - File > Open recent lists the last ten projects opened or saved.
 - The windows that were open (browser, rack, playlist, piano roll, mixer) open again at the next start.
+- A menu bar across the top (File, Edit, Add, Patterns, View, Options, Help) with a Settings button at its right replaces the menu button in the top bar.
+- The app opens maximised and sizes everything to the screen: the layout fits a 1280 by 720 screen and grows on bigger ones (about 135% at 1080p, 180% at 1440p, 270% at 4K), drawn at the screen's real resolution so it stays sharp. Settings > Display sets your own size from 50% to 200% on top. `--size 1920x1080` opens the window at a given size instead.
 - Settings are kept in `settings.json` in the app's folder.
 
 ## 0.2.0-alpha.49

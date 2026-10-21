@@ -29,6 +29,8 @@ pub struct Settings {
     pub recent: Vec<String>,
     /// Which windows were open when the app closed.
     pub windows: Vec<String>,
+    /// The size of everything, in percent of what suits the screen (100 by default).
+    pub ui_scale: u32,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             autosave_minutes: 5,
             recent: Vec::new(),
             windows: Vec::new(),
+            ui_scale: 100,
         }
     }
 }
@@ -100,6 +103,17 @@ impl Settings {
         list.push(dir);
         true
     }
+}
+
+/// The layout is made for this many pixels; a screen of another size scales it.
+pub const DESIGN: (f32, f32) = (1280.0, 800.0);
+
+/// Pixels per point for a window of `physical` pixels: the layout of [`DESIGN`] fills
+/// it, never smaller than 90% (so 720p still fits) and never larger than 300%, times
+/// the user's own scale in percent.
+pub fn auto_scale(physical: (f32, f32), percent: u32) -> f32 {
+    let fit = (physical.0 / DESIGN.0).min(physical.1 / DESIGN.1);
+    (fit.clamp(0.9, 3.0) * percent.clamp(50, 200) as f32 / 100.0).max(0.5)
 }
 
 /// What a folder holds: its folders and its sound files, sorted by name.
@@ -199,6 +213,22 @@ pub fn autosave_dir() -> Option<PathBuf> {
 }
 
 impl App {
+    /// Size everything for the window: text and shapes are drawn at the real pixel
+    /// size, so a big screen gets a sharp, larger interface rather than a blown up one.
+    pub(crate) fn scale_ui(&mut self, ctx: &egui::Context) {
+        let ppp = ctx.pixels_per_point();
+        let size = ctx.content_rect().size() * ppp;
+        if size.x < 10.0 || size.y < 10.0 {
+            return;
+        }
+        let want = auto_scale((size.x, size.y), self.settings.ui_scale);
+        let native = ctx.native_pixels_per_point().unwrap_or(1.0);
+        let zoom = want / native;
+        if (ctx.zoom_factor() - zoom).abs() > 0.01 {
+            ctx.set_zoom_factor(zoom);
+        }
+    }
+
     /// Rescan the plugin folders, in the background.
     pub(crate) fn rescan_plugins(&self) {
         let dirs = self.settings.plugin_dirs();
@@ -312,6 +342,23 @@ impl App {
                 if ui.button("Rescan plugins now").clicked() {
                     rescan = true;
                 }
+                ui.add_space(10.0);
+                ui.heading("Display");
+                ui.horizontal(|ui| {
+                    ui.label("Size of everything");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut s.ui_scale, 50..=200)
+                                .suffix("%")
+                                .step_by(5.0),
+                        )
+                        .on_hover_text("100% fits the layout to the screen")
+                        .changed();
+                    if ui.small_button("Reset").clicked() {
+                        s.ui_scale = 100;
+                        changed = true;
+                    }
+                });
                 ui.add_space(10.0);
                 ui.heading("Saving");
                 ui.horizontal(|ui| {
@@ -523,6 +570,23 @@ mod tests {
         assert!(old.standard_plugin_folders);
         assert_eq!(old.autosave_minutes, 5);
         assert_eq!(old.recent, vec!["y.las"]);
+    }
+
+    #[test]
+    fn the_layout_scales_with_the_screen() {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        // 720p fits at 90%, the design size is 100%
+        assert!(near(auto_scale((1280.0, 720.0), 100), 0.9));
+        assert!(near(auto_scale((1280.0, 800.0), 100), 1.0));
+        // 1080p, 1440p and 4K grow, so nothing is tiny
+        assert!(near(auto_scale((1920.0, 1080.0), 100), 1.35));
+        assert!(near(auto_scale((2560.0, 1440.0), 100), 1.8));
+        assert!(near(auto_scale((3840.0, 2160.0), 100), 2.7));
+        // a narrow window is held by its width
+        assert!(near(auto_scale((1280.0, 1440.0), 100), 1.0));
+        // the user's own scale on top
+        assert!(near(auto_scale((1920.0, 1080.0), 120), 1.62));
+        assert!(near(auto_scale((1280.0, 720.0), 50), 0.5));
     }
 
     #[test]

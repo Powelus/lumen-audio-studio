@@ -1592,6 +1592,7 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.scale_ui(ctx);
         self.keys(ctx);
         self.shortcuts(ctx);
         let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));
@@ -1654,6 +1655,27 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.paint_theme(&ctx);
         let p = crate::theme::pal();
+        // the menu bar across the top, as a desktop program has it
+        egui::Panel::top("menubar")
+            .frame(
+                egui::Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
+            )
+            .show(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    self.main_menu(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("\u{2699} Settings")
+                            .on_hover_text("Folders, autosave and the size of everything")
+                            .clicked()
+                        {
+                            self.shell.open.settings = true;
+                        }
+                    });
+                });
+            });
         egui::Panel::top("top")
             .frame(
                 egui::Frame::new()

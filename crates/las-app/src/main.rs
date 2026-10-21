@@ -44,11 +44,21 @@ fn main() -> eframe::Result {
             las_host::rescan(&dirs);
         });
     }
+    // `--size 1920x1080` opens the window at that size (in screen pixels) instead of
+    // maximised, for screenshots and for systems that do not maximise
+    let size = std::env::args()
+        .skip_while(|a| a != "--size")
+        .nth(1)
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])
+        });
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Lumen Audio Studio")
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([960.0, 600.0]),
+            .with_inner_size(size.unwrap_or([1280.0, 800.0]))
+            .with_maximized(size.is_none())
+            .with_min_inner_size([1024.0, 576.0]),
         ..Default::default()
     };
     eframe::run_native(
