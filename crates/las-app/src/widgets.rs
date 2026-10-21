@@ -27,6 +27,18 @@ fn from_unit(t: f64, r: &RangeInclusive<f64>, log: bool) -> f64 {
     }
 }
 
+thread_local! {
+    static KNOB_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Draw the knobs that `add` makes at `scale` times their usual size.
+pub fn knob_scale<R>(scale: f32, add: impl FnOnce() -> R) -> R {
+    let before = KNOB_SCALE.with(|c| c.replace(scale));
+    let r = add();
+    KNOB_SCALE.with(|c| c.set(before));
+    r
+}
+
 /// A rotary knob. Drag up and down to change it (hold Shift for fine steps),
 /// double-click to reset. Returns true when the value changed.
 pub fn knob(
@@ -60,8 +72,45 @@ pub fn knob_mapped(
     label: &str,
     show: &dyn Fn(f64) -> String,
 ) -> bool {
+    knob_scaled(ui, value, to_norm, from_norm, default, label, show, 1.0)
+}
+
+/// A larger knob, for the main controls of a plugin face.
+pub fn big_knob(
+    ui: &mut Ui,
+    value: &mut f64,
+    range: RangeInclusive<f64>,
+    default: f64,
+    label: &str,
+    show: &dyn Fn(f64) -> String,
+) -> bool {
+    knob_scaled(
+        ui,
+        value,
+        &|v| to_unit(v, &range, false),
+        &|t| from_unit(t, &range, false),
+        default,
+        label,
+        show,
+        1.45,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn knob_scaled(
+    ui: &mut Ui,
+    value: &mut f64,
+    to_norm: &dyn Fn(f64) -> f64,
+    from_norm: &dyn Fn(f64) -> f64,
+    default: f64,
+    label: &str,
+    show: &dyn Fn(f64) -> String,
+    k: f32,
+) -> bool {
     let skin = crate::skin::current();
-    let size = vec2(54.0, 76.0);
+    // the knob's own size, times the size of the knobs of the panel drawing it
+    let k = k * KNOB_SCALE.with(std::cell::Cell::get);
+    let size = vec2(54.0 * k.max(0.8), 30.0 + 46.0 * k);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut changed = false;
     if resp.double_clicked() {
@@ -75,8 +124,8 @@ pub fn knob_mapped(
         changed = true;
     }
     let painter = ui.painter_at(rect);
-    let centre = pos2(rect.center().x, rect.top() + 24.0);
-    let radius = 18.0;
+    let centre = pos2(rect.center().x, rect.top() + 24.0 * k);
+    let radius = 18.0 * k;
     let (body, track, accent, text) = match skin {
         Some(s) => (s.knob, s.track, s.accent, s.dim),
         None => (
@@ -86,7 +135,7 @@ pub fn knob_mapped(
             crate::theme::pal().text2,
         ),
     };
-    if skin.is_some() {
+    if skin.is_some_and(|s| !s.flat) {
         // a raised cap with a soft shadow, like a hardware knob
         painter.circle_filled(
             centre + vec2(0.0, 2.0),
@@ -120,7 +169,7 @@ pub fn knob_mapped(
         } else {
             accent
         };
-        if skin.is_some() {
+        if skin.is_some_and(|s| !s.flat) {
             // the lit arc glows on a plugin face
             painter.add(Shape::line(
                 arc(0.0, t, radius),
@@ -132,7 +181,7 @@ pub fn knob_mapped(
     let a = a0 + sweep * t;
     painter.line_segment(
         [
-            pos2(centre.x + 6.0 * a.cos(), centre.y + 6.0 * a.sin()),
+            pos2(centre.x + 6.0 * k * a.cos(), centre.y + 6.0 * k * a.sin()),
             pos2(
                 centre.x + (radius - 3.0) * a.cos(),
                 centre.y + (radius - 3.0) * a.sin(),
@@ -141,17 +190,17 @@ pub fn knob_mapped(
         Stroke::new(2.0, Color32::WHITE),
     );
     painter.text(
-        pos2(rect.center().x, rect.top() + 49.0),
+        pos2(rect.center().x, rect.top() + 49.0 * k + (1.0 - k) * 4.0),
         Align2::CENTER_CENTER,
         show(*value),
-        FontId::proportional(11.0),
+        FontId::proportional(11.0 * k.sqrt()),
         text,
     );
     painter.text(
-        pos2(rect.center().x, rect.top() + 64.0),
+        pos2(rect.center().x, rect.top() + 49.0 * k + 15.0),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(11.0),
+        FontId::proportional(11.0 * k.sqrt()),
         skin.map_or(crate::theme::pal().muted, |s| s.text),
     );
     resp.on_hover_text(format!(

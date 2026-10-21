@@ -17,7 +17,7 @@ pub struct Preset {
     /// Only what differs from the bank's init patch.
     pub patch: Value,
     /// The rest of the preset's state: effects rack, arpeggiator, and for Nebula
-    /// the layers and macros. Not used by the engines yet.
+    /// the layers, macros and effects.
     pub state: Value,
 }
 
@@ -104,7 +104,14 @@ pub fn bank(id: &str) -> Option<&'static Bank> {
         "triosc" => bank!("triosc.json"),
         "facet" => bank!("facet.json"),
         "mist" => bank!("mist.json"),
-        "nebula" => bank!("nebula.json"),
+        "nebula" => {
+            static CELL: OnceLock<Bank> = OnceLock::new();
+            CELL.get_or_init(|| {
+                let mut b = parse(include_str!("../presets/nebula.json"));
+                b.presets.extend(crate::nebula_gen::presets());
+                b
+            })
+        }
         _ => return None,
     })
 }
@@ -123,8 +130,10 @@ mod tests {
             assert!(b.init.is_object());
             total += b.presets.len();
         }
-        // the web version ships about 440 factory presets (Nebula 230 of them)
+        // the web version ships about 440 factory presets (Nebula 230 of them),
+        // and Nebula has its generated families on top
         assert!(total >= 440, "{total}");
+        assert!(bank("nebula").unwrap().presets.len() >= 300);
         assert!(bank("nope").is_none());
     }
 
@@ -149,5 +158,47 @@ mod tests {
         // untouched values come from the init patch
         assert_eq!(p["filterRouting"], "parallel");
         assert!(b.categories().contains(&"Lead"));
+    }
+
+    #[test]
+    fn the_faces_of_the_polaris_engine_have_their_own_presets_that_all_play() {
+        use crate::engine::Event;
+        for id in ["monolith", "zenith", "triosc"] {
+            let b = bank(id).unwrap();
+            assert!(b.presets.len() > 30, "{id} has {}", b.presets.len());
+            for i in 0..b.presets.len() {
+                let name = &b.presets[i].name;
+                let mut e = crate::synth::synth_engine(48000.0, 1);
+                e.set_patch(&b.patch(i).unwrap())
+                    .unwrap_or_else(|err| panic!("{id} {name}: {err:?}"));
+                e.queue(&[
+                    Event::On {
+                        time: 0.0,
+                        key: 60.0,
+                        vel: 1.0,
+                        fine: 0.0,
+                        pan: 0.0,
+                    },
+                    Event::Off {
+                        time: 0.6,
+                        key: 60.0,
+                    },
+                ]);
+                let n = 48000;
+                let (mut l, mut r) = (vec![0f32; n], vec![0f32; n]);
+                let mut at = 0;
+                while at < n {
+                    let end = (at + 128).min(n);
+                    e.process(&mut l[at..end], &mut r[at..end], at as f64 / 48000.0);
+                    at = end;
+                }
+                assert!(
+                    l.iter().chain(&r).all(|x| x.is_finite()),
+                    "{id} {name} is not finite"
+                );
+                let peak = l.iter().chain(&r).fold(0f32, |m, x| m.max(x.abs()));
+                assert!(peak > 0.01, "{id} {name} is silent ({peak})");
+            }
+        }
     }
 }

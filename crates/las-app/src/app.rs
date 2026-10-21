@@ -81,6 +81,8 @@ pub struct App {
     /// The preset lists (Init, factory, user) and the one each instrument is on.
     pub(crate) entries: [Vec<Entry>; 3],
     pub(crate) presets: [usize; 3],
+    /// The bank Polaris's list was made from (each face of the engine has its own).
+    pub(crate) face_bank: String,
     /// What is typed in the preset search box, and the name for a new preset.
     pub(crate) search: String,
     pub(crate) new_name: String,
@@ -111,6 +113,13 @@ pub struct App {
     pub(crate) synth_dirty: bool,
     /// Set when the user asked to quit and it is allowed.
     pub(crate) quit: bool,
+    /// The app's settings (Options > Settings).
+    pub(crate) settings: crate::settings::Settings,
+    /// The browser's listings of the user's sample folders.
+    pub(crate) folders: crate::settings::FolderCache,
+    pub(crate) autosaved: crate::settings::Autosave,
+    /// The analyser window's views, made when it first opens.
+    pub(crate) analyser: Option<crate::analyser::Analyser>,
     /// Where Weave's patch editor is scrolled and what it is doing.
     pub(crate) weave: crate::weave_ui::WeaveEditor,
     /// The hosted plugins' own windows that are open.
@@ -160,6 +169,7 @@ impl App {
                 presets::entries(bank_id(Instrument::Polaris), &full_defaults()[2]),
             ],
             presets: [0, 0, 0],
+            face_bank: "polaris".into(),
             search: String::new(),
             new_name: String::new(),
             tab: Tab::Oscillators,
@@ -177,6 +187,10 @@ impl App {
             bound: None,
             synth_dirty: false,
             quit: false,
+            settings: crate::settings::Settings::load(),
+            folders: Default::default(),
+            autosaved: Default::default(),
+            analyser: None,
             weave: Default::default(),
             editors: Vec::new(),
         };
@@ -193,6 +207,11 @@ impl App {
             app.switch(Instrument::Facet);
         }
         app.new_project();
+        // the windows of last time, unless the command line chooses
+        let chooses = std::env::args().any(|a| a == "--open" || a == "--close" || a == "--add");
+        if !chooses {
+            app.restore_windows();
+        }
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
@@ -245,6 +264,8 @@ impl App {
                     "mixer" => o.mixer = true,
                     "synth" => o.synth = true,
                     "export" => o.export = true,
+                    "settings" => o.settings = true,
+                    "analyser" => o.analyser = true,
                     _ => {}
                 }
             }
@@ -260,6 +281,14 @@ impl App {
                     _ => {}
                 }
             }
+        }
+        // `--demo-song` opens the demo song; `--analyser-demo` plays it into the analyser
+        // silently, for screenshots on machines without sound
+        if std::env::args().any(|a| a == "--demo-song") {
+            app.open_demo();
+        }
+        if std::env::args().any(|a| a == "--analyser-demo") {
+            app.analyser_demo();
         }
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
@@ -312,7 +341,7 @@ impl App {
             }
         };
         self.presets[k] = at;
-        self.error = presets::save_user(bank_id(self.inst), &self.entries[k]).err();
+        self.error = presets::save_user(&self.bank_name(), &self.entries[k]).err();
     }
 
     fn delete_preset(&mut self, i: usize) {
@@ -322,7 +351,7 @@ impl App {
             if self.presets[k] >= i {
                 self.presets[k] = self.presets[k].saturating_sub(1);
             }
-            self.error = presets::save_user(bank_id(self.inst), &self.entries[k]).err();
+            self.error = presets::save_user(&self.bank_name(), &self.entries[k]).err();
         }
     }
 
@@ -390,21 +419,21 @@ impl App {
         }
     }
 
-    fn num(&self, path: &str) -> f64 {
+    pub(crate) fn num(&self, path: &str) -> f64 {
         self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_f64)
             .unwrap_or(0.0)
     }
 
-    fn set(&mut self, path: &str, v: Value) {
+    pub(crate) fn set(&mut self, path: &str, v: Value) {
         if let Some(t) = self.patches[index(self.inst)].pointer_mut(path) {
             *t = v;
         }
     }
 
     /// A knob bound to one number of the patch. Returns true on change.
-    fn knob(
+    pub(crate) fn knob(
         &mut self,
         ui: &mut Ui,
         path: &str,
@@ -425,7 +454,7 @@ impl App {
         changed
     }
 
-    fn toggle(&mut self, ui: &mut Ui, path: &str, label: &str) -> bool {
+    pub(crate) fn toggle(&mut self, ui: &mut Ui, path: &str, label: &str) -> bool {
         let mut on = self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_bool)
@@ -437,7 +466,13 @@ impl App {
         changed
     }
 
-    fn choice(&mut self, ui: &mut Ui, path: &str, id: &str, options: &[(&str, &str)]) -> bool {
+    pub(crate) fn choice(
+        &mut self,
+        ui: &mut Ui,
+        path: &str,
+        id: &str,
+        options: &[(&str, &str)],
+    ) -> bool {
         let cur = self.patches[index(self.inst)]
             .pointer(path)
             .and_then(Value::as_str)
@@ -498,8 +533,39 @@ impl App {
         c
     }
 
+    /// The preset bank of what the window shows: the face's own bank for the
+    /// instruments built on the Polaris engine.
+    pub(crate) fn bank_name(&self) -> String {
+        let face = self.face_id();
+        if self.inst == Instrument::Polaris
+            && las_dsp::presets::BANK_IDS.contains(&face.as_str())
+            && crate::inst::panel_for(&face) == Some(Instrument::Polaris)
+        {
+            return face;
+        }
+        bank_id(self.inst).to_string()
+    }
+
+    /// Make Polaris's preset list the one of the face being shown.
+    pub(crate) fn sync_bank(&mut self) {
+        let name = self.bank_name();
+        if self.inst != Instrument::Polaris || name == self.face_bank {
+            return;
+        }
+        let mut defaults = full_defaults()[2].clone();
+        if name != "polaris" {
+            if let Some(b) = las_dsp::presets::bank(&name) {
+                defaults = merge_patch(&defaults, &b.init);
+            }
+        }
+        self.entries[2] = presets::entries(&name, &defaults);
+        self.presets[2] = 0;
+        self.face_bank = name;
+    }
+
     /// Previous and next buttons and a searchable list of the presets.
     pub(crate) fn preset_picker(&mut self, ui: &mut Ui) {
+        self.sync_bank();
         let inst = self.inst;
         let k = index(inst);
         let count = self.entries[k].len();
@@ -1578,6 +1644,7 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.scale_ui(ctx);
         self.keys(ctx);
         self.shortcuts(ctx);
         let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));
@@ -1630,6 +1697,9 @@ impl eframe::App for App {
             a.collect_garbage();
         }
         self.serve_editors();
+        self.autosave();
+        self.feed_analyser();
+        self.remember_windows();
         // meters move on their own
         ctx.request_repaint_after(Duration::from_millis(16));
     }
@@ -1638,6 +1708,27 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.paint_theme(&ctx);
         let p = crate::theme::pal();
+        // the menu bar across the top, as a desktop program has it
+        egui::Panel::top("menubar")
+            .frame(
+                egui::Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
+            )
+            .show(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    self.main_menu(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("\u{2699} Settings")
+                            .on_hover_text("Folders, autosave and the size of everything")
+                            .clicked()
+                        {
+                            self.shell.open.settings = true;
+                        }
+                    });
+                });
+            });
         egui::Panel::top("top")
             .frame(
                 egui::Frame::new()

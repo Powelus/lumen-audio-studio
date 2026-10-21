@@ -17,20 +17,47 @@ use std::f64::consts::PI;
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
-    /// The voice's note: pitch (octaves from middle C), gate and velocity.
+    /// The voice's note: pitch (octaves from middle C), gate, velocity and the
+    /// performance controls.
     Keys,
+    /// An oscillator with unison, sync, FM and a wave that can morph.
     Osc,
+    /// A sine operator with a frequency ratio and feedback, for FM sounds.
+    Fm,
     Noise,
+    /// Four knobs whose values are outputs, to be cabled anywhere and automated.
+    Macro,
     Lfo,
     /// An ADSR envelope that follows its gate.
     Env,
+    /// Sample and hold: takes its input at a rate or on a trigger and keeps it.
+    Hold,
+    /// An eight step sequencer.
+    Seq,
+    /// Makes a signal move no faster than its rise and fall times.
+    Slew,
     Filter,
+    /// A four pole ladder lowpass with drive.
+    Ladder,
+    /// Wavefolder and distortion.
+    Shaper,
+    /// Ring modulator: one input times the other.
+    Ring,
+    Delay,
+    Chorus,
+    Reverb,
     /// Scales its input by a control signal.
     Vca,
     /// Four inputs with a level each.
     Mix,
     /// `a * scale + b + offset`.
     Math,
+    /// Snaps a pitch (in octaves) to the semitones of a scale.
+    Quant,
+    /// 1 while `a` is above `b` plus a threshold, else 0.
+    Compare,
+    /// Places a mono signal between left and right.
+    Pan,
     /// What the synth plays: left and right (right follows left when it has no cable).
     Output,
 }
@@ -78,6 +105,18 @@ const fn pstep(name: &'static str, steps: u32, default: f64) -> ParamSpec {
         default,
         log: false,
         steps,
+    }
+}
+
+/// A whole number from `min` to `max`.
+const fn pint(name: &'static str, min: u32, max: u32, default: f64) -> ParamSpec {
+    ParamSpec {
+        name,
+        min: min as f64,
+        max: max as f64,
+        default,
+        log: false,
+        steps: max - min + 1,
     }
 }
 
@@ -132,24 +171,55 @@ pub struct Spec {
     pub outputs: &'static [&'static str],
 }
 
-/// The choices of an oscillator's or an LFO's `wave`.
+/// The basic waves.
 pub const WAVES: [&str; 4] = ["sine", "triangle", "saw", "square"];
+/// The choices of an oscillator's `wave`: the basic waves, or `morph` between them.
+pub const OSC_WAVES: [&str; 5] = ["sine", "triangle", "saw", "square", "morph"];
+/// The choices of an LFO's `wave`: the basic waves and a random step.
+pub const LFO_WAVES: [&str; 5] = ["sine", "triangle", "saw", "square", "random"];
 /// The choices of a filter's `mode`.
 pub const FILTER_MODES: [&str; 3] = ["lowpass", "bandpass", "highpass"];
+/// The choices of a ladder's `mode`.
+pub const LADDER_MODES: [&str; 2] = ["24 dB", "12 dB"];
+/// The choices of a shaper's `shape`.
+pub const SHAPES: [&str; 3] = ["tanh", "fold", "clip"];
+/// The choices of a quantizer's `scale`.
+pub const SCALES: [&str; 4] = ["chromatic", "major", "minor", "pentatonic"];
+/// The notes of each scale, as a bit per semitone above the root.
+const SCALE_BITS: [u16; 4] = [0xfff, 0xab5, 0x5ad, 0x295];
+/// The names of the module categories, in the order [`Kind::category`] counts them.
+pub const CATEGORIES: [&str; 5] = ["Sources", "Modulators", "Filters", "Effects", "Utilities"];
 
 static KEYS: Spec = Spec {
     inputs: &[],
-    params: &[],
-    outputs: &["pitch", "gate", "velocity"],
+    params: &[p("glide", 0.0, 2.0, 0.0), p("bend_range", 0.0, 24.0, 2.0)],
+    outputs: &["pitch", "gate", "velocity", "wheel", "bend", "pressure"],
 };
 
 static OSC: Spec = Spec {
-    inputs: &[i("pitch"), i("fm")],
+    inputs: &[i("pitch"), i("fm"), i("sync"), i("pfm")],
     params: &[
-        pstep("wave", 4, 2.0),
+        pstep("wave", 5, 2.0),
         p("tune", -24.0, 24.0, 0.0),
         p("fine", -100.0, 100.0, 0.0),
         p("pw", 0.05, 0.95, 0.5),
+        p("level", 0.0, 1.0, 1.0),
+        p("morph", 0.0, 3.0, 0.0),
+        pint("voices", 1, 8, 1.0),
+        p("detune", 0.0, 100.0, 20.0),
+        p("spread", 0.0, 1.0, 0.5),
+        p("phase", 0.0, 1.0, 0.0),
+        pstep("retrig", 2, 1.0),
+    ],
+    outputs: &["out", "right"],
+};
+
+static FM: Spec = Spec {
+    inputs: &[i("pitch"), i("pm")],
+    params: &[
+        plog("ratio", 0.125, 16.0, 1.0),
+        p("tune", -24.0, 24.0, 0.0),
+        p("feedback", 0.0, 1.0, 0.0),
         p("level", 0.0, 1.0, 1.0),
     ],
     outputs: &["out"],
@@ -161,12 +231,25 @@ static NOISE: Spec = Spec {
     outputs: &["out"],
 };
 
+static MACRO: Spec = Spec {
+    inputs: &[],
+    params: &[
+        p("knob_1", 0.0, 1.0, 0.0),
+        p("knob_2", 0.0, 1.0, 0.0),
+        p("knob_3", 0.0, 1.0, 0.0),
+        p("knob_4", 0.0, 1.0, 0.0),
+    ],
+    outputs: &["out_1", "out_2", "out_3", "out_4"],
+};
+
 static LFO: Spec = Spec {
     inputs: &[],
     params: &[
         plog("rate", 0.01, 50.0, 2.0),
-        pstep("wave", 4, 0.0),
+        pstep("wave", 5, 0.0),
         p("depth", 0.0, 1.0, 1.0),
+        p("phase", 0.0, 1.0, 0.0),
+        pstep("retrig", 2, 1.0),
     ],
     outputs: &["out", "uni"],
 };
@@ -178,6 +261,41 @@ static ENV: Spec = Spec {
         plog("decay", 0.001, 10.0, 0.3),
         p("sustain", 0.0, 1.0, 0.7),
         plog("release", 0.001, 10.0, 0.3),
+        p("curve", -1.0, 1.0, 0.0),
+        pstep("loop", 2, 0.0),
+    ],
+    outputs: &["out"],
+};
+
+static HOLD: Spec = Spec {
+    inputs: &[i("in"), i("trig")],
+    params: &[plog("rate", 0.05, 200.0, 8.0)],
+    outputs: &["out"],
+};
+
+static SEQ: Spec = Spec {
+    inputs: &[i("clock"), i("reset")],
+    params: &[
+        plog("rate", 0.1, 50.0, 4.0),
+        pint("length", 1, 8, 8.0),
+        p("gate_len", 0.05, 1.0, 0.5),
+        p("step_1", -1.0, 1.0, 0.0),
+        p("step_2", -1.0, 1.0, 0.0),
+        p("step_3", -1.0, 1.0, 0.0),
+        p("step_4", -1.0, 1.0, 0.0),
+        p("step_5", -1.0, 1.0, 0.0),
+        p("step_6", -1.0, 1.0, 0.0),
+        p("step_7", -1.0, 1.0, 0.0),
+        p("step_8", -1.0, 1.0, 0.0),
+    ],
+    outputs: &["out", "gate"],
+};
+
+static SLEW: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[
+        plog("rise", 0.001, 10.0, 0.05),
+        plog("fall", 0.001, 10.0, 0.05),
     ],
     outputs: &["out"],
 };
@@ -190,6 +308,64 @@ static FILTER: Spec = Spec {
         p("res", 0.0, 1.0, 0.2),
     ],
     outputs: &["out"],
+};
+
+static LADDER: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[
+        plog("cutoff", 20.0, 20_000.0, 1_000.0),
+        p("res", 0.0, 1.0, 0.3),
+        plog("drive", 1.0, 10.0, 1.0),
+        pstep("mode", 2, 0.0),
+    ],
+    outputs: &["out"],
+};
+
+static SHAPER: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[
+        plog("drive", 1.0, 40.0, 2.0),
+        pstep("shape", 3, 0.0),
+        p("mix", 0.0, 1.0, 1.0),
+    ],
+    outputs: &["out"],
+};
+
+static RING: Spec = Spec {
+    inputs: &[i("a"), i("b")],
+    params: &[p("mix", 0.0, 1.0, 1.0)],
+    outputs: &["out"],
+};
+
+static DELAY: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[
+        plog("time", 0.001, 2.0, 0.3),
+        p("feedback", 0.0, 0.98, 0.4),
+        p("mix", 0.0, 1.0, 0.3),
+        p("tone", 0.0, 1.0, 0.7),
+    ],
+    outputs: &["out"],
+};
+
+static CHORUS: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[
+        plog("rate", 0.05, 8.0, 0.6),
+        p("depth", 0.0, 1.0, 0.5),
+        p("mix", 0.0, 1.0, 0.5),
+    ],
+    outputs: &["left", "right"],
+};
+
+static REVERB: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[
+        p("size", 0.0, 1.0, 0.6),
+        p("damp", 0.0, 1.0, 0.4),
+        p("mix", 0.0, 1.0, 0.3),
+    ],
+    outputs: &["left", "right"],
 };
 
 static VCA: Spec = Spec {
@@ -221,23 +397,55 @@ static MATH: Spec = Spec {
     outputs: &["out"],
 };
 
+static QUANT: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[pstep("scale", 4, 0.0)],
+    outputs: &["out"],
+};
+
+static COMPARE: Spec = Spec {
+    inputs: &[i("a"), i("b")],
+    params: &[p("threshold", -1.0, 1.0, 0.0)],
+    outputs: &["out", "inv"],
+};
+
+static PAN: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[p("pan", -1.0, 1.0, 0.0)],
+    outputs: &["left", "right"],
+};
+
 static OUTPUT: Spec = Spec {
     inputs: &[i("left"), i("right")],
-    params: &[p("level", 0.0, 1.0, 0.8)],
+    params: &[p("level", 0.0, 1.0, 0.8), p("width", 0.0, 2.0, 1.0)],
     outputs: &[],
 };
 
 impl Kind {
-    pub const ALL: [Kind; 10] = [
+    pub const ALL: [Kind; 24] = [
         Kind::Keys,
         Kind::Osc,
+        Kind::Fm,
         Kind::Noise,
+        Kind::Macro,
         Kind::Lfo,
         Kind::Env,
+        Kind::Hold,
+        Kind::Seq,
+        Kind::Slew,
         Kind::Filter,
+        Kind::Ladder,
+        Kind::Shaper,
+        Kind::Ring,
+        Kind::Delay,
+        Kind::Chorus,
+        Kind::Reverb,
         Kind::Vca,
         Kind::Mix,
         Kind::Math,
+        Kind::Quant,
+        Kind::Compare,
+        Kind::Pan,
         Kind::Output,
     ];
 
@@ -245,15 +453,62 @@ impl Kind {
         match self {
             Kind::Keys => &KEYS,
             Kind::Osc => &OSC,
+            Kind::Fm => &FM,
             Kind::Noise => &NOISE,
+            Kind::Macro => &MACRO,
             Kind::Lfo => &LFO,
             Kind::Env => &ENV,
+            Kind::Hold => &HOLD,
+            Kind::Seq => &SEQ,
+            Kind::Slew => &SLEW,
             Kind::Filter => &FILTER,
+            Kind::Ladder => &LADDER,
+            Kind::Shaper => &SHAPER,
+            Kind::Ring => &RING,
+            Kind::Delay => &DELAY,
+            Kind::Chorus => &CHORUS,
+            Kind::Reverb => &REVERB,
             Kind::Vca => &VCA,
             Kind::Mix => &MIX,
             Kind::Math => &MATH,
+            Kind::Quant => &QUANT,
+            Kind::Compare => &COMPARE,
+            Kind::Pan => &PAN,
             Kind::Output => &OUTPUT,
         }
+    }
+
+    /// Which of [`CATEGORIES`] the kind is in.
+    pub fn category(self) -> usize {
+        match self {
+            Kind::Keys | Kind::Osc | Kind::Fm | Kind::Noise | Kind::Macro => 0,
+            Kind::Lfo | Kind::Env | Kind::Hold | Kind::Seq | Kind::Slew => 1,
+            Kind::Filter | Kind::Ladder => 2,
+            Kind::Shaper | Kind::Ring | Kind::Delay | Kind::Chorus | Kind::Reverb => 3,
+            _ => 4,
+        }
+    }
+
+    /// The names of a stepped parameter's choices (none for a plain number).
+    pub fn choices(self, param: &str) -> Option<&'static [&'static str]> {
+        Some(match (self, param) {
+            (Kind::Osc, "wave") => &OSC_WAVES,
+            (Kind::Lfo, "wave") => &LFO_WAVES,
+            (Kind::Filter, "mode") => &FILTER_MODES,
+            (Kind::Ladder, "mode") => &LADDER_MODES,
+            (Kind::Shaper, "shape") => &SHAPES,
+            (Kind::Quant, "scale") => &SCALES,
+            (Kind::Osc, "retrig") => &["free", "reset"],
+            (Kind::Lfo, "retrig") => &["free", "on note"],
+            (Kind::Env, "loop") => &["off", "on"],
+            _ => return None,
+        })
+    }
+
+    /// The rows a module has in the editor: its outputs, inputs and parameters.
+    pub fn rows(self) -> usize {
+        let s = self.spec();
+        s.outputs.len() + s.inputs.len() + s.params.len()
     }
 
     /// The input a cable can reach: a plain input, then the parameters.
@@ -345,7 +600,7 @@ impl Cable {
     }
 }
 
-/// A whole patch: modules, cables and how many voices play.
+/// A whole patch: modules, cables, how many voices play and how they play.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Patch {
     #[serde(default)]
@@ -354,6 +609,19 @@ pub struct Patch {
     pub cables: Vec<Cable>,
     #[serde(default = "voices")]
     pub voices: usize,
+    /// One voice only, which takes the newest key held.
+    #[serde(default)]
+    pub mono: bool,
+    /// In mono, a key pressed while another is held moves the pitch without starting
+    /// the envelopes again.
+    #[serde(default)]
+    pub legato: bool,
+    /// In mono, how long the pitch takes to slide to a new key, in seconds.
+    #[serde(default)]
+    pub glide: f64,
+    /// The level of the whole patch.
+    #[serde(default = "one")]
+    pub volume: f64,
 }
 
 fn voices() -> usize {
@@ -372,13 +640,15 @@ pub fn split_param_id(id: u32) -> (u32, usize) {
 
 /// The most voices a patch can have.
 pub const MAX_VOICES: usize = 32;
+/// The longest glide, in seconds.
+pub const MAX_GLIDE: f64 = 2.0;
 
 impl Default for Patch {
     /// Keys into a saw, through a lowpass and an amp that an envelope opens, which also
     /// moves the cutoff.
     fn default() -> Self {
-        Self {
-            nodes: vec![
+        let mut p = Self::new(
+            vec![
                 Node::new(1, Kind::Keys, [20.0, 140.0]),
                 Node::new(2, Kind::Osc, [240.0, 20.0]),
                 Node::new(3, Kind::Env, [240.0, 300.0]),
@@ -386,7 +656,7 @@ impl Default for Patch {
                 Node::new(5, Kind::Vca, [680.0, 140.0]),
                 Node::new(6, Kind::Output, [900.0, 140.0]),
             ],
-            cables: vec![
+            vec![
                 Cable::new(1, "pitch", 2, "pitch", 1.0),
                 Cable::new(1, "gate", 3, "gate", 1.0),
                 Cable::new(2, "out", 4, "in", 1.0),
@@ -395,12 +665,27 @@ impl Default for Patch {
                 Cable::new(3, "out", 5, "cv", 1.0),
                 Cable::new(5, "out", 6, "left", 1.0),
             ],
-            voices: voices(),
-        }
+            voices(),
+        );
+        p.arrange();
+        p
     }
 }
 
 impl Patch {
+    /// A patch of these modules and cables, played polyphonically at full volume.
+    pub fn new(nodes: Vec<Node>, cables: Vec<Cable>, voices: usize) -> Self {
+        Self {
+            nodes,
+            cables,
+            voices,
+            mono: false,
+            legato: false,
+            glide: 0.0,
+            volume: 1.0,
+        }
+    }
+
     pub fn from_json(v: &serde_json::Value) -> Result<Self, String> {
         serde_json::from_value(v.clone()).map_err(|e| e.to_string())
     }
@@ -425,41 +710,96 @@ impl Patch {
         };
         a.kind.output_index(&c.output).is_some() && b.kind.input_index(&c.input).is_some()
     }
+
+    /// Place the modules in columns, each after the ones that feed it.
+    pub fn arrange(&mut self) {
+        let n = self.nodes.len();
+        let index = |id: u32| self.nodes.iter().position(|x| x.id == id);
+        let links: Vec<(usize, usize)> = self
+            .cables
+            .iter()
+            .filter(|c| self.is_valid(c))
+            .filter_map(|c| Some((index(c.from)?, index(c.to)?)))
+            .filter(|(a, b)| a != b)
+            .collect();
+        let mut col = vec![0usize; n];
+        // a loop stops growing at the number of modules
+        for _ in 0..n {
+            for &(a, b) in &links {
+                if col[b] < col[a] + 1 && col[a] + 1 < n {
+                    col[b] = col[a] + 1;
+                }
+            }
+        }
+        // a tall column goes on in another one beside it
+        const TALL: f32 = 760.0;
+        let mut x = 20.0;
+        for column in 0..n {
+            let mut y = 20.0;
+            let mut used = false;
+            for (k, node) in self.nodes.iter_mut().enumerate() {
+                if col[k] != column {
+                    continue;
+                }
+                let h = 50.0 + node.kind.rows() as f32 * 20.0;
+                if y > 20.0 && y + h > TALL {
+                    x += 220.0;
+                    y = 20.0;
+                }
+                node.pos = [x, y];
+                y += h;
+                used = true;
+            }
+            if used {
+                x += 220.0;
+            }
+        }
+    }
+}
+
+/// A module with some parameters set, for the factory patches.
+fn m(id: u32, kind: Kind, params: &[(&str, f64)]) -> Node {
+    params
+        .iter()
+        .fold(Node::new(id, kind, [0.0; 2]), |n, &(k, v)| n.with(k, v))
+}
+
+/// A factory patch: its modules placed in columns.
+fn built(voices: usize, nodes: Vec<Node>, cables: Vec<Cable>) -> Patch {
+    let mut p = Patch::new(nodes, cables, voices);
+    p.arrange();
+    p
+}
+
+/// The same patch played by one voice that glides.
+fn mono(mut p: Patch, glide: f64, legato: bool) -> Patch {
+    p.mono = true;
+    p.voices = 1;
+    p.glide = glide;
+    p.legato = legato;
+    p
 }
 
 /// The factory patches: a name and the patch.
 pub fn factory() -> Vec<(&'static str, Patch)> {
-    let n = Node::new;
+    use Kind::*;
     let c = Cable::new;
-    let keys_env = |extra_nodes: Vec<Node>, extra: Vec<Cable>, voices: usize| {
-        let mut p = Patch {
-            nodes: extra_nodes,
-            cables: extra,
-            voices,
-        };
-        p.nodes.sort_by_key(|x| x.id);
-        p
-    };
     vec![
-        ("Saw lead", Patch::default()),
+        // ----- bass
         (
             "Wobble bass",
-            keys_env(
+            built(
+                4,
                 vec![
-                    n(1, Kind::Keys, [20.0, 140.0]),
-                    n(2, Kind::Osc, [240.0, 20.0]).with("tune", -12.0),
-                    n(3, Kind::Osc, [240.0, 300.0])
-                        .with("wave", 3.0)
-                        .with("tune", -12.0)
-                        .with("fine", 7.0),
-                    n(4, Kind::Mix, [460.0, 20.0]),
-                    n(5, Kind::Lfo, [460.0, 300.0]).with("rate", 3.0),
-                    n(6, Kind::Filter, [680.0, 20.0])
-                        .with("cutoff", 300.0)
-                        .with("res", 0.6),
-                    n(7, Kind::Env, [680.0, 300.0]).with("release", 0.1),
-                    n(8, Kind::Vca, [900.0, 140.0]),
-                    n(9, Kind::Output, [1120.0, 140.0]),
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("tune", -12.0)]),
+                    m(3, Osc, &[("wave", 3.0), ("tune", -12.0), ("fine", 7.0)]),
+                    m(4, Mix, &[]),
+                    m(5, Lfo, &[("rate", 3.0)]),
+                    m(6, Filter, &[("cutoff", 300.0), ("res", 0.6)]),
+                    m(7, Env, &[("release", 0.1)]),
+                    m(8, Vca, &[]),
+                    m(9, Output, &[]),
                 ],
                 vec![
                     c(1, "pitch", 2, "pitch", 1.0),
@@ -473,55 +813,303 @@ pub fn factory() -> Vec<(&'static str, Patch)> {
                     c(7, "out", 8, "cv", 1.0),
                     c(8, "out", 9, "left", 1.0),
                 ],
-                4,
             ),
         ),
         (
-            "Pluck",
-            keys_env(
+            "Sub bass",
+            mono(
+                built(
+                    1,
+                    vec![
+                        m(1, Keys, &[]),
+                        m(2, Osc, &[("wave", 0.0), ("tune", -12.0)]),
+                        m(3, Osc, &[("wave", 1.0), ("tune", -24.0), ("level", 0.5)]),
+                        m(4, Mix, &[]),
+                        m(
+                            5,
+                            Env,
+                            &[("decay", 0.3), ("sustain", 0.8), ("release", 0.15)],
+                        ),
+                        m(6, Vca, &[]),
+                        m(7, Output, &[]),
+                    ],
+                    vec![
+                        c(1, "pitch", 2, "pitch", 1.0),
+                        c(1, "pitch", 3, "pitch", 1.0),
+                        c(2, "out", 4, "a", 0.7),
+                        c(3, "out", 4, "b", 0.5),
+                        c(1, "gate", 5, "gate", 1.0),
+                        c(4, "out", 6, "in", 1.0),
+                        c(5, "out", 6, "cv", 1.0),
+                        c(6, "out", 7, "left", 1.0),
+                    ],
+                ),
+                0.08,
+                true,
+            ),
+        ),
+        (
+            "Acid bass",
+            mono(
+                built(
+                    1,
+                    vec![
+                        m(1, Keys, &[]),
+                        m(2, Osc, &[("tune", -12.0)]),
+                        m(
+                            3,
+                            Ladder,
+                            &[("cutoff", 250.0), ("res", 0.8), ("drive", 2.0)],
+                        ),
+                        m(
+                            4,
+                            Env,
+                            &[("attack", 0.002), ("decay", 0.25), ("sustain", 0.0)],
+                        ),
+                        m(
+                            5,
+                            Env,
+                            &[("attack", 0.002), ("sustain", 0.8), ("release", 0.08)],
+                        ),
+                        m(6, Vca, &[]),
+                        m(7, Shaper, &[("drive", 2.0), ("mix", 0.5)]),
+                        m(8, Output, &[]),
+                    ],
+                    vec![
+                        c(1, "pitch", 2, "pitch", 1.0),
+                        c(1, "gate", 4, "gate", 1.0),
+                        c(1, "gate", 5, "gate", 1.0),
+                        c(2, "out", 3, "in", 1.0),
+                        c(4, "out", 3, "cutoff", 0.45),
+                        c(1, "velocity", 3, "res", 0.15),
+                        c(3, "out", 6, "in", 1.0),
+                        c(5, "out", 6, "cv", 1.0),
+                        c(6, "out", 7, "in", 1.0),
+                        c(7, "out", 8, "left", 1.0),
+                    ],
+                ),
+                0.06,
+                true,
+            ),
+        ),
+        (
+            "Reese bass",
+            built(
+                4,
                 vec![
-                    n(1, Kind::Keys, [20.0, 140.0]),
-                    n(2, Kind::Osc, [240.0, 20.0])
-                        .with("wave", 3.0)
-                        .with("pw", 0.3),
-                    n(3, Kind::Env, [240.0, 300.0])
-                        .with("decay", 0.25)
-                        .with("sustain", 0.0)
-                        .with("release", 0.2),
-                    n(4, Kind::Filter, [460.0, 20.0])
-                        .with("cutoff", 400.0)
-                        .with("res", 0.3),
-                    n(5, Kind::Vca, [680.0, 140.0]),
-                    n(6, Kind::Output, [900.0, 140.0]),
+                    m(1, Keys, &[]),
+                    m(
+                        2,
+                        Osc,
+                        &[
+                            ("tune", -12.0),
+                            ("voices", 4.0),
+                            ("detune", 25.0),
+                            ("spread", 0.7),
+                        ],
+                    ),
+                    m(3, Ladder, &[("cutoff", 500.0), ("res", 0.3)]),
+                    m(4, Ladder, &[("cutoff", 500.0), ("res", 0.3)]),
+                    m(5, Lfo, &[("rate", 0.3)]),
+                    m(6, Env, &[("sustain", 0.9), ("release", 0.2)]),
+                    m(7, Vca, &[]),
+                    m(8, Vca, &[]),
+                    m(9, Output, &[]),
                 ],
                 vec![
                     c(1, "pitch", 2, "pitch", 1.0),
-                    c(1, "gate", 3, "gate", 1.0),
-                    c(2, "out", 4, "in", 1.0),
-                    c(3, "out", 4, "cutoff", 0.5),
-                    c(4, "out", 5, "in", 1.0),
-                    c(3, "out", 5, "cv", 1.0),
-                    c(1, "velocity", 5, "gain", 0.5),
-                    c(5, "out", 6, "left", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(2, "out", 3, "in", 1.0),
+                    c(2, "right", 4, "in", 1.0),
+                    c(5, "out", 3, "cutoff", 0.15),
+                    c(5, "out", 4, "cutoff", 0.15),
+                    c(3, "out", 7, "in", 1.0),
+                    c(4, "out", 8, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(6, "out", 8, "cv", 1.0),
+                    c(7, "out", 9, "left", 1.0),
+                    c(8, "out", 9, "right", 1.0),
                 ],
-                8,
             ),
         ),
         (
-            "Slow pad",
-            keys_env(
+            "FM bass",
+            built(
+                4,
                 vec![
-                    n(1, Kind::Keys, [20.0, 140.0]),
-                    n(2, Kind::Osc, [240.0, 20.0]).with("fine", -8.0),
-                    n(3, Kind::Osc, [240.0, 300.0]).with("fine", 8.0),
-                    n(4, Kind::Lfo, [460.0, 300.0]).with("rate", 0.2),
-                    n(5, Kind::Filter, [460.0, 20.0]).with("cutoff", 1200.0),
-                    n(6, Kind::Env, [680.0, 300.0])
-                        .with("attack", 1.2)
-                        .with("sustain", 0.9)
-                        .with("release", 2.0),
-                    n(7, Kind::Vca, [680.0, 20.0]),
-                    n(8, Kind::Output, [900.0, 140.0]).with("level", 0.6),
+                    m(1, Keys, &[]),
+                    m(2, Fm, &[("tune", -12.0), ("feedback", 0.3)]),
+                    m(3, Fm, &[("ratio", 2.0), ("tune", -12.0)]),
+                    m(4, Env, &[("decay", 0.2), ("sustain", 0.2)]),
+                    m(5, Vca, &[]),
+                    m(6, Env, &[("sustain", 0.8), ("release", 0.1)]),
+                    m(7, Vca, &[]),
+                    m(8, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(1, "gate", 4, "gate", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(3, "out", 5, "in", 1.0),
+                    c(4, "out", 5, "cv", 1.0),
+                    c(5, "out", 2, "pm", 0.6),
+                    c(2, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "left", 1.0),
+                ],
+            ),
+        ),
+        // ----- lead
+        ("Saw lead", Patch::default()),
+        (
+            "Sync lead",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("wave", 0.0)]),
+                    m(3, Osc, &[]),
+                    m(4, Env, &[("decay", 0.6), ("sustain", 0.2)]),
+                    m(5, Env, &[("sustain", 0.8), ("release", 0.2)]),
+                    m(6, Filter, &[("cutoff", 4000.0)]),
+                    m(7, Vca, &[]),
+                    m(8, Output, &[("level", 0.6)]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(2, "out", 3, "sync", 1.0),
+                    c(1, "gate", 4, "gate", 1.0),
+                    c(1, "gate", 5, "gate", 1.0),
+                    c(4, "out", 3, "tune", 0.4),
+                    c(3, "out", 6, "in", 1.0),
+                    c(6, "out", 7, "in", 1.0),
+                    c(5, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "left", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Supersaw lead",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(
+                        2,
+                        Osc,
+                        &[("voices", 7.0), ("detune", 30.0), ("spread", 0.9)],
+                    ),
+                    m(3, Filter, &[("cutoff", 5000.0)]),
+                    m(4, Filter, &[("cutoff", 5000.0)]),
+                    m(5, Env, &[("sustain", 0.8), ("release", 0.3)]),
+                    m(6, Vca, &[]),
+                    m(7, Vca, &[]),
+                    m(8, Output, &[("level", 0.6), ("width", 1.3)]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "gate", 5, "gate", 1.0),
+                    c(2, "out", 3, "in", 1.0),
+                    c(2, "right", 4, "in", 1.0),
+                    c(3, "out", 6, "in", 1.0),
+                    c(4, "out", 7, "in", 1.0),
+                    c(5, "out", 6, "cv", 1.0),
+                    c(5, "out", 7, "cv", 1.0),
+                    c(6, "out", 8, "left", 1.0),
+                    c(7, "out", 8, "right", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Glide lead",
+            mono(
+                built(
+                    1,
+                    vec![
+                        m(1, Keys, &[]),
+                        m(2, Osc, &[("wave", 3.0), ("pw", 0.4)]),
+                        m(3, Osc, &[("fine", 6.0)]),
+                        m(4, Mix, &[("level_a", 0.5), ("level_b", 0.5)]),
+                        m(5, Lfo, &[("rate", 5.5)]),
+                        m(6, Filter, &[("cutoff", 2500.0), ("res", 0.4)]),
+                        m(7, Env, &[("sustain", 0.9), ("release", 0.2)]),
+                        m(8, Vca, &[]),
+                        m(
+                            9,
+                            Delay,
+                            &[("time", 0.33), ("feedback", 0.35), ("mix", 0.25)],
+                        ),
+                        m(10, Output, &[]),
+                    ],
+                    vec![
+                        c(1, "pitch", 2, "pitch", 1.0),
+                        c(1, "pitch", 3, "pitch", 1.0),
+                        c(5, "out", 2, "pfm", 0.01),
+                        c(5, "out", 3, "pfm", 0.01),
+                        c(1, "wheel", 5, "depth", 1.0),
+                        c(2, "out", 4, "a", 1.0),
+                        c(3, "out", 4, "b", 1.0),
+                        c(4, "out", 6, "in", 1.0),
+                        c(1, "gate", 7, "gate", 1.0),
+                        c(6, "out", 8, "in", 1.0),
+                        c(7, "out", 8, "cv", 1.0),
+                        c(8, "out", 9, "in", 1.0),
+                        c(9, "out", 10, "left", 1.0),
+                    ],
+                ),
+                0.12,
+                true,
+            ),
+        ),
+        (
+            "Fold lead",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("wave", 0.0)]),
+                    m(3, Shaper, &[("shape", 1.0), ("drive", 2.0)]),
+                    m(4, Lfo, &[("rate", 0.5)]),
+                    m(5, Env, &[("decay", 0.8), ("sustain", 0.3)]),
+                    m(6, Env, &[("sustain", 0.8), ("release", 0.25)]),
+                    m(7, Vca, &[]),
+                    m(8, Filter, &[("cutoff", 6000.0)]),
+                    m(9, Output, &[("level", 0.6)]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(2, "out", 3, "in", 1.0),
+                    c(4, "out", 3, "drive", 0.15),
+                    c(5, "out", 3, "drive", 0.3),
+                    c(1, "gate", 5, "gate", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(3, "out", 8, "in", 1.0),
+                    c(8, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(7, "out", 9, "left", 1.0),
+                ],
+            ),
+        ),
+        // ----- pad
+        (
+            "Slow pad",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("fine", -8.0)]),
+                    m(3, Osc, &[("fine", 8.0)]),
+                    m(4, Lfo, &[("rate", 0.2)]),
+                    m(5, Filter, &[("cutoff", 1200.0)]),
+                    m(
+                        6,
+                        Env,
+                        &[("attack", 1.2), ("sustain", 0.9), ("release", 2.0)],
+                    ),
+                    m(7, Vca, &[]),
+                    m(8, Output, &[("level", 0.6)]),
                 ],
                 vec![
                     c(1, "pitch", 2, "pitch", 1.0),
@@ -534,26 +1122,346 @@ pub fn factory() -> Vec<(&'static str, Patch)> {
                     c(6, "out", 7, "cv", 1.0),
                     c(7, "out", 8, "left", 1.0),
                 ],
-                8,
             ),
         ),
         (
-            "Noise sweep",
-            keys_env(
+            "Morph pad",
+            built(
+                8,
                 vec![
-                    n(1, Kind::Keys, [20.0, 140.0]),
-                    n(2, Kind::Noise, [240.0, 20.0]),
-                    n(3, Kind::Env, [240.0, 300.0])
-                        .with("attack", 0.5)
-                        .with("decay", 1.5)
-                        .with("sustain", 0.0)
-                        .with("release", 0.5),
-                    n(4, Kind::Filter, [460.0, 20.0])
-                        .with("mode", 1.0)
-                        .with("cutoff", 200.0)
-                        .with("res", 0.7),
-                    n(5, Kind::Vca, [680.0, 140.0]),
-                    n(6, Kind::Output, [900.0, 140.0]),
+                    m(1, Keys, &[]),
+                    m(
+                        2,
+                        Osc,
+                        &[
+                            ("wave", 4.0),
+                            ("morph", 0.5),
+                            ("voices", 3.0),
+                            ("detune", 12.0),
+                            ("spread", 0.7),
+                        ],
+                    ),
+                    m(3, Lfo, &[("rate", 0.15)]),
+                    m(4, Filter, &[("cutoff", 1800.0)]),
+                    m(5, Filter, &[("cutoff", 1800.0)]),
+                    m(
+                        6,
+                        Env,
+                        &[("attack", 0.8), ("sustain", 0.9), ("release", 1.5)],
+                    ),
+                    m(7, Vca, &[]),
+                    m(8, Vca, &[]),
+                    m(9, Output, &[("level", 0.6)]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(3, "uni", 2, "morph", 0.6),
+                    c(2, "out", 4, "in", 1.0),
+                    c(2, "right", 5, "in", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(4, "out", 7, "in", 1.0),
+                    c(5, "out", 8, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(6, "out", 8, "cv", 1.0),
+                    c(7, "out", 9, "left", 1.0),
+                    c(8, "out", 9, "right", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Shimmer pad",
+            built(
+                6,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("voices", 5.0), ("detune", 18.0), ("tune", 12.0)]),
+                    m(3, Osc, &[("wave", 1.0), ("tune", -12.0)]),
+                    m(4, Mix, &[("level_a", 0.4), ("level_b", 0.6)]),
+                    m(5, Filter, &[("cutoff", 2200.0)]),
+                    m(
+                        6,
+                        Env,
+                        &[("attack", 0.6), ("sustain", 0.9), ("release", 1.5)],
+                    ),
+                    m(7, Vca, &[]),
+                    m(8, Reverb, &[("size", 0.85), ("mix", 0.5)]),
+                    m(9, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(2, "out", 4, "a", 1.0),
+                    c(3, "out", 4, "b", 1.0),
+                    c(4, "out", 5, "in", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(5, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "in", 1.0),
+                    c(8, "left", 9, "left", 1.0),
+                    c(8, "right", 9, "right", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Chorus strings",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("fine", -6.0)]),
+                    m(3, Osc, &[("fine", 6.0)]),
+                    m(4, Mix, &[("level_a", 0.5), ("level_b", 0.5)]),
+                    m(5, Filter, &[("cutoff", 3000.0)]),
+                    m(
+                        6,
+                        Env,
+                        &[("attack", 0.3), ("sustain", 0.9), ("release", 0.8)],
+                    ),
+                    m(7, Vca, &[]),
+                    m(8, Chorus, &[("rate", 0.5), ("depth", 0.7)]),
+                    m(9, Output, &[("level", 0.7)]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(2, "out", 4, "a", 1.0),
+                    c(3, "out", 4, "b", 1.0),
+                    c(4, "out", 5, "in", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(5, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "in", 1.0),
+                    c(8, "left", 9, "left", 1.0),
+                    c(8, "right", 9, "right", 1.0),
+                ],
+            ),
+        ),
+        // ----- pluck
+        (
+            "Pluck",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("wave", 3.0), ("pw", 0.3)]),
+                    m(
+                        3,
+                        Env,
+                        &[("decay", 0.25), ("sustain", 0.0), ("release", 0.2)],
+                    ),
+                    m(4, Filter, &[("cutoff", 400.0), ("res", 0.3)]),
+                    m(5, Vca, &[]),
+                    m(6, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "gate", 3, "gate", 1.0),
+                    c(2, "out", 4, "in", 1.0),
+                    c(3, "out", 4, "cutoff", 0.5),
+                    c(4, "out", 5, "in", 1.0),
+                    c(3, "out", 5, "cv", 1.0),
+                    c(1, "velocity", 5, "gain", 0.5),
+                    c(5, "out", 6, "left", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Echo pluck",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[]),
+                    m(
+                        3,
+                        Env,
+                        &[("decay", 0.2), ("sustain", 0.0), ("release", 0.2)],
+                    ),
+                    m(4, Filter, &[("cutoff", 600.0), ("res", 0.4)]),
+                    m(5, Vca, &[]),
+                    m(
+                        6,
+                        Delay,
+                        &[("time", 0.375), ("feedback", 0.5), ("mix", 0.35)],
+                    ),
+                    m(7, Pan, &[]),
+                    m(8, Lfo, &[("rate", 0.2)]),
+                    m(9, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "gate", 3, "gate", 1.0),
+                    c(2, "out", 4, "in", 1.0),
+                    c(3, "out", 4, "cutoff", 0.5),
+                    c(4, "out", 5, "in", 1.0),
+                    c(3, "out", 5, "cv", 1.0),
+                    c(5, "out", 6, "in", 1.0),
+                    c(6, "out", 7, "in", 1.0),
+                    c(8, "out", 7, "pan", 0.3),
+                    c(7, "left", 9, "left", 1.0),
+                    c(7, "right", 9, "right", 1.0),
+                ],
+            ),
+        ),
+        (
+            "FM bell",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Fm, &[]),
+                    m(3, Fm, &[("ratio", 3.5)]),
+                    m(
+                        4,
+                        Env,
+                        &[
+                            ("attack", 0.001),
+                            ("decay", 1.5),
+                            ("sustain", 0.0),
+                            ("release", 1.5),
+                        ],
+                    ),
+                    m(5, Vca, &[]),
+                    m(
+                        6,
+                        Env,
+                        &[
+                            ("attack", 0.001),
+                            ("decay", 2.5),
+                            ("sustain", 0.0),
+                            ("release", 2.0),
+                        ],
+                    ),
+                    m(7, Vca, &[]),
+                    m(8, Reverb, &[("size", 0.6), ("mix", 0.25)]),
+                    m(9, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(1, "gate", 4, "gate", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(3, "out", 5, "in", 1.0),
+                    c(4, "out", 5, "cv", 1.0),
+                    c(5, "out", 2, "pm", 0.5),
+                    c(2, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "in", 1.0),
+                    c(8, "left", 9, "left", 1.0),
+                    c(8, "right", 9, "right", 1.0),
+                ],
+            ),
+        ),
+        // ----- keys
+        (
+            "Electric piano",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Fm, &[]),
+                    m(3, Fm, &[]),
+                    m(4, Env, &[("decay", 0.5), ("sustain", 0.1)]),
+                    m(5, Vca, &[("gain", 0.4)]),
+                    m(
+                        6,
+                        Env,
+                        &[("decay", 1.2), ("sustain", 0.3), ("release", 0.4)],
+                    ),
+                    m(7, Vca, &[]),
+                    m(8, Chorus, &[("depth", 0.3), ("mix", 0.3)]),
+                    m(9, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(1, "gate", 4, "gate", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(3, "out", 5, "in", 1.0),
+                    c(4, "out", 5, "cv", 1.0),
+                    c(1, "velocity", 5, "gain", 0.5),
+                    c(5, "out", 2, "pm", 0.4),
+                    c(2, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "in", 1.0),
+                    c(8, "left", 9, "left", 1.0),
+                    c(8, "right", 9, "right", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Organ",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("wave", 0.0)]),
+                    m(3, Osc, &[("wave", 0.0), ("tune", 12.0)]),
+                    m(4, Osc, &[("wave", 0.0), ("tune", 19.0)]),
+                    m(5, Osc, &[("wave", 0.0), ("tune", 24.0)]),
+                    m(
+                        6,
+                        Mix,
+                        &[
+                            ("level_a", 0.5),
+                            ("level_b", 0.35),
+                            ("level_c", 0.25),
+                            ("level_d", 0.2),
+                        ],
+                    ),
+                    m(
+                        7,
+                        Env,
+                        &[
+                            ("attack", 0.005),
+                            ("decay", 0.1),
+                            ("sustain", 1.0),
+                            ("release", 0.05),
+                        ],
+                    ),
+                    m(8, Vca, &[]),
+                    m(9, Chorus, &[("rate", 5.5), ("depth", 0.3), ("mix", 0.4)]),
+                    m(10, Output, &[("level", 0.6)]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(1, "pitch", 4, "pitch", 1.0),
+                    c(1, "pitch", 5, "pitch", 1.0),
+                    c(2, "out", 6, "a", 1.0),
+                    c(3, "out", 6, "b", 1.0),
+                    c(4, "out", 6, "c", 1.0),
+                    c(5, "out", 6, "d", 1.0),
+                    c(1, "gate", 7, "gate", 1.0),
+                    c(6, "out", 8, "in", 1.0),
+                    c(7, "out", 8, "cv", 1.0),
+                    c(8, "out", 9, "in", 1.0),
+                    c(9, "left", 10, "left", 1.0),
+                    c(9, "right", 10, "right", 1.0),
+                ],
+            ),
+        ),
+        // ----- effects
+        (
+            "Noise sweep",
+            built(
+                4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Noise, &[]),
+                    m(
+                        3,
+                        Env,
+                        &[
+                            ("attack", 0.5),
+                            ("decay", 1.5),
+                            ("sustain", 0.0),
+                            ("release", 0.5),
+                        ],
+                    ),
+                    m(4, Filter, &[("mode", 1.0), ("cutoff", 200.0), ("res", 0.7)]),
+                    m(5, Vca, &[]),
+                    m(6, Output, &[]),
                 ],
                 vec![
                     c(1, "gate", 3, "gate", 1.0),
@@ -563,7 +1471,449 @@ pub fn factory() -> Vec<(&'static str, Patch)> {
                     c(3, "out", 5, "cv", 1.0),
                     c(5, "out", 6, "left", 1.0),
                 ],
+            ),
+        ),
+        (
+            "Riser",
+            built(
                 4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Noise, &[("level", 0.5)]),
+                    m(3, Osc, &[("voices", 4.0), ("detune", 40.0)]),
+                    m(
+                        4,
+                        Env,
+                        &[("attack", 4.0), ("sustain", 1.0), ("release", 1.0)],
+                    ),
+                    m(5, Mix, &[]),
+                    m(6, Filter, &[("cutoff", 400.0), ("res", 0.5)]),
+                    m(7, Vca, &[]),
+                    m(8, Reverb, &[("mix", 0.3)]),
+                    m(9, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(1, "gate", 4, "gate", 1.0),
+                    c(4, "out", 3, "tune", 0.5),
+                    c(4, "out", 6, "cutoff", 0.6),
+                    c(2, "out", 5, "a", 1.0),
+                    c(3, "out", 5, "b", 0.6),
+                    c(5, "out", 6, "in", 1.0),
+                    c(6, "out", 7, "in", 1.0),
+                    c(4, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "in", 1.0),
+                    c(8, "left", 9, "left", 1.0),
+                    c(8, "right", 9, "right", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Random bleeps",
+            built(
+                4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Hold, &[("rate", 8.0)]),
+                    m(3, Quant, &[("scale", 3.0)]),
+                    m(4, Osc, &[("wave", 3.0)]),
+                    m(5, Env, &[("sustain", 0.8), ("release", 0.3)]),
+                    m(6, Filter, &[("cutoff", 2500.0), ("res", 0.3)]),
+                    m(7, Vca, &[]),
+                    m(8, Delay, &[("time", 0.25), ("feedback", 0.4), ("mix", 0.3)]),
+                    m(9, Output, &[("level", 0.5)]),
+                ],
+                vec![
+                    c(2, "out", 3, "in", 1.0),
+                    c(1, "pitch", 4, "pitch", 1.0),
+                    c(3, "out", 4, "pitch", 1.0),
+                    c(1, "gate", 5, "gate", 1.0),
+                    c(4, "out", 6, "in", 1.0),
+                    c(6, "out", 7, "in", 1.0),
+                    c(5, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "in", 1.0),
+                    c(8, "out", 9, "left", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Ring robot",
+            built(
+                4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[]),
+                    m(3, Osc, &[("wave", 0.0), ("tune", 7.0)]),
+                    m(4, Ring, &[]),
+                    m(5, Lfo, &[("rate", 4.0)]),
+                    m(
+                        6,
+                        Filter,
+                        &[("mode", 1.0), ("cutoff", 1200.0), ("res", 0.5)],
+                    ),
+                    m(7, Env, &[("sustain", 0.8), ("release", 0.2)]),
+                    m(8, Vca, &[]),
+                    m(9, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 1.0),
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(5, "out", 3, "tune", 0.1),
+                    c(2, "out", 4, "a", 1.0),
+                    c(3, "out", 4, "b", 1.0),
+                    c(4, "out", 6, "in", 1.0),
+                    c(1, "gate", 7, "gate", 1.0),
+                    c(6, "out", 8, "in", 1.0),
+                    c(7, "out", 8, "cv", 1.0),
+                    c(8, "out", 9, "left", 1.0),
+                ],
+            ),
+        ),
+        // ----- percussion
+        (
+            "Kick",
+            built(
+                4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Osc, &[("wave", 0.0), ("tune", -24.0)]),
+                    m(
+                        3,
+                        Env,
+                        &[
+                            ("attack", 0.001),
+                            ("decay", 0.08),
+                            ("sustain", 0.0),
+                            ("release", 0.05),
+                        ],
+                    ),
+                    m(
+                        4,
+                        Env,
+                        &[
+                            ("attack", 0.001),
+                            ("decay", 0.4),
+                            ("sustain", 0.0),
+                            ("release", 0.2),
+                        ],
+                    ),
+                    m(5, Vca, &[]),
+                    m(6, Shaper, &[("drive", 3.0), ("mix", 0.6)]),
+                    m(7, Output, &[]),
+                ],
+                vec![
+                    c(1, "pitch", 2, "pitch", 0.25),
+                    c(1, "gate", 3, "gate", 1.0),
+                    c(1, "gate", 4, "gate", 1.0),
+                    c(3, "out", 2, "tune", 0.6),
+                    c(2, "out", 5, "in", 1.0),
+                    c(4, "out", 5, "cv", 1.0),
+                    c(5, "out", 6, "in", 1.0),
+                    c(6, "out", 7, "left", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Snare",
+            built(
+                4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Noise, &[]),
+                    m(
+                        3,
+                        Filter,
+                        &[("mode", 1.0), ("cutoff", 3000.0), ("res", 0.2)],
+                    ),
+                    m(4, Osc, &[("wave", 1.0), ("tune", -12.0)]),
+                    m(
+                        5,
+                        Env,
+                        &[
+                            ("attack", 0.001),
+                            ("decay", 0.1),
+                            ("sustain", 0.0),
+                            ("release", 0.1),
+                        ],
+                    ),
+                    m(
+                        6,
+                        Env,
+                        &[
+                            ("attack", 0.001),
+                            ("decay", 0.18),
+                            ("sustain", 0.0),
+                            ("release", 0.15),
+                        ],
+                    ),
+                    m(7, Vca, &[]),
+                    m(8, Vca, &[]),
+                    m(9, Mix, &[("level_a", 0.8), ("level_b", 0.6)]),
+                    m(10, Output, &[]),
+                ],
+                vec![
+                    c(1, "gate", 5, "gate", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(2, "out", 3, "in", 1.0),
+                    c(3, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(4, "out", 8, "in", 1.0),
+                    c(5, "out", 8, "cv", 1.0),
+                    c(7, "out", 9, "a", 1.0),
+                    c(8, "out", 9, "b", 1.0),
+                    c(9, "out", 10, "left", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Hi hat",
+            built(
+                4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Noise, &[]),
+                    m(
+                        3,
+                        Filter,
+                        &[("mode", 2.0), ("cutoff", 7000.0), ("res", 0.3)],
+                    ),
+                    m(
+                        4,
+                        Env,
+                        &[
+                            ("attack", 0.001),
+                            ("decay", 0.08),
+                            ("sustain", 0.0),
+                            ("release", 0.05),
+                        ],
+                    ),
+                    m(5, Vca, &[]),
+                    m(6, Output, &[("level", 1.0)]),
+                ],
+                vec![
+                    c(1, "gate", 4, "gate", 1.0),
+                    c(2, "out", 3, "in", 1.0),
+                    c(3, "out", 5, "in", 1.0),
+                    c(4, "out", 5, "cv", 1.0),
+                    c(5, "out", 6, "left", 1.0),
+                ],
+            ),
+        ),
+        // ----- sequenced
+        (
+            "Step arp",
+            built(
+                4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(
+                        2,
+                        Seq,
+                        &[
+                            ("rate", 8.0),
+                            ("step_1", 0.0),
+                            ("step_2", 0.25),
+                            ("step_3", 0.5833),
+                            ("step_4", 1.0),
+                            ("step_5", 0.5833),
+                            ("step_6", 0.25),
+                            ("step_7", 0.4167),
+                            ("step_8", 0.8333),
+                        ],
+                    ),
+                    m(3, Quant, &[("scale", 1.0)]),
+                    m(4, Osc, &[]),
+                    m(
+                        5,
+                        Env,
+                        &[
+                            ("attack", 0.002),
+                            ("decay", 0.12),
+                            ("sustain", 0.0),
+                            ("release", 0.1),
+                        ],
+                    ),
+                    m(6, Ladder, &[("cutoff", 900.0), ("res", 0.5)]),
+                    m(7, Vca, &[]),
+                    m(
+                        8,
+                        Env,
+                        &[("attack", 0.001), ("sustain", 1.0), ("release", 0.1)],
+                    ),
+                    m(9, Vca, &[]),
+                    m(
+                        10,
+                        Delay,
+                        &[("time", 0.1875), ("feedback", 0.45), ("mix", 0.3)],
+                    ),
+                    m(11, Output, &[]),
+                ],
+                vec![
+                    c(2, "out", 3, "in", 1.0),
+                    c(1, "pitch", 4, "pitch", 1.0),
+                    c(3, "out", 4, "pitch", 1.0),
+                    c(2, "gate", 5, "gate", 1.0),
+                    c(4, "out", 6, "in", 1.0),
+                    c(5, "out", 6, "cutoff", 0.35),
+                    c(6, "out", 7, "in", 1.0),
+                    c(5, "out", 7, "cv", 1.0),
+                    c(1, "gate", 8, "gate", 1.0),
+                    c(7, "out", 9, "in", 1.0),
+                    c(8, "out", 9, "cv", 1.0),
+                    c(9, "out", 10, "in", 1.0),
+                    c(10, "out", 11, "left", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Sequenced bass",
+            mono(
+                built(
+                    1,
+                    vec![
+                        m(1, Keys, &[]),
+                        m(
+                            2,
+                            Seq,
+                            &[
+                                ("rate", 6.0),
+                                ("gate_len", 0.6),
+                                ("step_3", 1.0),
+                                ("step_5", 0.5833),
+                                ("step_7", 0.25),
+                                ("step_8", 1.0),
+                            ],
+                        ),
+                        m(3, Osc, &[("tune", -12.0)]),
+                        m(4, Osc, &[("wave", 3.0), ("tune", -24.0), ("level", 0.5)]),
+                        m(5, Mix, &[]),
+                        m(
+                            6,
+                            Ladder,
+                            &[("cutoff", 400.0), ("res", 0.6), ("drive", 2.0)],
+                        ),
+                        m(
+                            7,
+                            Env,
+                            &[
+                                ("attack", 0.002),
+                                ("decay", 0.15),
+                                ("sustain", 0.2),
+                                ("release", 0.05),
+                            ],
+                        ),
+                        m(8, Vca, &[]),
+                        m(
+                            9,
+                            Env,
+                            &[("attack", 0.001), ("sustain", 1.0), ("release", 0.1)],
+                        ),
+                        m(10, Vca, &[]),
+                        m(11, Output, &[]),
+                    ],
+                    vec![
+                        c(1, "pitch", 3, "pitch", 1.0),
+                        c(1, "pitch", 4, "pitch", 1.0),
+                        c(2, "out", 3, "pitch", 1.0),
+                        c(2, "out", 4, "pitch", 1.0),
+                        c(3, "out", 5, "a", 1.0),
+                        c(4, "out", 5, "b", 1.0),
+                        c(5, "out", 6, "in", 1.0),
+                        c(2, "gate", 7, "gate", 1.0),
+                        c(7, "out", 6, "cutoff", 0.4),
+                        c(6, "out", 8, "in", 1.0),
+                        c(7, "out", 8, "cv", 1.0),
+                        c(1, "gate", 9, "gate", 1.0),
+                        c(8, "out", 10, "in", 1.0),
+                        c(9, "out", 10, "cv", 1.0),
+                        c(10, "out", 11, "left", 1.0),
+                    ],
+                ),
+                0.0,
+                false,
+            ),
+        ),
+        (
+            "Gate rhythm",
+            built(
+                4,
+                vec![
+                    m(1, Keys, &[]),
+                    m(2, Lfo, &[("rate", 6.0), ("wave", 2.0)]),
+                    m(3, Lfo, &[("rate", 0.25)]),
+                    m(4, Compare, &[]),
+                    m(
+                        5,
+                        Env,
+                        &[
+                            ("attack", 0.001),
+                            ("decay", 0.08),
+                            ("sustain", 0.3),
+                            ("release", 0.05),
+                        ],
+                    ),
+                    m(6, Slew, &[("rise", 0.2), ("fall", 0.6)]),
+                    m(7, Osc, &[("voices", 2.0), ("detune", 10.0)]),
+                    m(8, Filter, &[("cutoff", 600.0), ("res", 0.5)]),
+                    m(9, Vca, &[]),
+                    m(
+                        10,
+                        Env,
+                        &[("attack", 0.001), ("sustain", 1.0), ("release", 0.1)],
+                    ),
+                    m(11, Vca, &[]),
+                    m(12, Output, &[]),
+                ],
+                vec![
+                    c(2, "out", 4, "a", 1.0),
+                    c(3, "out", 4, "b", 0.8),
+                    c(4, "out", 5, "gate", 1.0),
+                    c(4, "out", 6, "in", 1.0),
+                    c(6, "out", 8, "cutoff", 0.3),
+                    c(1, "pitch", 7, "pitch", 1.0),
+                    c(7, "out", 8, "in", 1.0),
+                    c(8, "out", 9, "in", 1.0),
+                    c(5, "out", 9, "cv", 1.0),
+                    c(1, "gate", 10, "gate", 1.0),
+                    c(9, "out", 11, "in", 1.0),
+                    c(10, "out", 11, "cv", 1.0),
+                    c(11, "out", 12, "left", 1.0),
+                ],
+            ),
+        ),
+        (
+            "Macro lab",
+            built(
+                8,
+                vec![
+                    m(1, Keys, &[]),
+                    m(
+                        2,
+                        Macro,
+                        &[("knob_1", 0.5), ("knob_2", 0.3), ("knob_3", 0.4)],
+                    ),
+                    m(3, Osc, &[("voices", 3.0), ("detune", 15.0)]),
+                    m(4, Ladder, &[("cutoff", 300.0), ("res", 0.4)]),
+                    m(5, Shaper, &[("drive", 1.0), ("mix", 0.7)]),
+                    m(6, Env, &[("sustain", 0.8), ("release", 0.3)]),
+                    m(7, Vca, &[]),
+                    m(8, Delay, &[("time", 0.3), ("mix", 0.0)]),
+                    m(9, Output, &[("level", 0.6)]),
+                ],
+                vec![
+                    c(1, "pitch", 3, "pitch", 1.0),
+                    c(3, "out", 4, "in", 1.0),
+                    c(2, "out_1", 4, "cutoff", 0.5),
+                    c(2, "out_2", 5, "drive", 0.6),
+                    c(2, "out_3", 8, "mix", 0.8),
+                    c(2, "out_4", 4, "res", 0.5),
+                    c(4, "out", 5, "in", 1.0),
+                    c(1, "gate", 6, "gate", 1.0),
+                    c(5, "out", 7, "in", 1.0),
+                    c(6, "out", 7, "cv", 1.0),
+                    c(7, "out", 8, "in", 1.0),
+                    c(8, "out", 9, "left", 1.0),
+                ],
             ),
         ),
     ]
@@ -580,6 +1930,11 @@ struct Compiled {
     sources: Vec<Vec<(usize, f32)>>,
     /// The parameters' own values, from 0 to 1.
     base: Vec<f64>,
+    /// The same in their units, so a parameter with no cable costs nothing to read.
+    value: Vec<f64>,
+    /// How many plain inputs and outputs it has.
+    inputs: usize,
+    outputs: usize,
     /// The first of this module's output slots.
     out: usize,
 }
@@ -592,6 +1947,9 @@ struct Graph {
     slots: usize,
     /// Where the sound is taken from: the `Output` node's place in `nodes`.
     output: Option<usize>,
+    /// The patch's own glide (mono only), in seconds.
+    glide: f64,
+    volume: f32,
 }
 
 impl Graph {
@@ -651,10 +2009,16 @@ impl Graph {
                 };
                 sources[inp].push((first[from] + o, c.amount as f32));
             }
-            let base = spec
+            let base: Vec<f64> = spec
                 .params
                 .iter()
                 .map(|p| p.normalize(node.param(p.name)))
+                .collect();
+            let value = spec
+                .params
+                .iter()
+                .zip(&base)
+                .map(|(p, &b)| p.denormalize(b))
                 .collect();
             if node.kind == Kind::Output && output.is_none() {
                 output = Some(nodes.len());
@@ -663,6 +2027,9 @@ impl Graph {
                 kind: node.kind,
                 sources,
                 base,
+                value,
+                inputs: spec.inputs.len(),
+                outputs: spec.outputs.len(),
                 out: first[k],
             });
             ids.push(node.id);
@@ -672,6 +2039,12 @@ impl Graph {
             ids,
             slots,
             output,
+            glide: if patch.mono {
+                patch.glide.clamp(0.0, MAX_GLIDE)
+            } else {
+                0.0
+            },
+            volume: patch.volume.clamp(0.0, 2.0) as f32,
         }
     }
 }
@@ -681,34 +2054,96 @@ impl Graph {
 // ---------------------------------------------------------------------------
 
 /// What a module keeps from one sample to the next.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct NodeState {
-    phase: f64,
-    /// Envelope level, or the filter's first integrator.
-    a: f64,
-    /// The filter's second integrator.
-    b: f64,
-    /// Envelope stage: 0 idle, 1 attack, 2 decay/sustain, 3 release.
+    /// Phases: one for each unison voice of an oscillator.
+    ph: [f64; 8],
+    /// What else the module keeps: filter integrators, held values and so on.
+    v: [f64; 8],
+    /// Envelope stage: 0 idle, 1 attack, 2 decay/sustain, 3 release. For other
+    /// modules, 0 until the first sample of the voice.
     stage: u8,
     gate: bool,
     rng: u32,
+    /// Samples played, where a delay line writes.
+    n: usize,
+    /// Costly values kept until what they come from changes.
+    memo: [[f64; 2]; 3],
+    /// The frequency ratios of an oscillator's unison voices, for `uni_key`.
+    uni: [f64; 8],
+    uni_key: f64,
+}
+
+impl Default for NodeState {
+    fn default() -> Self {
+        Self {
+            ph: [0.0; 8],
+            v: [0.0; 8],
+            stage: 0,
+            gate: false,
+            rng: 0,
+            n: 0,
+            // no key matches NaN, so every memo is worked out the first time
+            memo: [[f64::NAN, 0.0]; 3],
+            uni: [1.0; 8],
+            uni_key: f64::NAN,
+        }
+    }
+}
+
+impl NodeState {
+    /// A random number from -1 to 1 (xorshift).
+    fn rand(&mut self) -> f64 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        f64::from(x) / f64::from(u32::MAX) * 2.0 - 1.0
+    }
 }
 
 struct Voice {
     outs: Vec<f32>,
     states: Vec<NodeState>,
+    /// The delay lines of the modules that have them (empty for the rest).
+    lines: Vec<Vec<f32>>,
     key: u8,
     vel: f32,
     gate: bool,
+    /// The voice was just (re)started: its gate drops for one sample and modules
+    /// that follow notes start again.
+    trig: bool,
     active: bool,
+    /// The pitch now, in octaves from middle C (it slides when there is glide).
+    pitch: f64,
     /// When the voice started, to steal the oldest.
     age: u64,
     /// Samples in a row it has been quiet since its key was let go.
     quiet: usize,
 }
 
+/// The length of a module's delay line at a sample rate.
+fn line_len(kind: Kind, sr: f64) -> usize {
+    match kind {
+        Kind::Delay => (DELAY.params[0].max * sr) as usize + 4,
+        Kind::Chorus => (0.05 * sr) as usize + 4,
+        Kind::Reverb => reverb_lines(sr).iter().sum(),
+        _ => 0,
+    }
+}
+
+/// The lengths of a reverb's lines: four combs a side, then two allpasses a side.
+fn reverb_lines(sr: f64) -> [usize; 12] {
+    const AT_44K: [usize; 12] = [
+        1116, 1188, 1277, 1356, 1139, 1211, 1300, 1379, 556, 441, 579, 464,
+    ];
+    let k = sr / 44_100.0;
+    AT_44K.map(|n| ((n as f64 * k) as usize).max(1))
+}
+
 impl Voice {
-    fn new(graph: &Graph, seed: u32) -> Self {
+    fn new(graph: &Graph, seed: u32, sr: f64) -> Self {
         let mut states = vec![NodeState::default(); graph.nodes.len()];
         for (k, s) in states.iter_mut().enumerate() {
             s.rng = seed
@@ -719,12 +2154,34 @@ impl Voice {
         Self {
             outs: vec![0.0; graph.slots],
             states,
+            lines: graph
+                .nodes
+                .iter()
+                .map(|c| vec![0.0; line_len(c.kind, sr)])
+                .collect(),
             key: 0,
             vel: 0.0,
             gate: false,
+            trig: false,
             active: false,
+            pitch: 0.0,
             age: 0,
             quiet: 0,
+        }
+    }
+
+    /// Start from silence.
+    fn clear(&mut self) {
+        self.outs.fill(0.0);
+        for s in &mut self.states {
+            let rng = s.rng;
+            *s = NodeState {
+                rng,
+                ..NodeState::default()
+            };
+        }
+        for l in &mut self.lines {
+            l.fill(0.0);
         }
     }
 }
@@ -757,10 +2214,84 @@ fn wave(shape: u32, phase: f64, dt: f64, pw: f64) -> f64 {
     }
 }
 
+/// An oscillator's wave: one of the basic waves, or (shape 4) a blend along sine,
+/// triangle, saw and square by `morph` from 0 to 3.
+fn osc_wave(shape: u32, morph: f64, phase: f64, dt: f64, pw: f64) -> f64 {
+    if shape < 4 {
+        return wave(shape, phase, dt, pw);
+    }
+    let k = (morph.floor() as u32).min(2);
+    let t = morph - f64::from(k);
+    let a = wave(k, phase, dt, pw);
+    if t <= 0.0 {
+        a
+    } else {
+        a + (wave(k + 1, phase, dt, pw) - a) * t
+    }
+}
+
+/// A triangle fold that leaves -1 to 1 as it is and folds back what goes past.
+fn fold(u: f64) -> f64 {
+    4.0 * (((u - 1.0) / 4.0).rem_euclid(1.0) - 0.5).abs() - 1.0
+}
+
+/// Read a delay line `d` samples (at least 1) behind where it writes next.
+#[inline]
+fn tap(line: &[f32], at: usize, d: f64) -> f64 {
+    let len = line.len();
+    let pos = (at as f64 - d).rem_euclid(len as f64);
+    let i0 = pos as usize % len;
+    let i1 = (i0 + 1) % len;
+    let t = pos - pos.floor();
+    let (a, b) = (f64::from(line[i0]), f64::from(line[i1]));
+    a + (b - a) * t
+}
+
+/// Bend an envelope's level (0 to 1) by a curve: above 0 it starts slow, below it
+/// starts fast.
+fn curve(a: f64, c: f64) -> f64 {
+    if c > 1e-3 {
+        a.powf(1.0 + 3.0 * c)
+    } else if c < -1e-3 {
+        1.0 - (1.0 - a).powf(1.0 - 3.0 * c)
+    } else {
+        a
+    }
+}
+
+/// The nearest note of a scale to a pitch in octaves.
+fn quantize(octaves: f64, scale: usize) -> f64 {
+    let bits = SCALE_BITS[scale.min(SCALE_BITS.len() - 1)];
+    let semis = octaves * 12.0;
+    let near = semis.round() as i64;
+    let mut best = near as f64;
+    let mut dist = f64::MAX;
+    for d in -6..=6 {
+        let n = near + d;
+        if bits & (1 << n.rem_euclid(12)) != 0 {
+            let e = (n as f64 - semis).abs();
+            if e < dist {
+                dist = e;
+                best = n as f64;
+            }
+        }
+    }
+    best / 12.0
+}
+
 /// Middle C, the pitch 0 of `Keys`.
 const C4: f64 = 261.625_565_300_598_6;
 /// How long a released voice must be quiet before it is free, in seconds.
 const QUIET_TIME: f64 = 0.05;
+
+/// The performance controls a `Keys` module puts out: the mod wheel (0 to 1), pitch
+/// bend (-1 to 1) and aftertouch (0 to 1).
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Controls {
+    pub wheel: f32,
+    pub bend: f32,
+    pub pressure: f32,
+}
 
 /// The modular synth.
 pub struct Modular {
@@ -769,19 +2300,33 @@ pub struct Modular {
     voices: Vec<Voice>,
     sr: f64,
     clock: u64,
+    controls: Controls,
+    /// The keys held in mono, the newest last.
+    held: Vec<u8>,
+    /// The pitch of the last note, where a new voice glides from.
+    last_pitch: Option<f64>,
 }
 
 impl Modular {
     pub fn new(patch: &Patch, sr: f64) -> Self {
         let graph = Graph::compile(patch);
-        let count = patch.voices.clamp(1, MAX_VOICES);
-        let voices = (0..count).map(|v| Voice::new(&graph, v as u32)).collect();
+        let count = if patch.mono {
+            1
+        } else {
+            patch.voices.clamp(1, MAX_VOICES)
+        };
+        let voices = (0..count)
+            .map(|v| Voice::new(&graph, v as u32, sr))
+            .collect();
         Self {
             patch: patch.clone(),
             graph,
             voices,
             sr,
             clock: 0,
+            controls: Controls::default(),
+            held: Vec::with_capacity(128),
+            last_pitch: None,
         }
     }
 
@@ -789,11 +2334,12 @@ impl Modular {
         &self.patch
     }
 
-    /// Take a new patch. A patch that only moved parameters keeps the voices playing;
-    /// one with other modules or cables starts them again.
+    /// Take a new patch. A patch that only moved parameters or settings keeps the
+    /// voices playing; one with other modules or cables starts them again.
     pub fn set_patch(&mut self, patch: &Patch) {
         let same_shape = patch.cables == self.patch.cables
             && patch.voices == self.patch.voices
+            && patch.mono == self.patch.mono
             && patch.nodes.len() == self.patch.nodes.len()
             && patch
                 .nodes
@@ -807,8 +2353,13 @@ impl Modular {
                 }
             }
             self.patch = patch.clone();
+            let g = Graph::compile(patch);
+            self.graph.glide = g.glide;
+            self.graph.volume = g.volume;
         } else {
+            let controls = self.controls;
             *self = Self::new(patch, self.sr);
+            self.controls = controls;
         }
     }
 
@@ -821,14 +2372,44 @@ impl Modular {
         let spec = c.kind.spec();
         if let Some(pi) = spec.params.iter().position(|p| p.name == name) {
             c.base[pi] = spec.params[pi].normalize(value);
+            c.value[pi] = spec.params[pi].denormalize(c.base[pi]);
         }
         if let Some(n) = self.patch.nodes.iter_mut().find(|n| n.id == node) {
             n.params.insert(name.to_string(), value);
         }
     }
 
+    /// Set the mod wheel, pitch bend and aftertouch that `Keys` puts out.
+    pub fn set_controls(&mut self, c: Controls) {
+        self.controls = c;
+    }
+
     pub fn note_on(&mut self, key: u8, vel: f32) {
         self.clock += 1;
+        let vel = vel.clamp(0.0, 1.0);
+        if self.patch.mono {
+            self.held.retain(|&k| k != key);
+            if self.held.len() < 128 {
+                self.held.push(key);
+            }
+            let legato = self.patch.legato;
+            let last = self.last_pitch;
+            let v = &mut self.voices[0];
+            let slide = legato && v.active && v.gate;
+            if !v.active {
+                v.clear();
+                v.pitch = last.unwrap_or((f64::from(key) - 60.0) / 12.0);
+            }
+            v.key = key;
+            v.vel = vel;
+            v.trig = !slide;
+            v.gate = true;
+            v.active = true;
+            v.age = self.clock;
+            v.quiet = 0;
+            self.last_pitch = Some((f64::from(key) - 60.0) / 12.0);
+            return;
+        }
         // the same key again, a free voice, or the oldest
         let v = self
             .voices
@@ -840,26 +2421,39 @@ impl Modular {
                     .min_by_key(|&i| self.voices[i].age)
                     .unwrap_or(0)
             });
+        let last = self.last_pitch;
         let voice = &mut self.voices[v];
         if !voice.active {
-            voice.outs.fill(0.0);
-            for s in &mut voice.states {
-                let rng = s.rng;
-                *s = NodeState {
-                    rng,
-                    ..NodeState::default()
-                };
-            }
+            voice.clear();
+            voice.pitch = last.unwrap_or((f64::from(key) - 60.0) / 12.0);
         }
         voice.key = key;
-        voice.vel = vel.clamp(0.0, 1.0);
+        voice.vel = vel;
         voice.gate = true;
+        voice.trig = true;
         voice.active = true;
         voice.age = self.clock;
         voice.quiet = 0;
+        self.last_pitch = Some((f64::from(key) - 60.0) / 12.0);
     }
 
     pub fn note_off(&mut self, key: u8) {
+        if self.patch.mono {
+            self.held.retain(|&k| k != key);
+            let legato = self.patch.legato;
+            let v = &mut self.voices[0];
+            if v.active && v.key == key {
+                match self.held.last() {
+                    // back to the key still held
+                    Some(&k) => {
+                        v.key = k;
+                        v.trig = !legato;
+                    }
+                    None => v.gate = false,
+                }
+            }
+            return;
+        }
         for v in self.voices.iter_mut().filter(|v| v.active && v.key == key) {
             v.gate = false;
         }
@@ -867,6 +2461,7 @@ impl Modular {
 
     /// Let go of every key.
     pub fn release_all(&mut self) {
+        self.held.clear();
         for v in &mut self.voices {
             v.gate = false;
         }
@@ -874,6 +2469,7 @@ impl Modular {
 
     /// Stop every voice at once.
     pub fn stop(&mut self) {
+        self.held.clear();
         for v in &mut self.voices {
             v.active = false;
             v.gate = false;
@@ -892,11 +2488,15 @@ impl Modular {
             return;
         };
         let quiet_after = (QUIET_TIME * self.sr) as usize;
-        let sr = self.sr;
+        let ctx = Ctx {
+            sr: self.sr,
+            out_at,
+            controls: self.controls,
+        };
         let graph = &self.graph;
         for v in self.voices.iter_mut().filter(|v| v.active) {
             for (ol, or) in l.iter_mut().zip(r.iter_mut()) {
-                let (a, b) = step(graph, v, sr, out_at);
+                let (a, b) = step(graph, v, &ctx);
                 *ol += a;
                 *or += b;
                 if !v.gate {
@@ -915,6 +2515,14 @@ impl Modular {
     }
 }
 
+/// What every voice's step needs to know.
+struct Ctx {
+    sr: f64,
+    /// The `Output` module's place.
+    out_at: usize,
+    controls: Controls,
+}
+
 /// The value of input `k` of a module for this sample.
 #[inline]
 fn input(c: &Compiled, outs: &[f32], k: usize, unplugged: f32) -> f32 {
@@ -928,61 +2536,188 @@ fn input(c: &Compiled, outs: &[f32], k: usize, unplugged: f32) -> f32 {
 /// A parameter of a module for this sample, with what its cables add, in its units.
 #[inline]
 fn param(c: &Compiled, outs: &[f32], p: usize) -> f64 {
-    let spec = &c.kind.spec().params[p];
-    let k = c.kind.spec().inputs.len() + p;
-    let m = if c.sources[k].is_empty() {
-        0.0
-    } else {
-        f64::from(input(c, outs, k, 0.0))
-    };
-    spec.denormalize(c.base[p] + m)
+    let k = c.inputs + p;
+    if c.sources[k].is_empty() {
+        return c.value[p];
+    }
+    let m = f64::from(input(c, outs, k, 0.0));
+    c.kind.spec().params[p].denormalize(c.base[p] + m)
+}
+
+/// `f(x)`, worked out again only when `x` changes.
+#[inline]
+fn memo(slot: &mut [f64; 2], x: f64, f: impl FnOnce(f64) -> f64) -> f64 {
+    if slot[0] != x {
+        *slot = [x, f(x)];
+    }
+    slot[1]
+}
+
+/// Whether input `k` has a cable.
+#[inline]
+fn plugged(c: &Compiled, k: usize) -> bool {
+    !c.sources[k].is_empty()
+}
+
+/// A one pole smoothing coefficient that gets within 1% in `t` seconds.
+#[inline]
+fn coef(t: f64, sr: f64) -> f64 {
+    (-4.6 / (t * sr).max(1.0)).exp()
 }
 
 /// One sample of a voice: (left, right).
-fn step(graph: &Graph, v: &mut Voice, sr: f64, out_at: usize) -> (f32, f32) {
+fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
+    let sr = ctx.sr;
+    let trig = v.trig;
     let mut result = (0.0, 0.0);
     for (k, c) in graph.nodes.iter().enumerate() {
         let s = &mut v.states[k];
         let outs = &mut v.outs;
+        let line = &mut v.lines[k];
+        let fresh = s.stage == 0;
         match c.kind {
             Kind::Keys => {
-                outs[c.out] = (f32::from(v.key) - 60.0) / 12.0;
-                outs[c.out + 1] = if v.gate { 1.0 } else { 0.0 };
+                let target = (f64::from(v.key) - 60.0) / 12.0;
+                let glide = param(c, outs, 0).max(graph.glide);
+                if glide > 0.0 && !fresh {
+                    v.pitch =
+                        target + (v.pitch - target) * memo(&mut s.memo[0], glide, |t| coef(t, sr));
+                } else if glide <= 0.0 {
+                    v.pitch = target;
+                }
+                s.stage = 1;
+                let ct = ctx.controls;
+                let bend = f64::from(ct.bend) * param(c, outs, 1) / 12.0;
+                outs[c.out] = (v.pitch + bend) as f32;
+                outs[c.out + 1] = if v.gate && !trig { 1.0 } else { 0.0 };
                 outs[c.out + 2] = v.vel;
+                outs[c.out + 3] = ct.wheel;
+                outs[c.out + 4] = ct.bend;
+                outs[c.out + 5] = ct.pressure;
             }
             Kind::Osc => {
-                let pitch = f64::from(input(c, outs, 0, 0.0));
+                let pitch = f64::from(input(c, outs, 0, 0.0) + input(c, outs, 3, 0.0));
                 let fm = f64::from(input(c, outs, 1, 0.0));
+                let sync = f64::from(input(c, outs, 2, 0.0));
                 let shape = param(c, outs, 0) as u32;
                 let tune = param(c, outs, 1);
                 let fine = param(c, outs, 2);
                 let pw = param(c, outs, 3);
                 let level = param(c, outs, 4);
-                let f = (C4 * (pitch + tune / 12.0 + fine / 1200.0).exp2() * (1.0 + fm))
-                    .clamp(-sr * 0.45, sr * 0.45);
-                let dt = (f / sr).abs().max(1e-9);
-                outs[c.out] = (wave(shape, s.phase, dt, pw) * level) as f32;
-                s.phase = (s.phase + f / sr).rem_euclid(1.0);
+                let morph = param(c, outs, 5);
+                let count = (param(c, outs, 6) as usize).clamp(1, 8);
+                let detune = param(c, outs, 7);
+                let spread = param(c, outs, 8);
+                let phase = param(c, outs, 9);
+                let reset = param(c, outs, 10) > 0.5;
+                // hard sync: a rising edge on `sync` starts the wave again
+                let synced = plugged(c, 2) && sync > 0.0 && s.v[0] <= 0.0;
+                s.v[0] = sync;
+                if (trig && reset) || synced {
+                    s.ph = [phase; 8];
+                } else if fresh && !reset {
+                    let ph = std::array::from_fn(|_| 0.5 + 0.5 * s.rand());
+                    s.ph = ph;
+                }
+                s.stage = 1;
+                let lim = sr * 0.45;
+                let f0 =
+                    C4 * memo(
+                        &mut s.memo[0],
+                        pitch + tune / 12.0 + fine / 1200.0,
+                        f64::exp2,
+                    ) * (1.0 + fm);
+                if count == 1 {
+                    let f = f0.clamp(-lim, lim);
+                    let dt = (f / sr).abs().max(1e-9);
+                    let y = (osc_wave(shape, morph, s.ph[0], dt, pw) * level) as f32;
+                    outs[c.out] = y;
+                    outs[c.out + 1] = y;
+                    s.ph[0] = (s.ph[0] + f / sr).rem_euclid(1.0);
+                } else {
+                    let (mut l, mut r) = (0.0, 0.0);
+                    let last = (count - 1) as f64;
+                    let key = detune + 1000.0 * count as f64;
+                    if s.uni_key != key {
+                        s.uni_key = key;
+                        for j in 0..count {
+                            let at = 2.0 * j as f64 / last - 1.0;
+                            s.uni[j] = (detune * at / 1200.0).exp2();
+                        }
+                    }
+                    for j in 0..count {
+                        let at = 2.0 * j as f64 / last - 1.0;
+                        let f = (f0 * s.uni[j]).clamp(-lim, lim);
+                        let dt = (f / sr).abs().max(1e-9);
+                        let y = osc_wave(shape, morph, s.ph[j], dt, pw);
+                        let pan = spread * at;
+                        l += y * (1.0 - pan).min(1.0);
+                        r += y * (1.0 + pan).min(1.0);
+                        s.ph[j] = (s.ph[j] + f / sr).rem_euclid(1.0);
+                    }
+                    let g = level / (count as f64).sqrt();
+                    outs[c.out] = (l * g) as f32;
+                    outs[c.out + 1] = (r * g) as f32;
+                }
+            }
+            Kind::Fm => {
+                let pitch = f64::from(input(c, outs, 0, 0.0));
+                let pm = f64::from(input(c, outs, 1, 0.0));
+                let ratio = param(c, outs, 0);
+                let tune = param(c, outs, 1);
+                let fb = param(c, outs, 2);
+                let level = param(c, outs, 3);
+                if trig {
+                    s.ph[0] = 0.0;
+                }
+                s.stage = 1;
+                let f = (C4 * ratio * memo(&mut s.memo[0], pitch + tune / 12.0, f64::exp2))
+                    .min(sr * 0.45);
+                // feedback from the mean of the last two samples, which keeps it calm
+                let back = fb * 1.5 * (s.v[0] + s.v[1]) * 0.5;
+                let y = (2.0 * PI * (s.ph[0] + pm) + back).sin();
+                s.v[1] = s.v[0];
+                s.v[0] = y;
+                s.ph[0] = (s.ph[0] + f / sr).rem_euclid(1.0);
+                outs[c.out] = (y * level) as f32;
             }
             Kind::Noise => {
-                // xorshift
-                let mut x = s.rng;
-                x ^= x << 13;
-                x ^= x >> 17;
-                x ^= x << 5;
-                s.rng = x;
                 let level = param(c, outs, 0);
-                outs[c.out] = ((f64::from(x) / f64::from(u32::MAX) * 2.0 - 1.0) * level) as f32;
+                outs[c.out] = (s.rand() * level) as f32;
+            }
+            Kind::Macro => {
+                for q in 0..4 {
+                    outs[c.out + q] = param(c, outs, q) as f32;
+                }
             }
             Kind::Lfo => {
                 let rate = param(c, outs, 0);
                 let shape = param(c, outs, 1) as u32;
                 let depth = param(c, outs, 2);
+                let phase = param(c, outs, 3);
+                let on_note = param(c, outs, 4) > 0.5;
+                if (trig && on_note) || (fresh && on_note) {
+                    s.ph[0] = phase;
+                } else if fresh {
+                    s.ph[0] = s.rand() * 0.5 + 0.5;
+                }
+                if fresh || (trig && shape == 4) {
+                    s.v[0] = s.rand();
+                }
+                s.stage = 1;
                 // no correction: an LFO's steps are meant to be steps
-                let w = wave(shape, s.phase, 0.0, 0.5) * depth;
+                let w = if shape == 4 {
+                    s.v[0]
+                } else {
+                    wave(shape, s.ph[0], 0.0, 0.5)
+                } * depth;
                 outs[c.out] = w as f32;
                 outs[c.out + 1] = ((w + depth) * 0.5) as f32;
-                s.phase = (s.phase + rate / sr).rem_euclid(1.0);
+                let next = s.ph[0] + rate / sr;
+                if next >= 1.0 {
+                    s.v[0] = s.rand();
+                }
+                s.ph[0] = next.rem_euclid(1.0);
             }
             Kind::Env => {
                 let gate = input(c, outs, 0, 0.0) > 0.5;
@@ -992,6 +2727,8 @@ fn step(graph: &Graph, v: &mut Voice, sr: f64, out_at: usize) -> (f32, f32) {
                     param(c, outs, 2),
                     param(c, outs, 3),
                 );
+                let bend = param(c, outs, 4);
+                let looped = param(c, outs, 5) > 0.5;
                 if gate && !s.gate {
                     s.stage = 1;
                 } else if !gate && s.gate {
@@ -999,26 +2736,116 @@ fn step(graph: &Graph, v: &mut Voice, sr: f64, out_at: usize) -> (f32, f32) {
                 }
                 s.gate = gate;
                 // exponential moves that get within 1% of where they go in their time
-                let coef = |t: f64| (-4.6 / (t * sr).max(1.0)).exp();
                 match s.stage {
                     1 => {
-                        s.a += 1.0 / (att * sr).max(1.0);
-                        if s.a >= 1.0 {
-                            s.a = 1.0;
+                        s.v[0] += 1.0 / (att * sr).max(1.0);
+                        if s.v[0] >= 1.0 {
+                            s.v[0] = 1.0;
                             s.stage = 2;
                         }
                     }
-                    2 => s.a = sus + (s.a - sus) * coef(dec),
+                    2 => {
+                        s.v[0] = sus + (s.v[0] - sus) * memo(&mut s.memo[0], dec, |t| coef(t, sr));
+                        // a looping envelope starts again once it has decayed
+                        if looped && (s.v[0] - sus).abs() < 0.01 {
+                            s.stage = 1;
+                        }
+                    }
                     3 => {
-                        s.a *= coef(rel);
-                        if s.a < 1e-6 {
-                            s.a = 0.0;
+                        s.v[0] *= memo(&mut s.memo[1], rel, |t| coef(t, sr));
+                        if s.v[0] < 1e-6 {
+                            s.v[0] = 0.0;
                             s.stage = 0;
                         }
                     }
-                    _ => s.a = 0.0,
+                    _ => s.v[0] = 0.0,
                 }
-                outs[c.out] = s.a as f32;
+                outs[c.out] = curve(s.v[0], bend) as f32;
+            }
+            Kind::Hold => {
+                let rate = param(c, outs, 0);
+                let take = if plugged(c, 1) {
+                    let t = f64::from(input(c, outs, 1, 0.0));
+                    let rise = t > 0.5 && s.v[1] <= 0.5;
+                    s.v[1] = t;
+                    rise
+                } else {
+                    s.ph[0] += rate / sr;
+                    let wrap = s.ph[0] >= 1.0;
+                    s.ph[0] = s.ph[0].rem_euclid(1.0);
+                    wrap
+                };
+                if take || fresh {
+                    // nothing plugged into `in` takes noise
+                    s.v[0] = if plugged(c, 0) {
+                        f64::from(input(c, outs, 0, 0.0))
+                    } else {
+                        s.rand()
+                    };
+                }
+                s.stage = 1;
+                outs[c.out] = s.v[0] as f32;
+            }
+            Kind::Seq => {
+                // v: 0 the step, 1 the clock before, 2 samples since a clock,
+                // 3 the clock's period, 4 the reset before, 5 clocked yet
+                let rate = param(c, outs, 0);
+                let length = (param(c, outs, 1) as usize).clamp(1, 8);
+                let gate_len = param(c, outs, 2);
+                let reset_in = f64::from(input(c, outs, 1, 0.0));
+                if trig || (reset_in > 0.5 && s.v[4] <= 0.5) {
+                    s.v[0] = 0.0;
+                    s.v[5] = 0.0;
+                    s.ph[0] = 0.0;
+                }
+                s.v[4] = reset_in;
+                let advance = |s: &mut NodeState| {
+                    s.v[0] = ((s.v[0] as usize + 1) % length) as f64;
+                };
+                let open = if plugged(c, 0) {
+                    let clk = f64::from(input(c, outs, 0, 0.0));
+                    if clk > 0.5 && s.v[1] <= 0.5 {
+                        // the first clock plays the first step
+                        if s.v[5] > 0.5 {
+                            advance(s);
+                        }
+                        s.v[5] = 1.0;
+                        s.v[3] = s.v[2];
+                        s.v[2] = 0.0;
+                    }
+                    s.v[1] = clk;
+                    s.v[2] += 1.0;
+                    s.v[5] > 0.5 && s.v[2] < gate_len * s.v[3].max(1.0)
+                } else {
+                    let open = s.ph[0] < gate_len;
+                    s.ph[0] += rate / sr;
+                    if s.ph[0] >= 1.0 {
+                        s.ph[0] -= 1.0;
+                        advance(s);
+                    }
+                    open
+                };
+                if s.v[0] as usize >= length {
+                    s.v[0] = 0.0;
+                }
+                s.stage = 1;
+                outs[c.out] = param(c, outs, 3 + s.v[0] as usize) as f32;
+                outs[c.out + 1] = if open { 1.0 } else { 0.0 };
+            }
+            Kind::Slew => {
+                let x = f64::from(input(c, outs, 0, 0.0));
+                if fresh {
+                    s.v[0] = x;
+                }
+                s.stage = 1;
+                let t = if x > s.v[0] {
+                    param(c, outs, 0)
+                } else {
+                    param(c, outs, 1)
+                };
+                let k = if x > s.v[0] { 0 } else { 1 };
+                s.v[0] = x + (s.v[0] - x) * memo(&mut s.memo[k], t, |t| coef(t, sr));
+                outs[c.out] = s.v[0] as f32;
             }
             Kind::Filter => {
                 let x = f64::from(input(c, outs, 0, 0.0));
@@ -1026,13 +2853,13 @@ fn step(graph: &Graph, v: &mut Voice, sr: f64, out_at: usize) -> (f32, f32) {
                 let cutoff = param(c, outs, 1).min(sr * 0.45);
                 let res = param(c, outs, 2);
                 // a state variable filter in the topology preserving form
-                let g = (PI * cutoff / sr).tan();
+                let g = memo(&mut s.memo[0], cutoff, |f| (PI * f / sr).tan());
                 let kq = 2.0 - 1.96 * res;
                 let a1 = 1.0 / (1.0 + g * (g + kq));
-                let v1 = a1 * (s.a + g * (x - s.b));
-                let v2 = s.b + g * v1;
-                s.a = 2.0 * v1 - s.a;
-                s.b = 2.0 * v2 - s.b;
+                let v1 = a1 * (s.v[0] + g * (x - s.v[1]));
+                let v2 = s.v[1] + g * v1;
+                s.v[0] = 2.0 * v1 - s.v[0];
+                s.v[1] = 2.0 * v2 - s.v[1];
                 let y = match mode {
                     0 => v2,
                     1 => v1,
@@ -1041,10 +2868,122 @@ fn step(graph: &Graph, v: &mut Voice, sr: f64, out_at: usize) -> (f32, f32) {
                 outs[c.out] = if y.is_finite() {
                     y as f32
                 } else {
-                    s.a = 0.0;
-                    s.b = 0.0;
+                    s.v = [0.0; 8];
                     0.0
                 };
+            }
+            Kind::Ladder => {
+                let x = f64::from(input(c, outs, 0, 0.0));
+                let cutoff = param(c, outs, 0).min(sr * 0.45);
+                let res = param(c, outs, 1);
+                let drive = param(c, outs, 2);
+                let mode = param(c, outs, 3) as u32;
+                // four one pole stages, with the last fed back through a soft clip
+                let g = memo(&mut s.memo[0], cutoff, |f| 1.0 - (-2.0 * PI * f / sr).exp());
+                let fb = 4.0 * res;
+                let u = (drive * x * (1.0 + res) - fb * s.v[3]).tanh();
+                s.v[0] += g * (u - s.v[0]);
+                s.v[1] += g * (s.v[0] - s.v[1]);
+                s.v[2] += g * (s.v[1] - s.v[2]);
+                s.v[3] += g * (s.v[2] - s.v[3]);
+                let y = if mode == 1 { s.v[1] } else { s.v[3] };
+                outs[c.out] = if y.is_finite() {
+                    y as f32
+                } else {
+                    s.v = [0.0; 8];
+                    0.0
+                };
+            }
+            Kind::Shaper => {
+                let x = f64::from(input(c, outs, 0, 0.0));
+                let drive = param(c, outs, 0);
+                let shape = param(c, outs, 1) as u32;
+                let mix = param(c, outs, 2);
+                let y = match shape {
+                    0 => (drive * x).tanh() / drive.tanh(),
+                    1 => fold(drive * x),
+                    _ => (drive * x).clamp(-1.0, 1.0),
+                };
+                outs[c.out] = (x + (y - x) * mix) as f32;
+            }
+            Kind::Ring => {
+                let a = input(c, outs, 0, 0.0);
+                let b = input(c, outs, 1, 0.0);
+                let mix = param(c, outs, 0) as f32;
+                outs[c.out] = a * (1.0 - mix) + a * b * mix;
+            }
+            Kind::Delay => {
+                let x = f64::from(input(c, outs, 0, 0.0));
+                let time = param(c, outs, 0);
+                let fb = param(c, outs, 1);
+                let mix = param(c, outs, 2);
+                let tone = param(c, outs, 3);
+                let len = line.len();
+                let d = (time * sr).clamp(1.0, (len - 2) as f64);
+                let y = tap(line, s.n, d);
+                // the echoes darken as they repeat
+                s.v[0] += (y - s.v[0]) * (0.05 + 0.95 * tone);
+                line[s.n % len] = (x + s.v[0] * fb) as f32;
+                s.n = (s.n + 1) % len;
+                outs[c.out] = (x + (y - x) * mix) as f32;
+            }
+            Kind::Chorus => {
+                let x = f64::from(input(c, outs, 0, 0.0));
+                let rate = param(c, outs, 0);
+                let depth = param(c, outs, 1);
+                let mix = param(c, outs, 2);
+                let len = line.len();
+                line[s.n % len] = x as f32;
+                // two taps that swing on triangles a quarter turn apart
+                let base = 0.012 * sr;
+                let swing = 0.006 * sr * depth;
+                let dl = base + swing * (1.0 + wave(1, s.ph[0], 0.0, 0.5));
+                let dr = base + swing * (1.0 + wave(1, (s.ph[0] + 0.25) % 1.0, 0.0, 0.5));
+                let yl = tap(line, s.n, dl);
+                let yr = tap(line, s.n, dr);
+                s.n = (s.n + 1) % len;
+                s.ph[0] = (s.ph[0] + rate / sr).rem_euclid(1.0);
+                outs[c.out] = (x + (yl - x) * mix) as f32;
+                outs[c.out + 1] = (x + (yr - x) * mix) as f32;
+            }
+            Kind::Reverb => {
+                // a small Schroeder reverb: four damped combs a side into two allpasses
+                let x = f64::from(input(c, outs, 0, 0.0));
+                let size = param(c, outs, 0);
+                let damp = param(c, outs, 1) * 0.7;
+                let mix = param(c, outs, 2);
+                let lens = reverb_lines(sr);
+                let fb = 0.7 + 0.28 * size;
+                let mut start = [0usize; 12];
+                let mut at = 0;
+                for (q, l) in lens.iter().enumerate() {
+                    start[q] = at;
+                    at += l;
+                }
+                let input_gain = x * 0.05;
+                let mut wet = [0.0f64; 2];
+                for (side, w) in wet.iter_mut().enumerate() {
+                    let mut acc = 0.0;
+                    for j in 0..4 {
+                        let q = side * 4 + j;
+                        let i = start[q] + s.n % lens[q];
+                        let y = f64::from(line[i]);
+                        s.v[q] = y * (1.0 - damp) + s.v[q] * damp;
+                        line[i] = (input_gain + s.v[q] * fb) as f32;
+                        acc += y;
+                    }
+                    for j in 0..2 {
+                        let q = 8 + side * 2 + j;
+                        let i = start[q] + s.n % lens[q];
+                        let b = f64::from(line[i]);
+                        line[i] = (acc + b * 0.5) as f32;
+                        acc = b - acc;
+                    }
+                    *w = acc;
+                }
+                s.n = s.n.wrapping_add(1);
+                outs[c.out] = (x * (1.0 - mix) + wet[0] * mix) as f32;
+                outs[c.out + 1] = (x * (1.0 - mix) + wet[1] * mix) as f32;
             }
             Kind::Vca => {
                 let x = input(c, outs, 0, 0.0);
@@ -1063,25 +3002,46 @@ fn step(graph: &Graph, v: &mut Voice, sr: f64, out_at: usize) -> (f32, f32) {
                 let b = input(c, outs, 1, 0.0);
                 outs[c.out] = a * param(c, outs, 0) as f32 + b + param(c, outs, 1) as f32;
             }
+            Kind::Quant => {
+                let x = f64::from(input(c, outs, 0, 0.0));
+                outs[c.out] = quantize(x, param(c, outs, 0) as usize) as f32;
+            }
+            Kind::Compare => {
+                let a = input(c, outs, 0, 0.0);
+                let b = input(c, outs, 1, 0.0);
+                let above = a > b + param(c, outs, 0) as f32;
+                outs[c.out] = if above { 1.0 } else { 0.0 };
+                outs[c.out + 1] = if above { 0.0 } else { 1.0 };
+            }
+            Kind::Pan => {
+                let x = input(c, outs, 0, 0.0);
+                // equal power, at full level in the middle
+                let a = (param(c, outs, 0) + 1.0) * PI * 0.25;
+                outs[c.out] = x * (a.cos() * std::f64::consts::SQRT_2) as f32;
+                outs[c.out + 1] = x * (a.sin() * std::f64::consts::SQRT_2) as f32;
+            }
             Kind::Output => {
-                if k == out_at {
+                if k == ctx.out_at {
                     let left = input(c, outs, 0, 0.0);
-                    let right = if c.sources[1].is_empty() {
-                        left
-                    } else {
+                    let right = if plugged(c, 1) {
                         input(c, outs, 1, 0.0)
+                    } else {
+                        left
                     };
-                    let level = param(c, outs, 0) as f32;
+                    let level = param(c, outs, 0) as f32 * graph.volume;
+                    let width = param(c, outs, 1) as f32;
+                    let mid = (left + right) * 0.5;
+                    let side = (left - right) * 0.5 * width;
                     // a runaway loop is held back rather than blowing up
                     result = (
-                        (left * level).clamp(-4.0, 4.0),
-                        (right * level).clamp(-4.0, 4.0),
+                        ((mid + side) * level).clamp(-4.0, 4.0),
+                        ((mid - side) * level).clamp(-4.0, 4.0),
                     );
                 }
             }
         }
         // a cable loop can grow without end; keep every signal finite and bounded
-        for o in &mut v.outs[c.out..c.out + c.kind.spec().outputs.len()] {
+        for o in &mut v.outs[c.out..c.out + c.outputs] {
             *o = if o.is_finite() {
                 o.clamp(-64.0, 64.0)
             } else {
@@ -1089,6 +3049,7 @@ fn step(graph: &Graph, v: &mut Voice, sr: f64, out_at: usize) -> (f32, f32) {
             };
         }
     }
+    v.trig = false;
     result
 }
 
@@ -1120,18 +3081,44 @@ mod tests {
     }
 
     fn sine_patch() -> Patch {
-        Patch {
-            nodes: vec![
+        Patch::new(
+            vec![
                 Node::new(1, Kind::Keys, [0.0; 2]),
                 Node::new(2, Kind::Osc, [0.0; 2]).with("wave", 0.0),
                 Node::new(3, Kind::Output, [0.0; 2]).with("level", 1.0),
             ],
-            cables: vec![
+            vec![
                 Cable::new(1, "pitch", 2, "pitch", 1.0),
                 Cable::new(2, "out", 3, "left", 1.0),
             ],
-            voices: 4,
-        }
+            4,
+        )
+    }
+
+    /// Keys and an output at level 1, with these modules and cables between them.
+    fn rig(nodes: Vec<Node>, cables: Vec<Cable>) -> Patch {
+        let mut p = Patch::new(
+            vec![
+                Node::new(1, Kind::Keys, [0.0; 2]),
+                Node::new(100, Kind::Output, [0.0; 2]).with("level", 1.0),
+            ],
+            cables,
+            4,
+        );
+        p.nodes.extend(nodes);
+        p
+    }
+
+    /// Play one note of a patch.
+    fn play(p: &Patch, key: u8, frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut m = Modular::new(p, SR);
+        m.note_on(key, 1.0);
+        run(&mut m, frames)
+    }
+
+    /// A constant signal from a math module's offset.
+    fn dc(id: u32, v: f64) -> Node {
+        Node::new(id, Kind::Math, [0.0; 2]).with("offset", v)
     }
 
     #[test]
@@ -1256,6 +3243,31 @@ mod tests {
     }
 
     #[test]
+    fn an_old_patch_loads_with_the_new_settings_at_their_defaults() {
+        // a patch saved before unison, mono and volume
+        let old = serde_json::json!({
+            "nodes": [
+                { "id": 1, "kind": "keys", "pos": [0, 0] },
+                { "id": 2, "kind": "osc", "params": { "wave": 0.0 } },
+                { "id": 3, "kind": "output", "params": { "level": 1.0 } }
+            ],
+            "cables": [
+                { "from": 1, "output": "pitch", "to": 2, "input": "pitch" },
+                { "from": 2, "output": "out", "to": 3, "input": "left" }
+            ],
+            "voices": 4
+        });
+        let p = Patch::from_json(&old).unwrap();
+        assert!(!p.mono && !p.legato);
+        assert_eq!((p.glide, p.volume), (0.0, 1.0));
+        assert_eq!(p.nodes[1].param("voices"), 1.0);
+        assert_eq!(p.nodes[2].param("width"), 1.0);
+        let (l, _) = play(&p, 69, 24_000);
+        assert!((freq(&l) - 440.0).abs() < 0.5);
+        assert!((rms(&l) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
+    }
+
+    #[test]
     fn moving_a_parameter_keeps_the_voices_playing() {
         let mut m = Modular::new(&sine_patch(), SR);
         m.note_on(69, 1.0);
@@ -1266,6 +3278,10 @@ mod tests {
         assert_eq!(m.active_voices(), 1);
         let (l, _) = run(&mut m, 24_000);
         assert!((freq(&l) - 880.0).abs() < 1.0, "{}", freq(&l));
+        // the volume is a setting, which keeps them playing too
+        p.volume = 0.5;
+        m.set_patch(&p);
+        assert_eq!(m.active_voices(), 1);
         // a new cable starts again
         p.cables.pop();
         m.set_patch(&p);
@@ -1273,14 +3289,30 @@ mod tests {
     }
 
     #[test]
-    fn every_factory_patch_plays_and_has_only_good_cables() {
-        for (name, p) in factory() {
+    fn there_are_many_factory_patches_and_each_plays() {
+        let all = factory();
+        assert!(all.len() >= 25, "{}", all.len());
+        let names: std::collections::HashSet<_> = all.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), all.len(), "names are unique");
+        for (name, p) in all {
             assert!(p.cables.iter().all(|c| p.is_valid(c)), "{name}");
             let mut m = Modular::new(&p, SR);
             m.note_on(57, 0.8);
             let (l, r) = run(&mut m, 48_000);
-            assert!(rms(&l) > 0.01 && rms(&r) > 0.01, "{name} {}", rms(&l));
-            assert!(l.iter().chain(&r).all(|v| v.is_finite() && v.abs() <= 4.0));
+            for x in [&l, &r] {
+                assert!(x.iter().all(|v| v.is_finite() && v.abs() <= 4.0), "{name}");
+                let peak = x.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+                assert!(rms(x) > 0.003 && peak > 0.02, "{name} {} {peak}", rms(x));
+            }
+            // and it goes quiet once the key is let go
+            m.note_off(57);
+            for _ in 0..10 {
+                if m.active_voices() == 0 {
+                    break;
+                }
+                run(&mut m, 48_000);
+            }
+            assert_eq!(m.active_voices(), 0, "{name}");
         }
     }
 
@@ -1290,8 +3322,637 @@ mod tests {
         assert!((c.denormalize(c.normalize(440.0)) - 440.0).abs() < 1e-9);
         assert!((c.denormalize(0.5) - (20.0f64 * 20_000.0).sqrt()).abs() < 1e-6);
         let w = Kind::Osc.param("wave").unwrap();
-        assert_eq!(w.denormalize(0.4), 1.0);
+        assert_eq!(w.denormalize(0.3), 1.0);
         assert_eq!(Kind::Vca.input_index("gain"), Some(2));
         assert_eq!(Kind::Vca.input_index("cv"), Some(1));
+        // a whole number keeps its own range
+        let v = Kind::Osc.param("voices").unwrap();
+        assert_eq!((v.denormalize(0.0), v.denormalize(1.0)), (1.0, 8.0));
+        assert_eq!(v.normalize(1.0), 0.0);
+    }
+
+    #[test]
+    fn every_kind_has_a_category_and_its_choices_fit() {
+        for k in Kind::ALL {
+            assert!(k.category() < CATEGORIES.len());
+            for p in k.spec().params {
+                if let Some(c) = k.choices(p.name) {
+                    assert_eq!(c.len() as u32, p.steps, "{k:?} {}", p.name);
+                }
+            }
+            // automation ids have room for every parameter
+            assert!(k.spec().params.len() < 64);
+        }
+        // every kind is in the list once
+        let set: std::collections::HashSet<_> = Kind::ALL.iter().collect();
+        assert_eq!(set.len(), Kind::ALL.len());
+    }
+
+    // ----- the oscillator
+
+    #[test]
+    fn unison_spreads_the_voices_and_keeps_the_pitch() {
+        let mut p = sine_patch();
+        p.nodes[1] = Node::new(2, Kind::Osc, [0.0; 2])
+            .with("wave", 0.0)
+            .with("voices", 4.0)
+            .with("detune", 4.0)
+            .with("spread", 1.0);
+        p.cables.push(Cable::new(2, "right", 3, "right", 1.0));
+        let (l, r) = play(&p, 69, 48_000);
+        assert!((freq(&l) - 440.0).abs() < 3.0, "{}", freq(&l));
+        assert!(l != r, "spread makes it stereo");
+        assert!(rms(&l) > 0.2 && rms(&r) > 0.2);
+        // with no spread both sides are the same
+        p.nodes[1].params.insert("spread".into(), 0.0);
+        let (l, r) = play(&p, 69, 4_800);
+        assert_eq!(l, r);
+        // one voice puts the same wave on both outputs
+        p.nodes[1].params.insert("voices".into(), 1.0);
+        let (l, r) = play(&p, 69, 4_800);
+        assert_eq!(l, r);
+    }
+
+    #[test]
+    fn hard_sync_makes_the_slave_repeat_with_the_master() {
+        // a master at 480 Hz repeats every 100 samples
+        let pitch = (480.0 / C4).log2();
+        let make = |sync: bool| {
+            let mut cables = vec![
+                Cable::new(2, "out", 3, "pitch", 1.0),
+                Cable::new(2, "out", 4, "pitch", 1.0),
+                Cable::new(4, "out", 100, "left", 1.0),
+            ];
+            if sync {
+                cables.push(Cable::new(3, "out", 4, "sync", 1.0));
+            }
+            rig(
+                vec![
+                    dc(2, pitch),
+                    Node::new(3, Kind::Osc, [0.0; 2]).with("wave", 0.0),
+                    Node::new(4, Kind::Osc, [0.0; 2]).with("tune", 5.3),
+                ],
+                cables,
+            )
+        };
+        let err = |x: &[f32]| {
+            (10_000..20_000)
+                .map(|i| (x[i] - x[i + 100]).abs())
+                .sum::<f32>()
+                / 10_000.0
+        };
+        let (synced, _) = play(&make(true), 60, 24_000);
+        let (free, _) = play(&make(false), 60, 24_000);
+        assert!(err(&synced) < 0.02, "{}", err(&synced));
+        assert!(err(&free) > 0.2, "{}", err(&free));
+    }
+
+    #[test]
+    fn linear_and_pitch_fm_move_the_frequency() {
+        // an octave into pitch fm, and a signal of 1 into linear fm, both double it
+        for input in ["pfm", "fm"] {
+            let mut p = sine_patch();
+            p.nodes.push(dc(4, 1.0));
+            p.cables.push(Cable::new(4, "out", 2, input, 1.0));
+            let (l, _) = play(&p, 69, 24_000);
+            assert!((freq(&l) - 880.0).abs() < 1.0, "{input} {}", freq(&l));
+        }
+    }
+
+    #[test]
+    fn morph_blends_the_waves_in_order() {
+        let shape = |wave: f64, morph: f64| {
+            let mut p = sine_patch();
+            p.nodes[1] = Node::new(2, Kind::Osc, [0.0; 2])
+                .with("wave", wave)
+                .with("morph", morph);
+            play(&p, 57, 4_800).0
+        };
+        // the whole numbers are the basic waves
+        let same = |a: Vec<f32>, b: Vec<f32>| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(same(shape(4.0, 0.0), shape(0.0, 0.0)));
+        assert!(same(shape(4.0, 1.0), shape(1.0, 0.0)));
+        assert!(same(shape(4.0, 3.0), shape(3.0, 0.0)));
+        // halfway is the mean of its two neighbours
+        let (a, b, half) = (shape(0.0, 0.0), shape(1.0, 0.0), shape(4.0, 0.5));
+        for k in (0..4_800).step_by(97) {
+            assert!((half[k] - (a[k] + b[k]) * 0.5).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn the_phase_resets_on_each_note_or_runs_free() {
+        let mut p = sine_patch();
+        p.nodes[1] = Node::new(2, Kind::Osc, [0.0; 2])
+            .with("wave", 0.0)
+            .with("phase", 0.25);
+        // a sine a quarter in is at its top
+        let (l, _) = play(&p, 69, 16);
+        assert!((l[0] - 1.0).abs() < 1e-3, "{}", l[0]);
+        p.nodes[1].params.insert("retrig".into(), 0.0);
+        let mut m = Modular::new(&p, SR);
+        m.note_on(60, 1.0);
+        m.note_on(64, 1.0);
+        let (l, _) = run(&mut m, 2);
+        // two free voices start at different places, so they do not add to 2
+        assert!((l[0] - 2.0).abs() > 0.01);
+    }
+
+    // ----- sources
+
+    #[test]
+    fn an_fm_operator_follows_its_ratio_and_feedback_adds_harmonics() {
+        let op = |ratio: f64, fb: f64| {
+            rig(
+                vec![Node::new(2, Kind::Fm, [0.0; 2])
+                    .with("ratio", ratio)
+                    .with("feedback", fb)],
+                vec![
+                    Cable::new(1, "pitch", 2, "pitch", 1.0),
+                    Cable::new(2, "out", 100, "left", 1.0),
+                ],
+            )
+        };
+        let (l, _) = play(&op(2.0, 0.0), 69, 24_000);
+        assert!((freq(&l) - 880.0).abs() < 1.0, "{}", freq(&l));
+        let hi = |x: &[f32]| rms(&x.windows(2).map(|w| w[1] - w[0]).collect::<Vec<_>>());
+        let (pure, _) = play(&op(1.0, 0.0), 57, 24_000);
+        let (rich, _) = play(&op(1.0, 0.8), 57, 24_000);
+        assert!(hi(&rich) > hi(&pure) * 1.3, "{} {}", hi(&pure), hi(&rich));
+        assert!(rich.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
+    }
+
+    #[test]
+    fn macro_knobs_are_outputs() {
+        let p = rig(
+            vec![Node::new(2, Kind::Macro, [0.0; 2]).with("knob_3", 0.4)],
+            vec![Cable::new(2, "out_3", 100, "left", 1.0)],
+        );
+        let (l, _) = play(&p, 60, 64);
+        assert!((l[10] - 0.4).abs() < 1e-6);
+        // and a knob can be moved like any parameter
+        let mut m = Modular::new(&p, SR);
+        m.set_param(2, "knob_3", 0.9);
+        m.note_on(60, 1.0);
+        assert!((run(&mut m, 8).0[4] - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn keys_put_out_velocity_and_the_performance_controls() {
+        let p = rig(
+            vec![],
+            vec![
+                Cable::new(1, "velocity", 100, "left", 1.0),
+                Cable::new(1, "wheel", 100, "right", 1.0),
+            ],
+        );
+        let mut m = Modular::new(&p, SR);
+        m.set_controls(Controls {
+            wheel: 0.25,
+            bend: 0.0,
+            pressure: 0.0,
+        });
+        m.note_on(60, 0.5);
+        let (l, r) = run(&mut m, 8);
+        assert_eq!((l[4], r[4]), (0.5, 0.25));
+        // a full bend up with a range of 12 is an octave
+        let mut p = sine_patch();
+        p.nodes[0] = Node::new(1, Kind::Keys, [0.0; 2]).with("bend_range", 12.0);
+        let mut m = Modular::new(&p, SR);
+        m.set_controls(Controls {
+            wheel: 0.0,
+            bend: 1.0,
+            pressure: 0.0,
+        });
+        m.note_on(69, 1.0);
+        let (l, _) = run(&mut m, 24_000);
+        assert!((freq(&l) - 880.0).abs() < 1.0, "{}", freq(&l));
+    }
+
+    // ----- modulators
+
+    #[test]
+    fn the_envelope_curve_bends_the_attack_and_a_loop_repeats() {
+        let env = |curve: f64, looped: f64| {
+            let p = rig(
+                vec![Node::new(2, Kind::Env, [0.0; 2])
+                    .with("attack", 0.01)
+                    .with("decay", 0.01)
+                    .with("sustain", 0.0)
+                    .with("curve", curve)
+                    .with("loop", looped)],
+                vec![
+                    Cable::new(1, "gate", 2, "gate", 1.0),
+                    Cable::new(2, "out", 100, "left", 1.0),
+                ],
+            );
+            play(&p, 60, 24_000).0
+        };
+        // halfway up the 10 ms attack
+        let (lin, slow, fast) = (env(0.0, 0.0), env(1.0, 0.0), env(-1.0, 0.0));
+        assert!((lin[240] - 0.5).abs() < 0.02, "{}", lin[240]);
+        assert!(slow[240] < 0.2 && fast[240] > 0.8);
+        // without a loop it falls and stays; with one it keeps coming back up
+        let peaks = |x: &[f32]| {
+            (1..x.len())
+                .filter(|&i| x[i] > 0.9 && x[i - 1] <= 0.9)
+                .count()
+        };
+        assert_eq!(peaks(&lin), 1);
+        assert!(peaks(&env(0.0, 1.0)) > 10);
+    }
+
+    #[test]
+    fn the_lfo_starts_at_its_phase_and_has_a_random_step() {
+        let lfo = |wave: f64| {
+            rig(
+                vec![Node::new(2, Kind::Lfo, [0.0; 2])
+                    .with("wave", wave)
+                    .with("rate", 10.0)
+                    .with("phase", 0.25)],
+                vec![Cable::new(2, "out", 100, "left", 1.0)],
+            )
+        };
+        let (l, _) = play(&lfo(0.0), 60, 8);
+        assert!((l[0] - 1.0).abs() < 1e-3);
+        // the random wave holds a value for each cycle (4800 samples at 10 Hz)
+        let (l, _) = play(&lfo(4.0), 60, 48_000);
+        let changes = (1..l.len()).filter(|&i| l[i] != l[i - 1]).count();
+        assert!((8..=11).contains(&changes), "{changes}");
+        // a held step stays put inside its cycle
+        assert_eq!(l[100], l[1_000]);
+    }
+
+    #[test]
+    fn sample_and_hold_takes_its_input_at_a_rate_or_on_a_trigger() {
+        // at its own rate, on noise
+        let p = rig(
+            vec![Node::new(2, Kind::Hold, [0.0; 2]).with("rate", 10.0)],
+            vec![Cable::new(2, "out", 100, "left", 1.0)],
+        );
+        let (l, _) = play(&p, 60, 48_000);
+        let changes = (1..l.len()).filter(|&i| l[i] != l[i - 1]).count();
+        assert!((8..=11).contains(&changes), "{changes}");
+        // on a trigger, taking a ramp: it holds the ramp's value at each rising edge
+        let p = rig(
+            vec![
+                Node::new(2, Kind::Hold, [0.0; 2]),
+                Node::new(3, Kind::Lfo, [0.0; 2])
+                    .with("wave", 2.0)
+                    .with("rate", 1.0),
+                Node::new(4, Kind::Lfo, [0.0; 2])
+                    .with("wave", 3.0)
+                    .with("rate", 4.0),
+            ],
+            vec![
+                Cable::new(3, "out", 2, "in", 1.0),
+                Cable::new(4, "uni", 2, "trig", 1.0),
+                Cable::new(2, "out", 100, "left", 1.0),
+            ],
+        );
+        let (l, _) = play(&p, 60, 48_000);
+        let changes = (1..l.len()).filter(|&i| l[i] != l[i - 1]).count();
+        assert!((3..=5).contains(&changes), "{changes}");
+        // the second edge is a quarter into the ramp, which is at -0.5
+        assert!((l[12_100] + 0.5).abs() < 0.01, "{}", l[12_100]);
+    }
+
+    #[test]
+    fn the_sequencer_steps_through_its_values_and_gates() {
+        let mut seq = Node::new(2, Kind::Seq, [0.0; 2])
+            .with("rate", 10.0)
+            .with("length", 4.0);
+        for (k, v) in [0.1, 0.2, 0.3, 0.4].iter().enumerate() {
+            seq = seq.with(&format!("step_{}", k + 1), *v);
+        }
+        let p = rig(
+            vec![seq.clone()],
+            vec![
+                Cable::new(2, "out", 100, "left", 1.0),
+                Cable::new(2, "gate", 100, "right", 1.0),
+            ],
+        );
+        let (l, r) = play(&p, 60, 48_000);
+        // 4800 samples a step, four steps around
+        for (k, want) in [0.1, 0.2, 0.3, 0.4, 0.1].iter().enumerate() {
+            assert!((l[k * 4_800 + 100] - want).abs() < 1e-6, "{k}");
+        }
+        // the gate is open for the first half of each step
+        assert_eq!((r[100], r[3_000]), (1.0, 0.0));
+        // a clock steps it instead; the first clock plays the first step
+        let p = rig(
+            vec![
+                seq,
+                Node::new(3, Kind::Lfo, [0.0; 2])
+                    .with("wave", 3.0)
+                    .with("rate", 5.0),
+            ],
+            vec![
+                Cable::new(3, "uni", 2, "clock", 1.0),
+                Cable::new(2, "out", 100, "left", 1.0),
+            ],
+        );
+        let (l, _) = play(&p, 60, 48_000);
+        assert!((l[100] - 0.1).abs() < 1e-6);
+        assert!((l[9_700] - 0.2).abs() < 1e-6, "{}", l[9_700]);
+    }
+
+    #[test]
+    fn slew_and_glide_smooth_a_jump() {
+        // the gate is 0 on a note's first sample, then 1
+        let p = rig(
+            vec![Node::new(3, Kind::Slew, [0.0; 2]).with("rise", 0.1)],
+            vec![
+                Cable::new(1, "gate", 3, "in", 1.0),
+                Cable::new(3, "out", 100, "left", 1.0),
+            ],
+        );
+        let (l, _) = play(&p, 60, 48_000);
+        assert!(l[480] > 0.2 && l[480] < 0.9, "{}", l[480]);
+        assert!((l[47_000] - 1.0).abs() < 1e-3);
+        // a glide on keys slides from one note to the next
+        let mut p = sine_patch();
+        p.nodes[0] = Node::new(1, Kind::Keys, [0.0; 2]).with("glide", 0.2);
+        p = mono(p, 0.0, false);
+        let mut m = Modular::new(&p, SR);
+        m.note_on(57, 1.0);
+        run(&mut m, 24_000);
+        m.note_on(69, 1.0);
+        let (l, _) = run(&mut m, 24_000);
+        let early = freq(&l[0..2_400]);
+        assert!(early > 225.0 && early < 400.0, "{early}");
+        assert!((freq(&l[20_000..]) - 440.0).abs() < 2.0);
+    }
+
+    // ----- filters
+
+    #[test]
+    fn the_ladder_darkens_and_stays_bounded_at_full_resonance() {
+        let ladder = |cutoff: f64, res: f64, drive: f64| {
+            rig(
+                vec![
+                    Node::new(2, Kind::Osc, [0.0; 2]),
+                    Node::new(3, Kind::Ladder, [0.0; 2])
+                        .with("cutoff", cutoff)
+                        .with("res", res)
+                        .with("drive", drive),
+                ],
+                vec![
+                    Cable::new(1, "pitch", 2, "pitch", 1.0),
+                    Cable::new(2, "out", 3, "in", 1.0),
+                    Cable::new(3, "out", 100, "left", 1.0),
+                ],
+            )
+        };
+        let hi = |x: &[f32]| rms(&x.windows(2).map(|w| w[1] - w[0]).collect::<Vec<_>>());
+        let (dark, _) = play(&ladder(300.0, 0.0, 1.0), 48, 24_000);
+        let (open, _) = play(&ladder(10_000.0, 0.0, 1.0), 48, 24_000);
+        assert!(hi(&open) > hi(&dark) * 4.0);
+        assert!(rms(&dark) > 0.05);
+        let (wild, _) = play(&ladder(2_000.0, 1.0, 10.0), 48, 48_000);
+        assert!(wild.iter().all(|v| v.is_finite() && v.abs() <= 1.5));
+        assert!(rms(&wild) > 0.05);
+    }
+
+    // ----- effects
+
+    fn through(fx: Node, input: Node) -> Patch {
+        rig(
+            vec![input, fx],
+            vec![
+                Cable::new(1, "pitch", 2, "pitch", 1.0),
+                Cable::new(2, "out", 3, "in", 1.0),
+                Cable::new(3, "out", 100, "left", 1.0),
+                Cable::new(3, "left", 100, "left", 1.0),
+                Cable::new(3, "right", 100, "right", 1.0),
+            ],
+        )
+    }
+
+    fn sine() -> Node {
+        Node::new(2, Kind::Osc, [0.0; 2]).with("wave", 0.0)
+    }
+
+    #[test]
+    fn the_shaper_folds_clips_and_mixes() {
+        let shaper = |shape: f64, drive: f64, mix: f64| {
+            let fx = Node::new(3, Kind::Shaper, [0.0; 2])
+                .with("shape", shape)
+                .with("drive", drive)
+                .with("mix", mix);
+            play(&through(fx, sine()), 57, 9_600).0
+        };
+        let (dry, _) = play(&sine_patch(), 57, 9_600);
+        assert_eq!(shaper(1.0, 4.0, 0.0), dry);
+        let folded = shaper(1.0, 4.0, 1.0);
+        assert!(folded.iter().all(|v| v.abs() <= 1.0 + 1e-6));
+        // folding a sine four times over crosses zero far more often
+        assert!(freq(&folded) > freq(&dry) * 2.0);
+        // hard clipping a sine makes nearly a square
+        assert!(rms(&shaper(2.0, 40.0, 1.0)) > 0.95);
+        let soft = shaper(0.0, 3.0, 1.0);
+        assert!(rms(&soft) > rms(&dry) && soft.iter().all(|v| v.abs() <= 1.0 + 1e-6));
+    }
+
+    #[test]
+    fn ring_modulation_multiplies() {
+        let p = rig(
+            vec![sine(), dc(3, 0.5), Node::new(4, Kind::Ring, [0.0; 2])],
+            vec![
+                Cable::new(1, "pitch", 2, "pitch", 1.0),
+                Cable::new(2, "out", 4, "a", 1.0),
+                Cable::new(3, "out", 4, "b", 1.0),
+                Cable::new(4, "out", 100, "left", 1.0),
+            ],
+        );
+        let (l, _) = play(&p, 69, 4_800);
+        let (dry, _) = play(&sine_patch(), 69, 4_800);
+        for k in (0..4_800).step_by(37) {
+            assert!((l[k] - dry[k] * 0.5).abs() < 1e-5);
+        }
+    }
+
+    /// A short burst of a sine: an envelope that decays in about 20 ms.
+    fn burst(fx: Node) -> Patch {
+        let mut p = through(fx, sine());
+        p.nodes.push(
+            Node::new(4, Kind::Env, [0.0; 2])
+                .with("attack", 0.001)
+                .with("decay", 0.005)
+                .with("sustain", 0.0),
+        );
+        p.nodes.push(Node::new(5, Kind::Vca, [0.0; 2]));
+        p.cables[1] = Cable::new(2, "out", 5, "in", 1.0);
+        p.cables.push(Cable::new(5, "out", 3, "in", 1.0));
+        p.cables.push(Cable::new(4, "out", 5, "cv", 1.0));
+        p.cables.push(Cable::new(1, "gate", 4, "gate", 1.0));
+        p
+    }
+
+    #[test]
+    fn the_delay_repeats_after_its_time() {
+        let fx = Node::new(3, Kind::Delay, [0.0; 2])
+            .with("time", 0.2)
+            .with("feedback", 0.5)
+            .with("mix", 1.0)
+            .with("tone", 1.0);
+        let (l, _) = play(&burst(fx), 69, 48_000);
+        let at = |t: f64| rms(&l[(t * SR) as usize..((t + 0.02) * SR) as usize]);
+        assert!(at(0.1) < 1e-4);
+        assert!(at(0.2) > 0.05, "{}", at(0.2));
+        // the second echo is half the first
+        assert!(
+            (at(0.4) / at(0.2) - 0.5).abs() < 0.1,
+            "{}",
+            at(0.4) / at(0.2)
+        );
+        assert!(at(0.3) < 1e-4);
+    }
+
+    #[test]
+    fn chorus_and_reverb_make_stereo_and_reverb_has_a_tail() {
+        let fx = Node::new(3, Kind::Chorus, [0.0; 2]).with("depth", 1.0);
+        let (l, r) = play(&through(fx, sine()), 57, 24_000);
+        assert!(l != r && rms(&l) > 0.2 && rms(&r) > 0.2);
+        let fx = Node::new(3, Kind::Reverb, [0.0; 2])
+            .with("size", 0.8)
+            .with("mix", 1.0);
+        let (l, r) = play(&burst(fx), 57, 48_000);
+        let tail = &l[24_000..30_000];
+        assert!(rms(tail) > 1e-3, "{}", rms(tail));
+        assert!(l != r);
+        assert!(l.iter().chain(&r).all(|v| v.is_finite() && v.abs() < 2.0));
+    }
+
+    // ----- utilities
+
+    #[test]
+    fn the_quantizer_snaps_to_its_scale() {
+        assert_eq!(quantize(0.03, 0), 0.0);
+        assert!((quantize(0.07, 0) - 1.0 / 12.0).abs() < 1e-12);
+        // a C sharp is not in C major: it goes to C or D
+        let q = quantize(1.0 / 12.0, 1) * 12.0;
+        assert!(q == 0.0 || q == 2.0);
+        assert!((quantize(-1.0 / 12.0, 1) * 12.0 + 1.0).abs() < 1e-12);
+        // in a module
+        let p = rig(
+            vec![dc(2, 0.07), Node::new(3, Kind::Quant, [0.0; 2])],
+            vec![
+                Cable::new(2, "out", 3, "in", 1.0),
+                Cable::new(3, "out", 100, "left", 1.0),
+            ],
+        );
+        assert!((play(&p, 60, 8).0[4] - 1.0 / 12.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_comparator_is_one_above_and_zero_below() {
+        let cmp = |a: f64, threshold: f64| {
+            let p = rig(
+                vec![
+                    dc(2, a),
+                    Node::new(3, Kind::Compare, [0.0; 2]).with("threshold", threshold),
+                ],
+                vec![
+                    Cable::new(2, "out", 3, "a", 1.0),
+                    Cable::new(3, "out", 100, "left", 1.0),
+                    Cable::new(3, "inv", 100, "right", 1.0),
+                ],
+            );
+            let (l, r) = play(&p, 60, 8);
+            (l[4], r[4])
+        };
+        assert_eq!(cmp(0.5, 0.0), (1.0, 0.0));
+        assert_eq!(cmp(-0.5, 0.0), (0.0, 1.0));
+        assert_eq!(cmp(0.5, 0.6), (0.0, 1.0));
+    }
+
+    #[test]
+    fn pan_and_width_place_the_sound() {
+        let pan = |v: f64| {
+            let p = rig(
+                vec![sine(), Node::new(3, Kind::Pan, [0.0; 2]).with("pan", v)],
+                vec![
+                    Cable::new(1, "pitch", 2, "pitch", 1.0),
+                    Cable::new(2, "out", 3, "in", 1.0),
+                    Cable::new(3, "left", 100, "left", 1.0),
+                    Cable::new(3, "right", 100, "right", 1.0),
+                ],
+            );
+            play(&p, 57, 4_800)
+        };
+        let (l, r) = pan(-1.0);
+        assert!(rms(&r) < 1e-6 && rms(&l) > 0.9);
+        let (l, r) = pan(0.0);
+        assert!(l.iter().zip(&r).all(|(a, b)| (a - b).abs() < 1e-5));
+        // width 0 on the output folds a stereo sound to mono
+        let mut p = sine_patch();
+        p.nodes[1] = Node::new(2, Kind::Osc, [0.0; 2])
+            .with("voices", 3.0)
+            .with("spread", 1.0);
+        p.nodes[2] = Node::new(3, Kind::Output, [0.0; 2]).with("width", 0.0);
+        p.cables.push(Cable::new(2, "right", 3, "right", 1.0));
+        let (l, r) = play(&p, 57, 4_800);
+        assert_eq!(l, r);
+    }
+
+    // ----- how the patch plays
+
+    #[test]
+    fn mono_takes_the_newest_key_and_goes_back_when_it_is_let_go() {
+        let p = mono(sine_patch(), 0.0, false);
+        let mut m = Modular::new(&p, SR);
+        m.note_on(57, 1.0);
+        m.note_on(69, 1.0);
+        assert_eq!(m.active_voices(), 1);
+        let (l, _) = run(&mut m, 24_000);
+        assert!((freq(&l) - 440.0).abs() < 1.0);
+        m.note_off(69);
+        let (l, _) = run(&mut m, 24_000);
+        assert!((freq(&l) - 220.0).abs() < 1.0);
+        m.note_off(57);
+        assert!(!m.voices[0].gate);
+    }
+
+    #[test]
+    fn legato_does_not_start_the_envelope_again() {
+        // an envelope that decays to nothing, held: a new key either starts it again
+        // (not legato) or slides on in silence (legato)
+        let p = Patch {
+            voices: 1,
+            ..Patch::default()
+        };
+        let mut p = p;
+        p.nodes[2] = Node::new(3, Kind::Env, [0.0; 2])
+            .with("decay", 0.05)
+            .with("sustain", 0.0);
+        let level = |legato: bool| {
+            let mut m = Modular::new(&mono(p.clone(), 0.0, legato), SR);
+            m.note_on(57, 1.0);
+            run(&mut m, 24_000);
+            m.note_on(60, 1.0);
+            rms(&run(&mut m, 2_400).0)
+        };
+        assert!(level(false) > 0.05);
+        assert!(level(true) < 1e-3);
+    }
+
+    #[test]
+    fn the_volume_scales_everything() {
+        let mut p = sine_patch();
+        let (full, _) = play(&p, 69, 4_800);
+        p.volume = 0.5;
+        let (half, _) = play(&p, 69, 4_800);
+        assert!((rms(&half) * 2.0 - rms(&full)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn arrange_puts_each_module_after_what_feeds_it() {
+        let mut p = Patch::default();
+        p.arrange();
+        let x = |id: u32| p.node(id).unwrap().pos[0];
+        assert!(x(1) < x(2) && x(2) < x(4) && x(4) < x(5) && x(5) < x(6));
+        // modules in one column do not overlap
+        assert_ne!(p.node(2).unwrap().pos, p.node(3).unwrap().pos);
     }
 }

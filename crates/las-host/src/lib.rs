@@ -13,6 +13,8 @@ use clack_extensions::params::{ParamInfoBuffer, PluginParams};
 use clack_extensions::state::PluginState;
 use clack_host::events::event_types::{NoteOffEvent, NoteOnEvent, ParamValueEvent};
 use clack_host::prelude::*;
+pub mod bridge;
+pub mod clap_editor;
 pub mod vst3;
 
 use std::ffi::CString;
@@ -494,10 +496,22 @@ impl Drop for Clap {
 pub enum Plugin {
     Clap(Clap),
     Vst3(vst3::Vst3),
+    /// A plugin in its own process (see [`bridge`]).
+    Remote(bridge::Remote),
 }
 
 impl Plugin {
+    /// Load a plugin: in its own process when the plugin host program is there (see
+    /// [`bridge::sandboxed`]), in this one otherwise.
     pub fn load(info: &PluginInfo, sample_rate: f64) -> Result<Self, String> {
+        if bridge::sandboxed() {
+            return bridge::Remote::load(info, sample_rate).map(Self::Remote);
+        }
+        Self::load_local(info, sample_rate)
+    }
+
+    /// Load a plugin in this process.
+    pub fn load_local(info: &PluginInfo, sample_rate: f64) -> Result<Self, String> {
         match info.format {
             Format::Clap => Clap::load(info, sample_rate).map(Self::Clap),
             Format::Vst3 => vst3::Vst3::load(info, sample_rate).map(Self::Vst3),
@@ -508,6 +522,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.info(),
             Self::Vst3(p) => p.info(),
+            Self::Remote(p) => p.info(),
         }
     }
 
@@ -516,6 +531,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.params(),
             Self::Vst3(p) => p.params(),
+            Self::Remote(p) => p.params(),
         }
     }
 
@@ -523,6 +539,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.param_value(id),
             Self::Vst3(p) => p.param_value(id),
+            Self::Remote(p) => p.param_value(id),
         }
     }
 
@@ -530,6 +547,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.set_param(id, value),
             Self::Vst3(p) => p.set_param(id, value),
+            Self::Remote(p) => p.set_param(id, value),
         }
     }
 
@@ -537,6 +555,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.save_state(),
             Self::Vst3(p) => p.save_state(),
+            Self::Remote(p) => p.save_state(),
         }
     }
 
@@ -544,6 +563,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.load_state(bytes),
             Self::Vst3(p) => p.load_state(bytes),
+            Self::Remote(p) => p.load_state(bytes),
         }
     }
 
@@ -551,6 +571,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.takes_audio(),
             Self::Vst3(p) => p.takes_audio(),
+            Self::Remote(p) => p.takes_audio(),
         }
     }
 
@@ -564,6 +585,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.process(input, notes, out_l, out_r),
             Self::Vst3(p) => p.process(input, notes, out_l, out_r),
+            Self::Remote(p) => p.process(input, notes, out_l, out_r),
         }
     }
 }
@@ -742,6 +764,7 @@ pub fn params_of(id: &str) -> Arc<Vec<Param>> {
 
 /// A hosted plugin's own window, open on the app's thread.
 pub enum Editor {
+    Clap(clap_editor::ClapEditor),
     Vst3(vst3::Vst3Editor),
 }
 
@@ -750,13 +773,14 @@ impl Editor {
     pub fn open(info: &PluginInfo, params: &[(u32, f64)], title: &str) -> Result<Self, String> {
         match info.format {
             Format::Vst3 => vst3::Vst3Editor::open(info, params, title).map(Self::Vst3),
-            Format::Clap => Err("CLAP plugin windows are not hosted yet".into()),
+            Format::Clap => clap_editor::ClapEditor::open(info, params, title).map(Self::Clap),
         }
     }
 
     /// Serve the window; what the user changed in it since the last call.
     pub fn idle(&mut self) -> Vec<(u32, f64)> {
         match self {
+            Self::Clap(e) => e.idle(),
             Self::Vst3(e) => e.idle(),
         }
     }
@@ -764,6 +788,7 @@ impl Editor {
     /// Show a value that changed elsewhere.
     pub fn set_param(&mut self, id: u32, value: f64) {
         match self {
+            Self::Clap(e) => e.set_param(id, value),
             Self::Vst3(e) => e.set_param(id, value),
         }
     }
@@ -771,6 +796,7 @@ impl Editor {
     /// Whether the user closed the window.
     pub fn closed(&self) -> bool {
         match self {
+            Self::Clap(e) => e.closed(),
             Self::Vst3(e) => e.closed(),
         }
     }

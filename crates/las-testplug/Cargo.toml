@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 clack-plugin = "0.2.0"
-clack-extensions = { version = "0.2.0", features = ["clack-plugin", "params", "state", "audio-ports", "note-ports"] }
+clack-extensions = { version = "0.2.0", features = ["clack-plugin", "params", "state", "audio-ports", "note-ports", "gui", "timer"] }
 
 [lints.rust]
 unsafe_code = "allow"

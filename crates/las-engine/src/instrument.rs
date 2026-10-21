@@ -167,6 +167,13 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
         m("attack", 0.5),
         m("release", 0.5),
     );
+    // drive adds filter drive; width and detune scale the stereo spread and the
+    // unison detune (at 0.5 they leave the layers as they are)
+    let (drive, width, detune) = (
+        m("drive", 0.0).clamp(0.0, 1.0),
+        (m("width", 0.5) * 2.0).clamp(0.0, 2.0),
+        (m("detune", 0.5) * 2.0).clamp(0.0, 2.0),
+    );
     let master = num(state.get("master"), 0.8);
     let mut out = Vec::new();
     // a new Nebula has no layers yet: it starts with one default layer
@@ -184,6 +191,17 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
                 let r = (num(f.get("res"), 0.0) + res).min(1.0);
                 f["cutoff"] = c.into();
                 f["res"] = r.into();
+                if drive > 0.0 {
+                    f["drive"] = (num(f.get("drive"), 0.0) + drive).into();
+                }
+            }
+        }
+        if width != 1.0 || detune != 1.0 {
+            if let Some(os) = p.get_mut("osc").and_then(Value::as_array_mut) {
+                for o in os {
+                    o["spread"] = (num(o.get("spread"), 0.6) * width).clamp(0.0, 1.0).into();
+                    o["detune"] = (num(o.get("detune"), 0.2) * detune).clamp(0.0, 1.0).into();
+                }
             }
         }
         if let Some(e) = p.pointer_mut("/env/0") {
@@ -198,7 +216,7 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
             index,
             level: num(l.get("level"), 1.0),
             gain: num(l.get("level"), 1.0) * master,
-            pan: num(l.get("pan"), 0.0),
+            pan: (num(l.get("pan"), 0.0) * width).clamp(-1.0, 1.0),
             transpose: num(l.get("transpose"), 0.0),
         });
     }
@@ -756,5 +774,104 @@ impl Instrument {
             }
             Core::Hosted(_) | Core::Silent => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn nebula(state: &Value) -> Instrument {
+        let mut tables = TableLibrary::new();
+        Instrument::new("nebula", state, 24000.0, &mut tables, None, Vec::new()).unwrap()
+    }
+
+    /// A held middle C for `frames` frames.
+    fn hold(state: &Value, frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut inst = nebula(state);
+        inst.set_bpm(120.0);
+        inst.note_on(60.0, 0.9, 0.0);
+        let (mut l, mut r) = (vec![0.0; frames], vec![0.0; frames]);
+        for (i, (cl, cr)) in l.chunks_mut(256).zip(r.chunks_mut(256)).enumerate() {
+            inst.render(i as f64 * 256.0 / 24000.0, cl, cr);
+        }
+        (l, r)
+    }
+
+    #[test]
+    fn the_new_macros_change_the_layers() {
+        let st = json!({
+            "layers": [{ "on": true, "level": 1.0, "pan": 0.5, "patch": {
+                "osc": [{ "on": true, "table": "saw", "voices": 4, "detune": 0.3, "spread": 0.8 }],
+                "filters": [{ "on": true, "type": "lp24", "cutoff": 2000, "drive": 0.1 }],
+            }}],
+            "macros": { "drive": 0.5, "width": 0.25, "detune": 1.0 },
+        });
+        let l = &layers_from_state("nebula", &st)[0];
+        assert!((l.patch["filters"][0]["drive"].as_f64().unwrap() - 0.6).abs() < 1e-9);
+        assert!((l.patch["osc"][0]["spread"].as_f64().unwrap() - 0.4).abs() < 1e-9);
+        assert!((l.patch["osc"][0]["detune"].as_f64().unwrap() - 0.6).abs() < 1e-9);
+        assert!((l.pan - 0.25).abs() < 1e-9);
+        // the defaults leave the patch as it is
+        let mut plain = st.clone();
+        plain["macros"] = json!({});
+        let l = &layers_from_state("nebula", &plain)[0];
+        assert_eq!(l.patch["osc"][0]["spread"], 0.8);
+        assert_eq!(l.patch["filters"][0]["drive"], 0.1);
+        assert!((l.pan - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn width_at_zero_plays_in_mono() {
+        let st = |w: f64| {
+            json!({
+                "layers": [{ "on": true, "level": 1.0, "patch": {
+                    "osc": [{ "on": true, "table": "saw", "voices": 5, "detune": 0.4, "spread": 1.0 }],
+                }}],
+                "macros": { "width": w },
+            })
+        };
+        let side = |w: f64| {
+            let (l, r) = hold(&st(w), 4096);
+            l.iter().zip(&r).map(|(a, b)| (a - b).abs()).sum::<f32>()
+        };
+        assert!(side(0.0) < 1e-3, "{}", side(0.0));
+        assert!(side(0.5) > 1.0);
+    }
+
+    #[test]
+    fn every_nebula_preset_plays_a_held_note() {
+        let b = las_dsp::presets::bank("nebula").unwrap();
+        assert!(b.presets.len() >= 300);
+        let mut silent = Vec::new();
+        for p in &b.presets {
+            // the reverb is left out: building its impulse response for every
+            // preset makes a debug build slow, and it has tests of its own
+            let mut st = p.state.clone();
+            if let Some(fx) = st.get_mut("fx").and_then(Value::as_array_mut) {
+                fx.retain(|f| f["type"] != "las-reverb");
+            }
+            let mut inst = nebula(&st);
+            inst.set_bpm(120.0);
+            inst.note_on(60.0, 0.9, 0.0);
+            let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+            let mut peak = 0f32;
+            // up to a second: some pads and effects swell in slowly
+            for block in 0..94 {
+                if block >= 24 && peak >= 1e-3 {
+                    break;
+                }
+                inst.render(block as f64 * 256.0 / 24000.0, &mut l, &mut r);
+                for v in l.iter().chain(&r) {
+                    assert!(v.is_finite(), "{}", p.name);
+                    peak = peak.max(v.abs());
+                }
+            }
+            if peak < 1e-3 {
+                silent.push(format!("{} ({peak})", p.name));
+            }
+        }
+        assert!(silent.is_empty(), "silent: {silent:?}");
     }
 }

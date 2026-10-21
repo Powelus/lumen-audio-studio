@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Hosted (CLAP, VST3) plugins in the app: the lists in the browser, adding them as
 //! channels and effects, a window of generic controls for their parameters, and the
-//! plugin's own window (VST3 for now). What is turned in a plugin's window comes back
+//! plugin's own window. What is turned in a plugin's window comes back
 //! as parameter changes, so its parameters are what a project keeps of it.
 
 use crate::app::App;
 use crate::theme::pal;
 use eframe::egui::{self, RichText, Ui};
-use las_host::{find, params_of, plugin_state, Editor, Format, PluginInfo, HOSTED};
+use las_host::{find, params_of, plugin_state, Editor, PluginInfo, HOSTED};
 use serde_json::{json, Value};
 
 /// The plugin id a channel or slot state names.
@@ -117,9 +117,9 @@ fn values(state: &Value) -> Vec<(u32, f64)> {
         .collect()
 }
 
-/// Whether the plugin a state names has a window the app can host.
+/// Whether the plugin a state names is installed (CLAP and VST3 windows are hosted).
 fn has_window(state: &Value) -> bool {
-    find(plugin_id(state)).is_some_and(|i| i.format == Format::Vst3)
+    find(plugin_id(state)).is_some()
 }
 
 fn format_name(f: las_host::Format) -> &'static str {
@@ -358,9 +358,7 @@ impl App {
                 .on_hover_text("Look for plugins again")
                 .clicked()
             {
-                std::thread::spawn(|| {
-                    las_host::rescan(&las_host::all_search_paths());
-                });
+                self.rescan_plugins();
             }
         });
         let list = las_host::known();

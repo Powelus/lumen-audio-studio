@@ -70,6 +70,8 @@ const DEMO: &[u8] = include_bytes!("../../las-project/tests/fixtures/demo.las");
 pub enum Action {
     New,
     Open,
+    /// Open the project `recent_target` names (File > Open recent).
+    Recent,
     Demo,
     Quit,
 }
@@ -318,6 +320,12 @@ impl App {
         match a {
             Action::New => self.new_project(),
             Action::Open => self.open_dialog(),
+            Action::Recent => {
+                if let Some(path) = self.shell.recent_target.take() {
+                    self.bound = None;
+                    self.open_project(&path);
+                }
+            }
             Action::Demo => self.open_demo(),
             Action::Quit => self.quit = true,
         }
@@ -370,8 +378,13 @@ impl App {
             if path.extension().is_none() {
                 path.set_extension("las");
             }
-            match self.project.save_to(&path.to_string_lossy()) {
-                Ok(()) => self.project.error = None,
+            let path = path.to_string_lossy().into_owned();
+            match self.project.save_to(&path) {
+                Ok(()) => {
+                    self.project.error = None;
+                    self.settings.remember(&path);
+                    self.settings.save();
+                }
                 Err(e) => self.project.error = Some(e),
             }
         }
@@ -545,6 +558,21 @@ impl App {
                 self.guard(Action::Open);
                 ui.close();
             }
+            let recent = self.settings.recent.clone();
+            ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                ui.menu_button("Open recent", |ui| {
+                    for path in recent {
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map_or(path.clone(), |n| n.to_string_lossy().into_owned());
+                        if ui.button(name).on_hover_text(&path).clicked() {
+                            self.shell.recent_target = Some(path);
+                            self.guard(Action::Recent);
+                            ui.close();
+                        }
+                    }
+                });
+            });
             if ui.button("Open demo song").clicked() {
                 self.guard(Action::Demo);
                 ui.close();
@@ -683,6 +711,10 @@ impl App {
             }
         });
         ui.menu_button("Options", |ui| {
+            if ui.button("Settings...").clicked() {
+                self.shell.open.settings = true;
+                ui.close();
+            }
             ui.menu_button("Theme", |ui| {
                 let current = self.shell.theme.clone();
                 for t in theme::themes() {

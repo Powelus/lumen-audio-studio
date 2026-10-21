@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The windows of the instruments the synth panels do not cover: Nebula (layers,
-//! macros and its 230 factory presets) and LumaPad (a 4 by 4 pad drum machine). Every
-//! edit goes to the channel's state through undo, like the other instrument windows.
+//! The windows of the instruments the synth panels do not cover: LumaPad (a 4 by 4
+//! pad drum machine) here, Nebula in `nebulawin`. Every edit goes to the channel's
+//! state through undo, like the other instrument windows.
 
 use crate::app::App;
 use crate::theme::pal;
@@ -29,7 +29,7 @@ pub fn set_pad_sample(state: &mut Value, pad: usize, id: &str, name: &str) {
 }
 
 impl App {
-    fn channel_state(&self, channel: usize) -> Option<(String, Value)> {
+    pub(crate) fn channel_state(&self, channel: usize) -> Option<(String, Value)> {
         let c = self
             .project
             .loaded
@@ -40,193 +40,12 @@ impl App {
         Some((c.name.clone(), c.state.clone()))
     }
 
-    fn write_state(&mut self, channel: usize, key: &'static str, state: Value) {
+    pub(crate) fn write_state(&mut self, channel: usize, key: &'static str, state: Value) {
         self.project.modify_coalesced(key, move |p| {
             if let Some(c) = p.channels.get_mut(channel) {
                 c.state = state;
             }
         });
-    }
-
-    /// Nebula: preset browser, master and macros, and the layers.
-    pub(crate) fn nebula_window(&mut self, ui: &mut Ui, channel: usize) {
-        let Some((name, mut st)) = self.channel_state(channel) else {
-            return;
-        };
-        if !st.is_object() {
-            st = json!({});
-        }
-        let p = pal();
-        let mut changed = false;
-        let mut preset: Option<Value> = None;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&name).size(16.0).strong());
-            ui.menu_button("Presets", |ui| {
-                let Some(b) = las_dsp::presets::bank("nebula") else {
-                    return;
-                };
-                egui::ScrollArea::vertical()
-                    .max_height(420.0)
-                    .show(ui, |ui| {
-                        for cat in b.categories() {
-                            ui.menu_button(cat, |ui| {
-                                for pr in b.presets.iter().filter(|x| x.category == cat) {
-                                    if ui.button(&pr.name).clicked() {
-                                        preset = Some(pr.state.clone());
-                                        ui.close();
-                                    }
-                                }
-                            });
-                        }
-                    });
-            });
-        });
-        if let Some(s) = preset {
-            self.project.modify(true, |pr| {
-                if let Some(c) = pr.channels.get_mut(channel) {
-                    c.state = s;
-                }
-            });
-            return;
-        }
-        ui.separator();
-        ui.horizontal(|ui| {
-            let mut master = num(st.get("master"), 0.8);
-            if knob(ui, &mut master, 0.0..=1.0, 0.8, "Master", false, &|v| {
-                format!("{:.0}%", v * 100.0)
-            }) {
-                st["master"] = json!(master);
-                changed = true;
-            }
-            ui.add_space(12.0);
-            for (k, label) in [
-                ("cutoff", "Cutoff"),
-                ("res", "Res"),
-                ("attack", "Attack"),
-                ("release", "Release"),
-            ] {
-                let mut v = num(
-                    st.get("macros").and_then(|m| m.get(k)),
-                    if k == "res" { 0.0 } else { 0.5 },
-                );
-                if knob(
-                    ui,
-                    &mut v,
-                    0.0..=1.0,
-                    if k == "res" { 0.0 } else { 0.5 },
-                    label,
-                    false,
-                    &|v| format!("{:.0}%", v * 100.0),
-                ) {
-                    if !st.get("macros").is_some_and(Value::is_object) {
-                        st["macros"] = json!({});
-                    }
-                    st["macros"][k] = json!(v);
-                    changed = true;
-                }
-            }
-        });
-        ui.add_space(6.0);
-        ui.label(RichText::new("LAYERS").size(11.0).strong().color(p.muted));
-        if !st.get("layers").is_some_and(Value::is_array) {
-            st["layers"] = json!([{ "on": true, "name": "Layer 1", "level": 1.0 }]);
-        }
-        let mut remove = None;
-        let n = st["layers"].as_array().map_or(0, Vec::len);
-        // the layers as cards side by side, each with its sound's waveform
-        ui.horizontal_wrapped(|ui| {
-            for i in 0..n {
-                crate::skin::group(ui, |ui| {
-                    ui.set_width(196.0);
-                    ui.vertical(|ui| {
-                        let l = &mut st["layers"][i];
-                        ui.horizontal(|ui| {
-                            let mut on = l.get("on") != Some(&Value::Bool(false));
-                            if ui.checkbox(&mut on, "").changed() {
-                                l["on"] = json!(on);
-                                changed = true;
-                            }
-                            let mut nm = l
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("Layer")
-                                .to_string();
-                            if ui
-                                .add(egui::TextEdit::singleline(&mut nm).desired_width(120.0))
-                                .changed()
-                            {
-                                l["name"] = json!(nm);
-                                changed = true;
-                            }
-                            if n > 1
-                                && ui
-                                    .small_button("x")
-                                    .on_hover_text("Remove the layer")
-                                    .clicked()
-                            {
-                                remove = Some(i);
-                            }
-                        });
-                        let on = l.get("on") != Some(&Value::Bool(false));
-                        let table = l
-                            .pointer("/patch/osc/0/table")
-                            .and_then(Value::as_str)
-                            .unwrap_or("saw")
-                            .to_string();
-                        let pos = l
-                            .pointer("/patch/osc/0/pos")
-                            .and_then(Value::as_f64)
-                            .unwrap_or(0.0);
-                        let frames = crate::skin_tables::frames(&table);
-                        let f = frames
-                            .get((pos * (frames.len().max(1) - 1) as f64).round() as usize)
-                            .cloned()
-                            .unwrap_or_default();
-                        crate::skin::wave_screen(ui, vec2(190.0, 54.0), &f, on);
-                        ui.horizontal(|ui| {
-                            for (k, range, d, label) in [
-                                ("level", 0.0..=1.5, 1.0, "Level"),
-                                ("pan", -1.0..=1.0, 0.0, "Pan"),
-                                ("transpose", -24.0..=24.0, 0.0, "Semi"),
-                            ] {
-                                let mut v = num(l.get(k), d);
-                                let show = move |v: f64| match k {
-                                    "transpose" => format!("{:+.0}", v.round()),
-                                    "pan" => format!("{v:+.2}"),
-                                    _ => format!("{:.0}%", v * 100.0),
-                                };
-                                if knob(ui, &mut v, range, d, label, false, &show) {
-                                    l[k] = json!(if k == "transpose" { v.round() } else { v });
-                                    changed = true;
-                                }
-                            }
-                        });
-                    });
-                });
-            }
-            if n < 8 && ui.button("+ Layer").clicked() {
-                if let Some(a) = st["layers"].as_array_mut() {
-                    a.push(json!({ "on": true, "name": format!("Layer {}", n + 1), "level": 0.8 }));
-                    changed = true;
-                }
-            }
-        });
-        if let Some(i) = remove {
-            if let Some(a) = st["layers"].as_array_mut() {
-                a.remove(i);
-                changed = true;
-            }
-        }
-        ui.label(
-            RichText::new(
-                "Each layer is a full wavetable synth; pick a preset to load a designed sound.",
-            )
-            .weak()
-            .size(11.0),
-        );
-        if changed {
-            self.write_state(channel, "nebula", st);
-        }
     }
 
     /// LumaPad: sixteen pads in a 4 by 4 grid; click to play, right click for a

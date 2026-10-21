@@ -170,10 +170,14 @@ impl App {
         match panel_for(&plugin) {
             Some(inst) => {
                 let k = index(inst);
-                self.patches[k] = merge_patch(
-                    &self.defaults[k],
-                    state.get("patch").unwrap_or(&Value::Null),
-                );
+                // a new channel starts from its face's own init patch
+                let mut base = self.defaults[k].clone();
+                if matches!(plugin.as_str(), "monolith" | "zenith" | "triosc") {
+                    if let Some(b) = las_dsp::presets::bank(&plugin) {
+                        base = merge_patch(&base, &b.init);
+                    }
+                }
+                self.patches[k] = merge_patch(&base, state.get("patch").unwrap_or(&Value::Null));
                 self.switch(inst);
                 self.push_patch(inst);
                 let fx = state
@@ -183,6 +187,7 @@ impl App {
                     .unwrap_or_default();
                 self.load_fx_list(inst, &fx);
                 self.bound = Some(Bound::Synth(channel));
+                self.sync_bank();
                 self.view = crate::app::View::Sound;
             }
             None if plugin == "sampler" => self.bound = Some(Bound::Sampler(channel)),

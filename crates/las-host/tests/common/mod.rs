@@ -69,3 +69,50 @@ fn build_testplug() -> PathBuf {
     std::fs::copy(&lib, &to).unwrap();
     to
 }
+
+#[cfg(target_os = "linux")]
+#[allow(unused_imports)]
+pub use x::*;
+
+#[cfg(target_os = "linux")]
+mod x {
+    use std::process::{Child, Command};
+    use std::time::{Duration, Instant};
+
+    /// A display to open windows on: the one there is, or an Xvfb started for the test.
+    pub fn display() -> Option<Xvfb> {
+        if std::env::var_os("DISPLAY").is_some() {
+            return None;
+        }
+        // a display no other server holds (a server that ended badly leaves its lock)
+        let start = 100 + std::process::id() % 400;
+        let num = (start..start + 400)
+            .find(|n| !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists())
+            .expect("a free display number");
+        let child = Command::new("Xvfb")
+            .arg(format!(":{num}"))
+            .arg("-nolisten")
+            .arg("tcp")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("Xvfb to open a window on (install xvfb)");
+        std::env::set_var("DISPLAY", format!(":{num}"));
+        let socket = format!("/tmp/.X11-unix/X{num}");
+        let until = Instant::now() + Duration::from_secs(10);
+        while !std::path::Path::new(&socket).exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Some(Xvfb(child))
+    }
+
+    /// Stops the server when the test ends, also when it fails.
+    pub struct Xvfb(Child);
+
+    impl Drop for Xvfb {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}

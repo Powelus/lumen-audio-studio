@@ -37,6 +37,8 @@ pub struct Windows {
     /// The keyboard shortcuts window.
     pub keys: bool,
     pub history: bool,
+    pub settings: bool,
+    pub analyser: bool,
 }
 
 /// What the export window holds.
@@ -78,6 +80,10 @@ pub struct Shell {
     /// LumaPad: the selected pad, and whether one is held.
     pub pad: usize,
     pub pad_held: Option<u8>,
+    /// Nebula: the page shown, the browser's category (empty for all) and search.
+    pub nebula_page: usize,
+    pub nebula_cat: String,
+    pub nebula_find: String,
     /// The memory the app uses, megabytes, and when it was last read.
     ram: (Option<Instant>, f64),
     pub search: String,
@@ -90,6 +96,8 @@ pub struct Shell {
     pub status: String,
     /// An action waiting for an answer about unsaved changes.
     pub pending: Option<crate::menus::Action>,
+    /// The project File > Open recent is to open.
+    pub recent_target: Option<String>,
     placed: bool,
 }
 
@@ -108,6 +116,8 @@ impl Shell {
                 about: false,
                 keys: false,
                 history: false,
+                settings: false,
+                analyser: false,
             },
             song_mode: true,
             metronome: false,
@@ -116,6 +126,9 @@ impl Shell {
             record_from: 0.0,
             pad: 0,
             pad_held: None,
+            nebula_page: 0,
+            nebula_cat: String::new(),
+            nebula_find: String::new(),
             ram: (None, 0.0),
             search: String::new(),
             theme: theme::saved_choice(),
@@ -133,6 +146,7 @@ impl Shell {
             },
             status: "Ready".into(),
             pending: None,
+            recent_target: None,
             placed: false,
         }
     }
@@ -436,9 +450,6 @@ impl App {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
             logo(ui);
-            ui.menu_button(RichText::new("\u{2630}").size(16.0), |ui| {
-                ui.horizontal(|ui| self.main_menu(ui));
-            });
             ui.add_space(4.0);
             // transport
             let song = self.shell.song_mode;
@@ -540,13 +551,16 @@ impl App {
             }
             // windows
             let o = self.shell.open;
-            let labels = ["Rack", "Playlist", "Roll", "Mixer", "Synth", "Browser"];
+            let labels = [
+                "Rack", "Playlist", "Roll", "Mixer", "Synth", "Analyser", "Browser",
+            ];
             let act = [
                 o.rack,
                 o.playlist,
                 o.roll,
                 o.mixer,
                 o.synth,
+                o.analyser,
                 self.shell.browser,
             ];
             if let Some(i) = segmented(ui, &labels, &act) {
@@ -556,6 +570,7 @@ impl App {
                     2 => self.shell.open.roll = !o.roll,
                     3 => self.shell.open.mixer = !o.mixer,
                     4 => self.shell.open.synth = !o.synth,
+                    5 => self.shell.open.analyser = !o.analyser,
                     _ => self.shell.browser = !self.shell.browser,
                 }
             }
@@ -763,6 +778,8 @@ impl App {
             if hits.is_empty() {
                 ui.label(RichText::new("Nothing matches.").weak());
             }
+            ui.add_space(10.0);
+            self.folders_ui(ui, &query);
             ui.add_space(10.0);
             ui.label(
                 RichText::new("MY SAMPLES")
@@ -986,7 +1003,20 @@ impl App {
             });
         }
         if open.synth {
-            win("Synth", a.min + vec2(160.0, 30.0), vec2(900.0, 680.0))
+            // each face has its own window size (TriOsc is a small one)
+            let face = match self.bound {
+                None | Some(crate::inst::Bound::Synth(_)) => self.face_id(),
+                _ => String::new(),
+            };
+            let size = match face.as_str() {
+                "triosc" => vec2(640.0, 560.0),
+                "monolith" => vec2(1060.0, 740.0),
+                "zenith" => vec2(1000.0, 790.0),
+                _ => vec2(900.0, 680.0),
+            };
+            let first_pos = a.min + vec2(160.0, 30.0);
+            win("Synth", first_pos, size)
+                .id(egui::Id::unique(("synth-window", face)))
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
                     Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
@@ -996,7 +1026,11 @@ impl App {
                             self.nebula_window(ui, c)
                         })
                     }
-                    Some(crate::inst::Bound::Weave(c)) => self.weave_window(ui, c),
+                    Some(crate::inst::Bound::Weave(c)) => {
+                        crate::skin::face(ui, crate::skin::skin_for("weave"), |ui| {
+                            self.weave_window(ui, c)
+                        })
+                    }
                     Some(crate::inst::Bound::Pads(c)) => {
                         crate::skin::face(ui, crate::skin::skin_for("lumapad"), |ui| {
                             self.pads_window(ui, c)
@@ -1043,6 +1077,8 @@ impl App {
         self.about_window(ctx);
         self.keys_window(ctx);
         self.history_window(ctx);
+        self.settings_window(ctx);
+        self.analyser_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
     }
@@ -1261,7 +1297,12 @@ impl App {
             match self.inst {
                 Instrument::Facet => self.synth(ui),
                 Instrument::Mist => self.mist_panel(ui),
-                Instrument::Polaris => self.polaris_panel(ui),
+                Instrument::Polaris => match self.face_id().as_str() {
+                    "monolith" => self.monolith_panel(ui),
+                    "zenith" => self.zenith_panel(ui),
+                    "triosc" => self.triosc_panel(ui),
+                    _ => self.polaris_panel(ui),
+                },
             }
         });
         ui.separator();

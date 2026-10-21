@@ -24,6 +24,8 @@ pub struct Skin {
     pub track: Color32,
     pub screen: Color32,
     pub trace: Color32,
+    /// Flat panels and knobs, with no shadows or glows.
+    pub flat: bool,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
@@ -53,40 +55,43 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(22, 25, 29),
             screen: rgb(14, 20, 28),
             trace: rgb(120, 205, 255),
+            flat: false,
         },
-        // an analogue-style subtractive synth: silver panel, blue LCD
+        // a classic analogue synth: a black panel between wooden cheeks, cream print
         "monolith" => Skin {
             name: "MONOLITH",
             tagline: "virtual analogue synthesizer",
-            bg_top: rgb(70, 74, 80),
-            bg_bottom: rgb(46, 49, 54),
-            section: rgb(56, 60, 66),
-            edge: rgb(96, 102, 110),
-            header: rgb(30, 32, 36),
-            text: rgb(236, 238, 240),
-            dim: rgb(166, 172, 180),
-            accent: rgb(110, 190, 255),
-            knob: rgb(30, 32, 36),
-            track: rgb(36, 38, 42),
-            screen: rgb(20, 44, 70),
-            trace: rgb(150, 220, 255),
+            bg_top: rgb(30, 29, 28),
+            bg_bottom: rgb(18, 17, 17),
+            section: rgb(24, 23, 22),
+            edge: rgb(70, 66, 60),
+            header: rgb(12, 12, 12),
+            text: rgb(240, 232, 212),
+            dim: rgb(170, 160, 140),
+            accent: rgb(236, 112, 48),
+            knob: rgb(16, 16, 16),
+            track: rgb(44, 42, 40),
+            screen: rgb(14, 13, 12),
+            trace: rgb(250, 170, 110),
+            flat: false,
         },
-        // a supersaw synth: black with orange
+        // a supersaw synth: neon lines on a deep violet night
         "zenith" => Skin {
             name: "ZENITH",
             tagline: "supersaw and pad synthesizer",
-            bg_top: rgb(36, 33, 32),
-            bg_bottom: rgb(20, 18, 18),
-            section: rgb(30, 27, 26),
-            edge: rgb(70, 58, 50),
-            header: rgb(14, 12, 12),
-            text: rgb(240, 228, 216),
-            dim: rgb(160, 140, 124),
-            accent: rgb(255, 140, 40),
-            knob: rgb(52, 46, 43),
-            track: rgb(18, 16, 15),
-            screen: rgb(22, 16, 10),
-            trace: rgb(255, 176, 90),
+            bg_top: rgb(26, 16, 44),
+            bg_bottom: rgb(8, 6, 18),
+            section: rgb(18, 12, 34),
+            edge: rgb(110, 50, 170),
+            header: rgb(8, 4, 16),
+            text: rgb(236, 230, 255),
+            dim: rgb(170, 150, 210),
+            accent: rgb(255, 60, 200),
+            knob: rgb(34, 24, 58),
+            track: rgb(12, 8, 24),
+            screen: rgb(6, 4, 14),
+            trace: rgb(60, 235, 255),
+            flat: false,
         },
         // FL's three oscillator synth: mid grey and green
         "triosc" => Skin {
@@ -104,6 +109,7 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(44, 48, 50),
             screen: rgb(26, 34, 26),
             trace: rgb(160, 240, 110),
+            flat: true,
         },
         // an FM synth: black and amber
         "facet" => Skin {
@@ -121,6 +127,7 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(14, 14, 16),
             screen: rgb(24, 18, 8),
             trace: rgb(255, 205, 100),
+            flat: false,
         },
         // a granular synth: deep teal and violet
         "mist" => Skin {
@@ -138,23 +145,25 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(14, 20, 24),
             screen: rgb(10, 20, 24),
             trace: rgb(150, 255, 236),
+            flat: false,
         },
-        // a layered instrument: night blue and magenta
+        // a ROM preset player: deep indigo panels around a violet blue display
         "nebula" => Skin {
             name: "NEBULA",
-            tagline: "layered macro instrument",
-            bg_top: rgb(36, 32, 52),
-            bg_bottom: rgb(20, 18, 32),
-            section: rgb(30, 27, 44),
-            edge: rgb(70, 60, 100),
-            header: rgb(14, 12, 24),
-            text: rgb(232, 226, 250),
-            dim: rgb(150, 140, 180),
-            accent: rgb(220, 110, 255),
-            knob: rgb(48, 42, 68),
-            track: rgb(16, 14, 26),
-            screen: rgb(16, 12, 28),
-            trace: rgb(230, 160, 255),
+            tagline: "layered rom preset player",
+            bg_top: rgb(30, 26, 62),
+            bg_bottom: rgb(12, 10, 30),
+            section: rgb(24, 21, 52),
+            edge: rgb(72, 64, 140),
+            header: rgb(10, 8, 26),
+            text: rgb(228, 226, 255),
+            dim: rgb(140, 138, 200),
+            accent: rgb(150, 110, 255),
+            knob: rgb(44, 38, 88),
+            track: rgb(14, 12, 34),
+            screen: rgb(14, 18, 58),
+            trace: rgb(140, 200, 255),
+            flat: false,
         },
         // drum pads: black with red
         "lumapad" => Skin {
@@ -172,6 +181,25 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(16, 16, 18),
             screen: rgb(20, 12, 14),
             trace: rgb(255, 130, 140),
+            flat: false,
+        },
+        // the modular synth: a deep indigo case with patch cable magenta
+        "weave" => Skin {
+            name: "WEAVE",
+            tagline: "modular synthesizer",
+            bg_top: rgb(36, 32, 52),
+            bg_bottom: rgb(20, 18, 30),
+            section: rgb(30, 27, 44),
+            edge: rgb(70, 62, 98),
+            header: rgb(16, 14, 24),
+            text: rgb(230, 224, 244),
+            dim: rgb(150, 140, 176),
+            accent: rgb(232, 84, 200),
+            knob: rgb(56, 50, 78),
+            track: rgb(18, 16, 28),
+            screen: rgb(14, 12, 22),
+            trace: rgb(255, 140, 230),
+            flat: false,
         },
         // effect windows: a rack unit in brushed dark steel with a green LED accent
         "fx" => Skin {
@@ -189,6 +217,7 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(24, 26, 28),
             screen: rgb(12, 22, 16),
             trace: rgb(110, 255, 170),
+            flat: false,
         },
         _ => Skin {
             name: "SAMPLER",
@@ -205,6 +234,7 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(24, 26, 28),
             screen: rgb(16, 18, 20),
             trace: rgb(255, 190, 110),
+            flat: false,
         },
     }
 }
@@ -313,6 +343,12 @@ fn header(ui: &mut Ui, skin: Skin) {
 /// face).
 pub fn group<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
     match current() {
+        Some(s) if s.flat => egui::Frame::new()
+            .fill(s.section)
+            .stroke(Stroke::new(1.0, s.edge))
+            .corner_radius(2.0)
+            .inner_margin(6.0)
+            .show(ui, add),
         Some(s) => {
             let r = egui::Frame::new()
                 .fill(s.section)
@@ -560,12 +596,13 @@ mod tests {
     fn every_instrument_has_its_own_face() {
         let ids = [
             "polaris", "vortex", "monolith", "zenith", "triosc", "facet", "mist", "nebula",
-            "lumapad", "sampler",
+            "lumapad", "sampler", "weave",
         ];
         let accents: std::collections::HashSet<_> =
             ids.iter().map(|i| skin_for(i).accent).collect();
         assert!(accents.len() >= 8, "faces are told apart by colour");
         assert_eq!(skin_for("vortex").name, "VORTEX");
+        assert_eq!(skin_for("weave").name, "WEAVE");
         // text stands out from its background on every face
         for i in ids {
             let s = skin_for(i);
