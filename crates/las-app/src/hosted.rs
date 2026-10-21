@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Hosted (CLAP) plugins in the app: the lists in the browser, adding them as channels
-//! and effects, and a window of generic controls for their parameters. A plugin's own
-//! window is not hosted yet, so its parameters are what a project keeps of it.
+//! Hosted (CLAP, VST3) plugins in the app: the lists in the browser, adding them as
+//! channels and effects, a window of generic controls for their parameters, and the
+//! plugin's own window (VST3 for now). What is turned in a plugin's window comes back
+//! as parameter changes, so its parameters are what a project keeps of it.
 
 use crate::app::App;
 use crate::theme::pal;
 use eframe::egui::{self, RichText, Ui};
-use las_host::{find, params_of, plugin_state, PluginInfo, HOSTED};
+use las_host::{find, params_of, plugin_state, Editor, Format, PluginInfo, HOSTED};
 use serde_json::{json, Value};
 
 /// The plugin id a channel or slot state names.
@@ -93,6 +94,34 @@ pub fn params_ui(ui: &mut Ui, state: &Value) -> ParamsOut {
     out
 }
 
+/// What a plugin window belongs to.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Owner {
+    /// A channel, by id.
+    Channel(String),
+    /// An effect slot: the insert and the slot's id.
+    Slot(usize, String),
+}
+
+/// A plugin's own window that is open.
+pub struct OpenEditor {
+    pub owner: Owner,
+    pub editor: Editor,
+}
+
+/// The values a state holds for every parameter of its plugin.
+fn values(state: &Value) -> Vec<(u32, f64)> {
+    params_of(plugin_id(state))
+        .iter()
+        .map(|p| (p.id, value_of(state, p.id, p.default)))
+        .collect()
+}
+
+/// Whether the plugin a state names has a window the app can host.
+fn has_window(state: &Value) -> bool {
+    find(plugin_id(state)).is_some_and(|i| i.format == Format::Vst3)
+}
+
 fn format_name(f: las_host::Format) -> &'static str {
     match f {
         las_host::Format::Clap => "CLAP",
@@ -101,6 +130,90 @@ fn format_name(f: las_host::Format) -> &'static str {
 }
 
 impl App {
+    /// Open the plugin's own window for `owner`, or bring nothing new when it is open.
+    fn open_editor(&mut self, owner: Owner, state: &Value, title: &str) {
+        if self.editors.iter().any(|e| e.owner == owner) {
+            return;
+        }
+        let Some(info) = find(plugin_id(state)) else {
+            return;
+        };
+        match Editor::open(&info, &values(state), title) {
+            Ok(editor) => self.editors.push(OpenEditor { owner, editor }),
+            Err(e) => self.error = Some(format!("{}: {e}", info.name)),
+        }
+    }
+
+    /// Show values changed in the generic controls in the plugin's window too.
+    fn tell_editor(&mut self, owner: &Owner, changes: &[(u32, f64)]) {
+        if let Some(e) = self.editors.iter_mut().find(|e| &e.owner == owner) {
+            for &(id, v) in changes {
+                e.editor.set_param(id, v);
+            }
+        }
+    }
+
+    /// The button that opens a plugin's own window.
+    fn editor_button(&mut self, ui: &mut Ui, owner: Owner, state: &Value, title: &str) {
+        if !has_window(state) {
+            return;
+        }
+        let open = self.editors.iter().any(|e| e.owner == owner);
+        if ui
+            .add_enabled(!open, egui::Button::new("Plugin window"))
+            .on_hover_text("Open the plugin's own window")
+            .clicked()
+        {
+            self.open_editor(owner, state, title);
+        }
+    }
+
+    /// Serve the open plugin windows: what was turned in them goes into the project,
+    /// and a window closes when the user closed it or its owner is gone.
+    pub(crate) fn serve_editors(&mut self) {
+        if self.editors.is_empty() {
+            return;
+        }
+        let mut edits = Vec::new();
+        for e in &mut self.editors {
+            let changes = e.editor.idle();
+            if !changes.is_empty() {
+                edits.push((e.owner.clone(), changes));
+            }
+        }
+        for (owner, changes) in edits {
+            self.project
+                .modify_coalesced("hosted-window", move |p| match &owner {
+                    Owner::Channel(id) => {
+                        if let Some(c) = p.channels.iter_mut().find(|c| &c.id == id) {
+                            apply(&mut c.state, &changes);
+                        }
+                    }
+                    Owner::Slot(insert, id) => {
+                        if let Some(s) = p
+                            .mixer
+                            .get_mut(*insert)
+                            .and_then(|t| t.slots.iter_mut().flatten().find(|s| &s.id == id))
+                        {
+                            apply(&mut s.state, &changes);
+                        }
+                    }
+                });
+        }
+        let project = self.project.loaded.as_ref().map(|l| &l.project);
+        let alive = |o: &Owner| {
+            project.is_some_and(|p| match o {
+                Owner::Channel(id) => p.channels.iter().any(|c| &c.id == id),
+                Owner::Slot(insert, id) => p
+                    .mixer
+                    .get(*insert)
+                    .is_some_and(|t| t.slots.iter().flatten().any(|s| &s.id == id)),
+            })
+        };
+        self.editors
+            .retain(|e| !e.editor.closed() && alive(&e.owner));
+    }
+
     /// The window of a channel that is a hosted plugin.
     pub(crate) fn hosted_channel(&mut self, ui: &mut Ui, channel: usize) {
         let Some(c) = self
@@ -124,10 +237,12 @@ impl App {
                 .weak(),
             );
         }
+        self.editor_button(ui, Owner::Channel(channel_id.clone()), &state, &name);
         ui.separator();
         let ParamsOut { changes, automate } = egui::ScrollArea::vertical()
             .show(ui, |ui| params_ui(ui, &state))
             .inner;
+        self.tell_editor(&Owner::Channel(channel_id.clone()), &changes);
         if let Some((id, pname, start)) = automate {
             self.project.create_automation(&crate::auto::AutoRequest {
                 target: crate::auto::plugin_target(&channel_id, &format!("p.{id}")),
@@ -158,6 +273,8 @@ impl App {
         };
         let (state, mut on, mut mix, slot_id) = (s.state.clone(), s.enabled, s.mix, s.id.clone());
         let (mut on_changed, mut mix_changed, mut remove) = (false, false, false);
+        let owner = Owner::Slot(insert, slot_id.clone());
+        self.editor_button(ui, owner.clone(), &state, &name_of(&state));
         ui.horizontal(|ui| {
             on_changed = ui.checkbox(&mut on, "").changed();
             ui.label(
@@ -178,6 +295,7 @@ impl App {
         let ParamsOut { changes, automate } = egui::ScrollArea::vertical()
             .show(ui, |ui| params_ui(ui, &state))
             .inner;
+        self.tell_editor(&owner, &changes);
         if let Some((id, pname, start)) = automate {
             self.project.create_automation(&crate::auto::AutoRequest {
                 target: crate::auto::effect_target(insert, &slot_id, &format!("p.{id}")),

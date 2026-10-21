@@ -17,6 +17,9 @@ use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
 use vst3::{Class, ComPtr, ComWrapper, Interface};
 
+mod editor;
+pub use editor::Vst3Editor;
+
 /// The binary inside a `.vst3` (a bundle folder, or on Windows often the file itself).
 pub fn module_binary(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
@@ -43,6 +46,9 @@ pub fn module_binary(path: &Path) -> Option<PathBuf> {
 struct Module {
     #[cfg(unix)]
     handle: *mut c_void,
+    /// The `CFBundle` a macOS plugin was entered with.
+    #[cfg(target_os = "macos")]
+    bundle: *mut c_void,
     #[cfg(not(unix))]
     lib: libloading::Library,
 }
@@ -57,11 +63,21 @@ impl Module {
             let lib =
                 unsafe { libloading::os::unix::Library::new(&bin) }.map_err(|e| e.to_string())?;
             let handle = lib.into_raw();
+            // the entry point is called with the handle on Linux and with the bundle
+            // on macOS
+            #[cfg(not(target_os = "macos"))]
             let m = Self { handle };
-            // the entry point is called with the handle on Linux; macOS plugins want a
-            // CFBundle, which is not made here, and are entered without it
             #[cfg(not(target_os = "macos"))]
             m.enter("ModuleEntry", handle)?;
+            #[cfg(target_os = "macos")]
+            let m = Self {
+                handle,
+                bundle: mac::bundle(path),
+            };
+            #[cfg(target_os = "macos")]
+            if !m.bundle.is_null() {
+                m.enter("bundleEntry", m.bundle)?;
+            }
             Ok(m)
         }
         #[cfg(not(unix))]
@@ -80,7 +96,6 @@ impl Module {
         std::mem::ManuallyDrop::new(unsafe { libloading::os::unix::Library::from_raw(self.handle) })
     }
 
-    #[cfg(not(target_os = "macos"))]
     fn enter(&self, name: &str, arg: *mut c_void) -> Result<(), String> {
         #[cfg(unix)]
         let lib = self.lib();
@@ -126,15 +141,64 @@ impl Drop for Module {
         let lib = &self.lib;
         // SAFETY: the exit points have these signatures
         unsafe {
-            for name in ["ModuleExit", "ExitDll"] {
+            for name in ["ModuleExit", "ExitDll", "bundleExit"] {
                 if let Ok(f) = lib.get::<unsafe extern "system" fn() -> bool>(name.as_bytes()) {
                     f();
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        mac::release(self.bundle);
         #[cfg(unix)]
         {
             drop(std::mem::ManuallyDrop::into_inner(self.lib()));
+        }
+    }
+}
+
+/// The `CFBundle` of a plugin bundle, which macOS plugins are entered with.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::ffi::c_void;
+    use std::path::Path;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFURLCreateFromFileSystemRepresentation(
+            alloc: *const c_void,
+            buf: *const u8,
+            len: isize,
+            is_dir: u8,
+        ) -> *const c_void;
+        fn CFBundleCreate(alloc: *const c_void, url: *const c_void) -> *mut c_void;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    /// The bundle at `path`, or null when it is not one.
+    pub fn bundle(path: &Path) -> *mut c_void {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        // SAFETY: plain CoreFoundation calls; the url is released once the bundle holds it
+        unsafe {
+            let url = CFURLCreateFromFileSystemRepresentation(
+                std::ptr::null(),
+                bytes.as_ptr(),
+                bytes.len() as isize,
+                1,
+            );
+            if url.is_null() {
+                return std::ptr::null_mut();
+            }
+            let b = CFBundleCreate(std::ptr::null(), url);
+            CFRelease(url);
+            b
+        }
+    }
+
+    pub fn release(bundle: *mut c_void) {
+        if !bundle.is_null() {
+            // SAFETY: the bundle came from `CFBundleCreate`
+            unsafe { CFRelease(bundle) };
         }
     }
 }
@@ -452,6 +516,94 @@ impl IParameterChangesTrait for Changes {
     }
 }
 
+/// A plugin's component and its controller, initialised and connected. The controller
+/// is part of the component or a class of its own (`separate`).
+type Instance = (ComPtr<IComponent>, Option<ComPtr<IEditController>>, bool);
+
+/// Create and initialise the class `cid` and its controller.
+///
+/// # Safety
+/// `host` is a live host application object.
+unsafe fn instantiate(
+    factory: &ComPtr<IPluginFactory>,
+    cid: &TUID,
+    host: *mut FUnknown,
+) -> Result<Instance, String> {
+    let mut obj: *mut c_void = std::ptr::null_mut();
+    let r = factory.createInstance(
+        cid.as_ptr(),
+        <IComponent as Interface>::IID.as_ptr() as *const c_char,
+        &mut obj,
+    );
+    let component = (r == kResultOk)
+        .then(|| ComPtr::from_raw(obj as *mut IComponent))
+        .flatten()
+        .ok_or("the plugin could not be created")?;
+    if component.initialize(host) != kResultOk {
+        return Err("the plugin did not initialise".into());
+    }
+    // the controller: part of the component, or a class of its own
+    let mut controller = component.cast::<IEditController>();
+    let mut separate = false;
+    if controller.is_none() {
+        let mut ccid: TUID = [0; 16];
+        if component.getControllerClassId(&mut ccid) == kResultOk {
+            let mut obj: *mut c_void = std::ptr::null_mut();
+            let r = factory.createInstance(
+                ccid.as_ptr(),
+                <IEditController as Interface>::IID.as_ptr() as *const c_char,
+                &mut obj,
+            );
+            if r == kResultOk {
+                controller = ComPtr::from_raw(obj as *mut IEditController);
+                if let Some(c) = &controller {
+                    if c.initialize(host) == kResultOk {
+                        separate = true;
+                    } else {
+                        controller = None;
+                    }
+                }
+            }
+        }
+    }
+    if separate {
+        if let (Some(a), Some(b)) = (
+            component.cast::<IConnectionPoint>(),
+            controller
+                .as_ref()
+                .and_then(|c| c.cast::<IConnectionPoint>()),
+        ) {
+            a.connect(b.as_ptr());
+            b.connect(a.as_ptr());
+        }
+    }
+    Ok((component, controller, separate))
+}
+
+/// End what [`instantiate`] began.
+///
+/// # Safety
+/// The objects are not used afterwards.
+unsafe fn finish(
+    component: &ComPtr<IComponent>,
+    controller: Option<&ComPtr<IEditController>>,
+    separate: bool,
+) {
+    if separate {
+        if let (Some(a), Some(b)) = (
+            component.cast::<IConnectionPoint>(),
+            controller.and_then(|c| c.cast::<IConnectionPoint>()),
+        ) {
+            a.disconnect(b.as_ptr());
+            b.disconnect(a.as_ptr());
+        }
+        if let Some(c) = controller {
+            c.terminate();
+        }
+    }
+    component.terminate();
+}
+
 // ---------------------------------------------------------------------------
 // A running plugin
 // ---------------------------------------------------------------------------
@@ -492,58 +644,10 @@ impl Vst3 {
             .ok_or("the host object has no interface")?;
         // SAFETY: calls into the plugin in the order the VST3 specification gives
         unsafe {
-            let mut obj: *mut c_void = std::ptr::null_mut();
-            let r = factory.createInstance(
-                cid.as_ptr(),
-                <IComponent as Interface>::IID.as_ptr() as *const c_char,
-                &mut obj,
-            );
-            let component = (r == kResultOk)
-                .then(|| ComPtr::from_raw(obj as *mut IComponent))
-                .flatten()
-                .ok_or("the plugin could not be created")?;
-            if component.initialize(host_ctx.as_ptr()) != kResultOk {
-                return Err("the plugin did not initialise".into());
-            }
+            let (component, controller, separate) = instantiate(&factory, &cid, host_ctx.as_ptr())?;
             let processor = component
                 .cast::<IAudioProcessor>()
                 .ok_or("the plugin is not an audio processor")?;
-
-            // the controller: part of the component, or a class of its own
-            let mut controller = component.cast::<IEditController>();
-            let mut separate = false;
-            if controller.is_none() {
-                let mut ccid: TUID = [0; 16];
-                if component.getControllerClassId(&mut ccid) == kResultOk {
-                    let mut obj: *mut c_void = std::ptr::null_mut();
-                    let r = factory.createInstance(
-                        ccid.as_ptr(),
-                        <IEditController as Interface>::IID.as_ptr() as *const c_char,
-                        &mut obj,
-                    );
-                    if r == kResultOk {
-                        controller = ComPtr::from_raw(obj as *mut IEditController);
-                        if let Some(c) = &controller {
-                            if c.initialize(host_ctx.as_ptr()) == kResultOk {
-                                separate = true;
-                            } else {
-                                controller = None;
-                            }
-                        }
-                    }
-                }
-            }
-            if separate {
-                if let (Some(a), Some(b)) = (
-                    component.cast::<IConnectionPoint>(),
-                    controller
-                        .as_ref()
-                        .and_then(|c| c.cast::<IConnectionPoint>()),
-                ) {
-                    a.connect(b.as_ptr());
-                    b.connect(a.as_ptr());
-                }
-            }
 
             // buses: the first audio bus each way and the first note input
             let buses = |media: MediaTypes, dir: BusDirections| {
@@ -874,21 +978,7 @@ impl Drop for Vst3 {
         unsafe {
             self.processor.setProcessing(0);
             self.component.setActive(0);
-            if self.separate {
-                if let (Some(a), Some(b)) = (
-                    self.component.cast::<IConnectionPoint>(),
-                    self.controller
-                        .as_ref()
-                        .and_then(|c| c.cast::<IConnectionPoint>()),
-                ) {
-                    a.disconnect(b.as_ptr());
-                    b.disconnect(a.as_ptr());
-                }
-                if let Some(c) = &self.controller {
-                    c.terminate();
-                }
-            }
-            self.component.terminate();
+            finish(&self.component, self.controller.as_ref(), self.separate);
         }
         let _ = &self.module;
     }

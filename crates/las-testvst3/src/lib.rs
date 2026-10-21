@@ -327,6 +327,7 @@ impl IProcessContextRequirementsTrait for Processor {
 
 struct Controller {
     gain: Mutex<f64>,
+    handler: Mutex<Option<vst3::ComPtr<IComponentHandler>>>,
 }
 
 impl Class for Controller {
@@ -426,11 +427,148 @@ impl IEditControllerTrait for Controller {
         *self.gain.lock().unwrap() = value;
         kResultOk
     }
-    unsafe fn setComponentHandler(&self, _handler: *mut IComponentHandler) -> tresult {
+    unsafe fn setComponentHandler(&self, handler: *mut IComponentHandler) -> tresult {
+        *self.handler.lock().unwrap() = ComRef::from_raw(handler).map(|h| h.to_com_ptr());
         kResultOk
     }
     unsafe fn createView(&self, _name: *const c_char) -> *mut IPlugView {
-        ptr::null_mut()
+        let view = ComWrapper::new(View {
+            handler: self.handler.lock().unwrap().clone(),
+            #[cfg(target_os = "linux")]
+            timer: Mutex::new(None),
+        });
+        view.to_com_ptr::<IPlugView>()
+            .map_or(ptr::null_mut(), |v| v.into_raw())
+    }
+}
+
+/// The view: it draws nothing. When it is attached it sets the gain to 0.25 as if
+/// the user had turned it; on Linux it also asks the host's run loop for a timer, which
+/// sets the gain to 0.75 and asks for a bigger window.
+pub const EDIT_ON_OPEN: f64 = 0.25;
+pub const EDIT_ON_TIMER: f64 = 0.75;
+pub const VIEW_SIZE: (i32, i32) = (300, 200);
+pub const RESIZED: (i32, i32) = (320, 240);
+
+struct View {
+    handler: Option<vst3::ComPtr<IComponentHandler>>,
+    #[cfg(target_os = "linux")]
+    timer: Mutex<Option<(vst3::ComPtr<Linux::IRunLoop>, ComWrapper<Tick>)>>,
+}
+
+impl Class for View {
+    type Interfaces = (IPlugView,);
+}
+
+impl View {
+    unsafe fn edit(handler: &Option<vst3::ComPtr<IComponentHandler>>, v: f64) {
+        if let Some(h) = handler {
+            h.beginEdit(GAIN);
+            h.performEdit(GAIN, v);
+            h.endEdit(GAIN);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct Tick {
+    handler: Option<vst3::ComPtr<IComponentHandler>>,
+    frame: vst3::ComPtr<IPlugFrame>,
+    done: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+impl Class for Tick {
+    type Interfaces = (Linux::ITimerHandler,);
+}
+
+#[cfg(target_os = "linux")]
+impl Linux::ITimerHandlerTrait for Tick {
+    unsafe fn onTimer(&self) {
+        if self.done.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        View::edit(&self.handler, EDIT_ON_TIMER);
+        let mut r = ViewRect {
+            left: 0,
+            top: 0,
+            right: RESIZED.0,
+            bottom: RESIZED.1,
+        };
+        self.frame.resizeView(ptr::null_mut(), &mut r);
+    }
+}
+
+impl IPlugViewTrait for View {
+    unsafe fn isPlatformTypeSupported(&self, _kind: FIDString) -> tresult {
+        kResultTrue
+    }
+    unsafe fn attached(&self, parent: *mut c_void, _kind: FIDString) -> tresult {
+        if parent.is_null() {
+            return kInvalidArgument;
+        }
+        View::edit(&self.handler, EDIT_ON_OPEN);
+        kResultOk
+    }
+    unsafe fn removed(&self) -> tresult {
+        #[cfg(target_os = "linux")]
+        if let Some((rl, tick)) = self.timer.lock().unwrap().take() {
+            use Linux::IRunLoopTrait;
+            if let Some(t) = tick.to_com_ptr::<Linux::ITimerHandler>() {
+                rl.unregisterTimer(t.as_ptr());
+            }
+        }
+        kResultOk
+    }
+    unsafe fn onWheel(&self, _d: f32) -> tresult {
+        kResultFalse
+    }
+    unsafe fn onKeyDown(&self, _k: char16, _c: int16, _m: int16) -> tresult {
+        kResultFalse
+    }
+    unsafe fn onKeyUp(&self, _k: char16, _c: int16, _m: int16) -> tresult {
+        kResultFalse
+    }
+    unsafe fn getSize(&self, size: *mut ViewRect) -> tresult {
+        *size = ViewRect {
+            left: 0,
+            top: 0,
+            right: VIEW_SIZE.0,
+            bottom: VIEW_SIZE.1,
+        };
+        kResultOk
+    }
+    unsafe fn onSize(&self, _size: *mut ViewRect) -> tresult {
+        kResultOk
+    }
+    unsafe fn onFocus(&self, _state: TBool) -> tresult {
+        kResultOk
+    }
+    unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+        #[cfg(target_os = "linux")]
+        if let Some(f) = ComRef::from_raw(frame) {
+            use Linux::IRunLoopTrait;
+            if let Some(rl) = f.cast::<Linux::IRunLoop>() {
+                let tick = ComWrapper::new(Tick {
+                    handler: self.handler.clone(),
+                    frame: f.to_com_ptr(),
+                    done: std::sync::atomic::AtomicBool::new(false),
+                });
+                if let Some(t) = tick.to_com_ptr::<Linux::ITimerHandler>() {
+                    rl.registerTimer(t.as_ptr(), 10);
+                }
+                *self.timer.lock().unwrap() = Some((rl, tick));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = frame;
+        kResultOk
+    }
+    unsafe fn canResize(&self) -> tresult {
+        kResultFalse
+    }
+    unsafe fn checkSizeConstraint(&self, _rect: *mut ViewRect) -> tresult {
+        kResultOk
     }
 }
 
@@ -482,6 +620,7 @@ impl IPluginFactoryTrait for Factory {
             Processor::CID => ComWrapper::new(Processor::new()).to_com_ptr::<FUnknown>(),
             Controller::CID => ComWrapper::new(Controller {
                 gain: Mutex::new(0.5),
+                handler: Mutex::new(None),
             })
             .to_com_ptr::<FUnknown>(),
             _ => None,

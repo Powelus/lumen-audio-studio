@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/las-dsp", "crates/las-project", "crates/las-engine", "crates/las-cli", "crates/las-app", "crates/las-host", "crates/las-testplug",
-    "crates/las-testvst3"]
+    "crates/las-testvst3", "crates/las-window"]
 
 [workspace.package]
 version = "0.2.0-alpha.49"
