@@ -8,6 +8,7 @@ use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
     PluginAudioPortsImpl,
 };
+use clack_extensions::gui::{GuiConfiguration, GuiSize, PluginGui, PluginGuiImpl, Window};
 use clack_extensions::note_ports::{
     NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts,
     PluginNotePortsImpl,
@@ -17,9 +18,12 @@ use clack_extensions::params::{
     PluginMainThreadParams, PluginParams,
 };
 use clack_extensions::state::{PluginState, PluginStateImpl};
+use clack_extensions::timer::{HostTimer, PluginTimer, PluginTimerImpl, TimerId};
+use clack_plugin::events::event_types::ParamValueEvent;
 use clack_plugin::events::spaces::CoreEventSpace;
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
+use std::cell::Cell;
 use std::ffi::CStr;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
@@ -27,6 +31,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The parameter's id.
 pub const GAIN: u32 = 1;
+/// The window sets the gain to this when it is attached, as if the user turned it...
+pub const EDIT_ON_OPEN: f64 = 0.25;
+/// ...and to this from a timer it asks the host for.
+pub const EDIT_ON_TIMER: f64 = 0.75;
 
 pub struct TestPlugin;
 
@@ -49,6 +57,11 @@ impl PluginShared<'_> for TestShared {}
 
 pub struct TestMain<'a> {
     shared: &'a TestShared,
+    host: HostMainThreadHandle<'a>,
+    /// A change made in the window, for the host's next parameter flush.
+    edit: Cell<Option<f64>>,
+    timer: Cell<Option<TimerId>>,
+    ticked: Cell<bool>,
 }
 
 impl<'a> PluginMainThread<'a, TestShared> for TestMain<'a> {}
@@ -71,7 +84,9 @@ impl Plugin for TestPlugin {
             .register::<PluginAudioPorts>()
             .register::<PluginNotePorts>()
             .register::<PluginParams>()
-            .register::<PluginState>();
+            .register::<PluginState>()
+            .register::<PluginGui>()
+            .register::<PluginTimer>();
     }
 }
 
@@ -91,10 +106,16 @@ impl DefaultPluginFactory for TestPlugin {
     }
 
     fn new_main_thread<'a>(
-        _host: HostMainThreadHandle<'a>,
+        host: HostMainThreadHandle<'a>,
         shared: &'a TestShared,
     ) -> Result<TestMain<'a>, PluginError> {
-        Ok(TestMain { shared })
+        Ok(TestMain {
+            shared,
+            host,
+            edit: Cell::new(None),
+            timer: Cell::new(None),
+            ticked: Cell::new(false),
+        })
     }
 }
 
@@ -177,13 +198,77 @@ impl PluginMainThreadParams for TestMain<'_> {
             .flatten()
     }
 
-    fn flush(&self, input: &InputEvents, _output: &mut OutputEvents) {
+    fn flush(&self, input: &InputEvents, output: &mut OutputEvents) {
         for e in input {
             if let Some(CoreEventSpace::ParamValue(p)) = e.as_core_event() {
                 if p.param_id().map(|i| i.get()) == Some(GAIN) {
                     self.shared.set_gain(p.value() as f32);
                 }
             }
+        }
+        if let Some(v) = self.edit.take() {
+            self.shared.set_gain(v as f32);
+            let _ = output.try_push(ParamValueEvent::new(
+                0,
+                ClapId::new(GAIN),
+                Pckn::match_all(),
+                v,
+            ));
+        }
+    }
+}
+
+/// The window: it draws nothing, but behaves as if the user turned the gain when it
+/// is attached, and again when a timer it registers with the host fires.
+impl PluginGuiImpl for TestMain<'_> {
+    fn is_api_supported(&self, _configuration: GuiConfiguration) -> bool {
+        true
+    }
+    fn get_preferred_api(&self) -> Option<GuiConfiguration<'_>> {
+        None
+    }
+    fn create(&self, _configuration: GuiConfiguration) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn destroy(&self) {
+        if let (Some(id), Some(t)) = (self.timer.take(), self.host.get_extension::<HostTimer>()) {
+            let _ = t.unregister_timer(&self.host, id);
+        }
+    }
+    fn set_scale(&self, _scale: f64) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn get_size(&self) -> Option<GuiSize> {
+        Some(GuiSize {
+            width: 300,
+            height: 200,
+        })
+    }
+    fn set_size(&self, _size: GuiSize) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn set_parent(&self, _window: Window) -> Result<(), PluginError> {
+        self.edit.set(Some(EDIT_ON_OPEN));
+        if let Some(t) = self.host.get_extension::<HostTimer>() {
+            self.timer.set(t.register_timer(&self.host, 10).ok());
+        }
+        Ok(())
+    }
+    fn set_transient(&self, _window: Window) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn show(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn hide(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+impl PluginTimerImpl for TestMain<'_> {
+    fn on_timer(&self, _id: TimerId) {
+        if !self.ticked.replace(true) {
+            self.edit.set(Some(EDIT_ON_TIMER));
         }
     }
 }

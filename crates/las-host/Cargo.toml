@@ -14,9 +14,9 @@ las-window = { path = "../las-window" }
 las-engine = { path = "../las-engine" }
 serde_json = "1"
 clack-host = "0.2.0"
-clack-extensions = { version = "0.2.0", features = ["clack-host", "params", "state", "audio-ports", "note-ports"] }
+clack-extensions = { version = "0.2.0", features = ["clack-host", "params", "state", "audio-ports", "note-ports", "gui", "timer", "posix-fd"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

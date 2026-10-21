@@ -2,6 +2,14 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.50
+
+CLAP plugin windows.
+
+- A CLAP channel or effect now has the Plugin window button too, and opens the plugin's own window, as VST3 plugins have since 0.2.0-alpha.48. What you turn in it goes into the project with undo, and the playing plugin follows.
+- The host side serves what CLAP windows need: size requests and closing, parameter flushes, timers, and on Linux and macOS the file descriptors that drive a plugin's event loop.
+- The test CLAP plugin has a window, and a test opens it in a real X server and checks the edits it sends, including one from a timer.
+
 ## 0.2.0-alpha.49
 
 Weave, a modular synth with patch cables.

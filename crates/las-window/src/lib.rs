@@ -39,6 +39,11 @@ impl Window {
         imp::KIND
     }
 
+    /// The kind of window this system makes.
+    pub fn kind_of_system() -> Kind {
+        imp::KIND
+    }
+
     /// Change the inner size.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.imp.resize(width.max(1), height.max(1));

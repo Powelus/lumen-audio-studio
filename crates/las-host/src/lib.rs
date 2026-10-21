@@ -13,6 +13,7 @@ use clack_extensions::params::{ParamInfoBuffer, PluginParams};
 use clack_extensions::state::PluginState;
 use clack_host::events::event_types::{NoteOffEvent, NoteOnEvent, ParamValueEvent};
 use clack_host::prelude::*;
+pub mod clap_editor;
 pub mod vst3;
 
 use std::ffi::CString;
@@ -742,6 +743,7 @@ pub fn params_of(id: &str) -> Arc<Vec<Param>> {
 
 /// A hosted plugin's own window, open on the app's thread.
 pub enum Editor {
+    Clap(clap_editor::ClapEditor),
     Vst3(vst3::Vst3Editor),
 }
 
@@ -750,13 +752,14 @@ impl Editor {
     pub fn open(info: &PluginInfo, params: &[(u32, f64)], title: &str) -> Result<Self, String> {
         match info.format {
             Format::Vst3 => vst3::Vst3Editor::open(info, params, title).map(Self::Vst3),
-            Format::Clap => Err("CLAP plugin windows are not hosted yet".into()),
+            Format::Clap => clap_editor::ClapEditor::open(info, params, title).map(Self::Clap),
         }
     }
 
     /// Serve the window; what the user changed in it since the last call.
     pub fn idle(&mut self) -> Vec<(u32, f64)> {
         match self {
+            Self::Clap(e) => e.idle(),
             Self::Vst3(e) => e.idle(),
         }
     }
@@ -764,6 +767,7 @@ impl Editor {
     /// Show a value that changed elsewhere.
     pub fn set_param(&mut self, id: u32, value: f64) {
         match self {
+            Self::Clap(e) => e.set_param(id, value),
             Self::Vst3(e) => e.set_param(id, value),
         }
     }
@@ -771,6 +775,7 @@ impl Editor {
     /// Whether the user closed the window.
     pub fn closed(&self) -> bool {
         match self {
+            Self::Clap(e) => e.closed(),
             Self::Vst3(e) => e.closed(),
         }
     }

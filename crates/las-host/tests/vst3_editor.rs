@@ -6,48 +6,14 @@
 
 mod common;
 
-use common::testvst3;
+use common::{display, testvst3};
 use las_host::{describe_any, Editor};
-use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 // what `las-testvst3` has (it is loaded as a library, not linked)
 const GAIN: u32 = 1;
 const EDIT_ON_OPEN: f64 = 0.25;
 const EDIT_ON_TIMER: f64 = 0.75;
-
-/// A display to open windows on: the one there is, or an Xvfb started for the test.
-fn display() -> Option<Xvfb> {
-    if std::env::var_os("DISPLAY").is_some() {
-        return None;
-    }
-    let num = 90 + std::process::id() % 9;
-    let child = Command::new("Xvfb")
-        .arg(format!(":{num}"))
-        .arg("-nolisten")
-        .arg("tcp")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("Xvfb to open a window on (install xvfb)");
-    std::env::set_var("DISPLAY", format!(":{num}"));
-    let socket = format!("/tmp/.X11-unix/X{num}");
-    let until = Instant::now() + Duration::from_secs(10);
-    while !std::path::Path::new(&socket).exists() && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Some(Xvfb(child))
-}
-
-/// Stops the server when the test ends, also when it fails.
-struct Xvfb(Child);
-
-impl Drop for Xvfb {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 #[test]
 fn the_plugin_window_sends_what_the_user_turns() {
