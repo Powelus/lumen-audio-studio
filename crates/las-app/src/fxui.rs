@@ -376,7 +376,7 @@ impl App {
     }
 
     /// The effect at `slot` changed: send its new parameters.
-    fn push_fx(&mut self, inst: crate::audio::Instrument, slot: usize) {
+    pub(crate) fn push_fx(&mut self, inst: crate::audio::Instrument, slot: usize) {
         self.synth_dirty = true;
         let item = &self.fx[index(inst)][slot];
         match parse_params(&item.id, &item.state, self.rate()) {
