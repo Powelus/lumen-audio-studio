@@ -125,9 +125,7 @@ pub struct Listing {
 
 /// Whether the app can read a file as a sample.
 pub fn is_sound(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+    las_engine::library::is_audio_file(&p.to_string_lossy())
 }
 
 pub fn list(dir: &Path) -> Listing {
@@ -405,7 +403,9 @@ fn file_row(ui: &mut Ui, f: &Path, out: &mut Option<FileAction>) {
         .map_or(String::new(), |n| n.to_string_lossy().into_owned());
     let r = ui
         .selectable_label(false, name)
-        .on_hover_text("Click to hear it, double click to add it as a channel");
+        .interact(egui::Sense::click_and_drag())
+        .on_hover_text("Click to hear it. Drag it to the playlist or the rack. Double click adds it as a channel.");
+    r.dnd_set_drag_payload(crate::shell::Dragged::File(f.to_path_buf()));
     if r.double_clicked() {
         *out = Some(FileAction::Add(f.to_path_buf()));
     } else if r.clicked() {
@@ -429,7 +429,7 @@ fn tree(ui: &mut Ui, cache: &mut FolderCache, dir: &Path, out: &mut Option<FileA
                 file_row(ui, f, out);
             }
             if l.dirs.is_empty() && l.files.is_empty() {
-                ui.label(RichText::new("No WAV files here.").weak());
+                ui.label(RichText::new("No audio files here.").weak());
             }
         });
 }
@@ -496,7 +496,7 @@ impl App {
     fn preview_file(&mut self, path: &Path) {
         let Some(a) = std::fs::read(path)
             .ok()
-            .and_then(|b| las_engine::library::decode_wav(&b))
+            .and_then(|b| las_engine::library::decode_audio(&b))
         else {
             self.status = format!("{} could not be read", path.display());
             return;

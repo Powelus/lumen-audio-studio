@@ -1660,29 +1660,19 @@ impl eframe::App for App {
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        // something dragged from the browser and let go
+        if ctx.input(|i| i.pointer.any_released()) {
+            if let Some(item) = egui::DragAndDrop::take_payload::<crate::shell::Dragged>(ctx) {
+                self.drop_item((*item).clone(), drop_at);
+            }
+        }
         for path in dropped {
             if path.extension().is_some_and(|e| e == "las") {
                 self.open_project(&path.to_string_lossy());
                 continue;
             }
-            if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("wave"))
-                && self.project.loaded.is_some()
-            {
-                // on the playlist a file becomes an audio clip, elsewhere a sampler channel
-                let place = self
-                    .shell
-                    .open
-                    .playlist
-                    .then_some(())
-                    .and(self.project.playlist.area)
-                    .zip(drop_at)
-                    .and_then(|(a, pos)| a.place(pos));
-                match place {
-                    Some((tick, track)) => self.import_clip_path(&path, tick, track),
-                    None => self.import_path(&path),
-                }
+            if self.project.loaded.is_some() {
+                self.drop_item(crate::shell::Dragged::File(path), drop_at);
                 continue;
             }
             match self.load_wav(&path) {
@@ -1697,6 +1687,9 @@ impl eframe::App for App {
             a.collect_garbage();
         }
         self.serve_editors();
+        if std::mem::take(&mut self.project.want_roll) {
+            self.shell.open.roll = true;
+        }
         self.autosave();
         self.feed_analyser();
         self.remember_windows();

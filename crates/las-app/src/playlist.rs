@@ -63,6 +63,8 @@ pub enum PlEdit {
     AskRenameTrack(usize),
     /// Open the editor of an automation clip (by the clip's own id).
     OpenAuto(String),
+    /// Open a pattern in the piano roll (by the pattern's id).
+    OpenPattern(String),
     /// Move several clips together in time and between tracks.
     MoveMany {
         ids: Vec<String>,
@@ -336,6 +338,7 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
         PlEdit::Begin
         | PlEdit::Seek(_)
         | PlEdit::OpenAuto(_)
+        | PlEdit::OpenPattern(_)
         | PlEdit::AskRenameTrack(_)
         | PlEdit::AskRenameMarker(_)
         | PlEdit::SongLoop(_) => {}
@@ -1093,16 +1096,25 @@ pub fn draw(
                 state.group_last = None;
                 state.drag = None;
             }
-            if state.tool == Tool::Draw && resp.double_clicked_by(egui::PointerButton::Primary) {
+            if matches!(state.tool, Tool::Draw | Tool::Select)
+                && resp.double_clicked_by(egui::PointerButton::Primary)
+            {
                 if let Some(p) = resp.interact_pointer_pos() {
                     if p.x > left && !in_ruler(p) {
                         let (t, tr) = (tick_at(p.x), track_at(p.y));
                         if let Some((i, _)) = hit(project, t, tr, edge) {
+                            // a double click on a clip opens it, as in FL Studio
                             let c = &project.playlist.clips[i];
-                            if c.kind == ClipKind::Automation {
-                                edits.push(PlEdit::OpenAuto(c.ref_id.clone()));
+                            match c.kind {
+                                ClipKind::Automation => {
+                                    edits.push(PlEdit::OpenAuto(c.ref_id.clone()))
+                                }
+                                ClipKind::Pattern => {
+                                    edits.push(PlEdit::OpenPattern(c.ref_id.clone()))
+                                }
+                                _ => {}
                             }
-                        } else {
+                        } else if state.tool == Tool::Draw {
                             if let Some(c) =
                                 new_pattern_clip(project, pattern, snapped(t, bar).max(0.0), tr)
                             {

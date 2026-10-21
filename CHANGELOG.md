@@ -2,6 +2,18 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.57
+
+Working the way FL Studio does.
+
+- Double click a channel in the rack and its window opens and comes to the front: the sampler, the synths, Nebula, Weave. A CLAP or VST3 plugin opens its own window. The window is named after the channel.
+- Right click a channel, Piano roll now opens the piano roll. A window opened from inside another one was being closed again in the same moment; that is fixed for every window.
+- Double click a pattern clip in the playlist to open it in the piano roll.
+- Drop audio files from your computer: MP3, FLAC, OGG, AIFF, M4A and WAV all work. On a playlist track a file becomes an audio clip where you drop it; anywhere else it becomes a sampler channel. Imported audio is kept in the project as WAV, so it plays the same everywhere.
+- Drag samples from the browser (the factory kit and your own folders) to the playlist or the rack the same way. Their name follows the pointer while you drag.
+- When a file cannot be used, a message says so instead of a line in the status bar.
+- Export: choose where to save with Choose..., then Render shows a progress bar with the percentage, the bar and the time it has reached, and about how long is left. Show in folder opens the folder when it is done. A project not saved yet exports to your Music folder.
+
 ## 0.2.0-alpha.56
 
 Faster start, an icon, and a tidier download.

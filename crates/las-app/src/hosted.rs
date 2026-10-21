@@ -144,6 +144,22 @@ impl App {
         }
     }
 
+    /// Open the own window of the plugin a channel plays; whether one is open now.
+    pub(crate) fn open_plugin_window(&mut self, channel: usize) -> bool {
+        let Some((id, name, state)) = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(channel))
+            .map(|c| (c.id.clone(), c.name.clone(), c.state.clone()))
+        else {
+            return false;
+        };
+        let owner = Owner::Channel(id);
+        self.open_editor(owner.clone(), &state, &name);
+        self.editors.iter().any(|e| e.owner == owner)
+    }
+
     /// Show values changed in the generic controls in the plugin's window too.
     fn tell_editor(&mut self, owner: &Owner, changes: &[(u32, f64)]) {
         if let Some(e) = self.editors.iter_mut().find(|e| &e.owner == owner) {

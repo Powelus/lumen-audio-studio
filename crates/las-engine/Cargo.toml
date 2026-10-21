@@ -17,6 +17,7 @@ serde_json = "1"
 hound = "3"
 flacenc = "0.5.1"
 mp3lame-encoder = "0.2"
-
-[dev-dependencies]
 claxon = "0.4"
+# reading the audio files people drop in: MP3, FLAC, OGG Vorbis, AIFF, M4A and WAV
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "vorbis", "ogg", "wav", "pcm", "aiff", "isomp4", "aac"] }
+

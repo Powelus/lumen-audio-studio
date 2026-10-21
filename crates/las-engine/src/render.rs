@@ -30,6 +30,37 @@ pub enum Mode {
     Range { from: f64, to: f64 },
 }
 
+/// How far a render on this thread has come: frames done of frames in all, for a
+/// progress bar. Set it with [`watch_progress`] before rendering.
+#[derive(Default, Debug)]
+pub struct Progress {
+    pub done: std::sync::atomic::AtomicU64,
+    pub total: std::sync::atomic::AtomicU64,
+}
+
+impl Progress {
+    /// From 0 to 1.
+    pub fn fraction(&self) -> f64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let t = self.total.load(Relaxed);
+        if t == 0 {
+            0.0
+        } else {
+            (self.done.load(Relaxed) as f64 / t as f64).min(1.0)
+        }
+    }
+}
+
+thread_local! {
+    static PROGRESS: std::cell::RefCell<Option<std::sync::Arc<Progress>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Report the progress of renders made on this thread to `p`.
+pub fn watch_progress(p: Option<std::sync::Arc<Progress>>) {
+    PROGRESS.with(|c| *c.borrow_mut() = p);
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderOptions {
     pub sample_rate: f64,
@@ -889,7 +920,16 @@ fn render_taps(
         .collect();
     let (mut ml, mut mr) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
     let mut frame = 0usize;
+    let progress = PROGRESS.with(|c| c.borrow().clone());
+    if let Some(p) = &progress {
+        p.total
+            .store(total as u64, std::sync::atomic::Ordering::Relaxed);
+    }
     while frame < total {
+        if let Some(p) = &progress {
+            p.done
+                .store(frame as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         let n = BLOCK.min(total - frame);
         sched.render_block(frame, &mut ml[..n], &mut mr[..n]);
         for (tap, (out_l, out_r)) in taps.iter().zip(outs.iter_mut()) {
@@ -906,6 +946,10 @@ fn render_taps(
             }
         }
         frame += n;
+    }
+    if let Some(p) = &progress {
+        p.done
+            .store(total as u64, std::sync::atomic::Ordering::Relaxed);
     }
     // plugin delay moves the output later: trim it from the start
     let mixer = &sched.mixer;

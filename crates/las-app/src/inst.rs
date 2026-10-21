@@ -167,6 +167,9 @@ impl App {
         };
         let (plugin, state) = (c.plugin_id.clone(), c.state.clone());
         self.project.channel = channel;
+        // the window opens and comes to the front, as a double click does in FL Studio
+        self.shell.open.synth = true;
+        self.shell.raise_synth = true;
         match panel_for(&plugin) {
             Some(inst) => {
                 let k = index(inst);
@@ -191,7 +194,13 @@ impl App {
                 self.view = crate::app::View::Sound;
             }
             None if plugin == "sampler" => self.bound = Some(Bound::Sampler(channel)),
-            None if plugin == las_host::HOSTED => self.bound = Some(Bound::Hosted(channel)),
+            None if plugin == las_host::HOSTED => {
+                self.bound = Some(Bound::Hosted(channel));
+                // the plugin's own window, as FL Studio opens it; the sliders when it has none
+                if self.open_plugin_window(channel) {
+                    self.shell.open.synth = false;
+                }
+            }
             None if plugin == "nebula" => self.bound = Some(Bound::Nebula(channel)),
             None if plugin == "lumapad" => self.bound = Some(Bound::Pads(channel)),
             None if plugin == las_engine::weave::WEAVE_ID => {

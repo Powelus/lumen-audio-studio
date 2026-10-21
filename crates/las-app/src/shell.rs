@@ -41,6 +41,132 @@ pub struct Windows {
     pub analyser: bool,
 }
 
+/// Something being dragged from the browser: a file of the user's, or a sample of
+/// the factory kit (its id and name).
+#[derive(Clone, Debug)]
+pub enum Dragged {
+    File(std::path::PathBuf),
+    Factory(&'static str, &'static str),
+}
+
+impl Dragged {
+    pub fn name(&self) -> String {
+        match self {
+            Dragged::File(p) => p
+                .file_stem()
+                .map_or("Sample".into(), |s| s.to_string_lossy().into_owned()),
+            Dragged::Factory(_, n) => (*n).to_string(),
+        }
+    }
+}
+
+impl App {
+    /// Something let go over the window: on a playlist track it becomes an audio clip
+    /// there (as in FL Studio), anywhere else a new sampler channel.
+    pub(crate) fn drop_item(&mut self, item: Dragged, at: Option<egui::Pos2>) {
+        if self.project.loaded.is_none() {
+            return;
+        }
+        if let Dragged::File(p) = &item {
+            if !las_engine::library::is_audio_file(&p.to_string_lossy()) {
+                self.shell.notice = Some(format!(
+                    "{} is not an audio file this app can read. WAV, MP3, FLAC, OGG, AIFF and M4A work.",
+                    p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
+                ));
+                return;
+            }
+        }
+        let place = self
+            .shell
+            .open
+            .playlist
+            .then_some(())
+            .and(self.project.playlist.area)
+            .zip(at)
+            .and_then(|(a, pos)| a.place(pos));
+        match (item, place) {
+            (Dragged::File(p), Some((tick, track))) => self.import_clip_path(&p, tick, track),
+            (Dragged::File(p), None) => self.import_path(&p),
+            (Dragged::Factory(id, name), Some((tick, track))) => {
+                let Some(a) = las_engine::factory::render_factory(id, 44_100.0) else {
+                    return;
+                };
+                let bytes = las_engine::library::encode_wav(&a);
+                let mut result = Ok(0);
+                self.project.modify_with_samples(true, |p, samples| {
+                    result = crate::menus::import_audio_clip(p, samples, name, bytes, tick, track);
+                });
+                match result {
+                    Ok(ch) => self.project.channel = ch,
+                    Err(e) => self.shell.notice = Some(e),
+                }
+            }
+            (Dragged::Factory(id, name), None) => self.add_factory_channel(id, name),
+        }
+    }
+
+    /// While something is dragged from the browser, its name follows the pointer.
+    pub(crate) fn drag_label(&self, ctx: &egui::Context) {
+        let Some(item) = egui::DragAndDrop::payload::<Dragged>(ctx) else {
+            return;
+        };
+        let Some(pos) = ctx.pointer_hover_pos() else {
+            return;
+        };
+        egui::Area::new(egui::Id::unique("drag-label"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(pos + vec2(14.0, 10.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(format!("\u{266A} {}", item.name()));
+                    ui.label(
+                        RichText::new(
+                            "Drop on the playlist for a clip, anywhere else for a channel",
+                        )
+                        .size(11.0)
+                        .weak(),
+                    );
+                });
+            });
+    }
+
+    /// A message the user should see, with an OK button.
+    pub(crate) fn notice_window(&mut self, ctx: &egui::Context) {
+        let Some(msg) = self.shell.notice.clone() else {
+            return;
+        };
+        let mut ok = false;
+        egui::Window::new("Something went wrong")
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.label(&msg);
+                ui.add_space(6.0);
+                ok = ui.button("OK").clicked();
+            });
+        if ok {
+            self.shell.notice = None;
+        }
+    }
+}
+
+impl Windows {
+    /// Close the windows that were open in `before` and are closed in `after`.
+    pub fn close_from(&mut self, before: &Windows, after: &Windows) {
+        macro_rules! each {
+            ($($f:ident),*) => {$(
+                if before.$f && !after.$f {
+                    self.$f = false;
+                }
+            )*};
+        }
+        each!(rack, playlist, roll, mixer, synth, export, about, keys, history, settings, analyser);
+    }
+}
+
 /// What the export window holds.
 pub struct Export {
     pub path: String,
@@ -51,6 +177,11 @@ pub struct Export {
     pub loop_only: bool,
     working: Option<Receiver<Result<String, String>>>,
     pub message: Option<Result<String, String>>,
+    /// How far the render has come, when it started, and the song's tempo and beats
+    /// per bar (for showing bars).
+    progress: Option<std::sync::Arc<las_engine::render::Progress>>,
+    started: Option<Instant>,
+    tempo: (f64, f64),
 }
 
 /// The formats the export window offers: label, FLAC, bits.
@@ -97,6 +228,10 @@ pub struct Shell {
     /// An action waiting for an answer about unsaved changes.
     pub pending: Option<crate::menus::Action>,
     /// The project File > Open recent is to open.
+    /// Bring the instrument window to the front on the next frame.
+    pub raise_synth: bool,
+    /// A message shown in a window until the user closes it.
+    pub notice: Option<String>,
     pub recent_target: Option<String>,
     placed: bool,
 }
@@ -143,10 +278,15 @@ impl Shell {
                 loop_only: false,
                 working: None,
                 message: None,
+                progress: None,
+                started: None,
+                tempo: (120.0, 4.0),
             },
             status: "Ready".into(),
             pending: None,
             recent_target: None,
+            raise_synth: false,
+            notice: None,
             placed: false,
         }
     }
@@ -755,9 +895,13 @@ impl App {
                     .show(ui, |ui| {
                         for s in items {
                             ui.horizontal(|ui| {
-                                let r = ui.selectable_label(false, s.name).on_hover_text(
-                                    "Click to hear it, double click to add it as a channel",
-                                );
+                                let r = ui
+                                    .selectable_label(false, s.name)
+                                    .interact(egui::Sense::click_and_drag())
+                                    .on_hover_text(
+                                        "Click to hear it. Drag it to the playlist or the rack. Double click adds it as a channel.",
+                                    );
+                                r.dnd_set_drag_payload(Dragged::Factory(s.id, s.name));
                                 if r.double_clicked() {
                                     add = Some((s.id, s.name));
                                 } else if r.clicked() {
@@ -935,6 +1079,7 @@ impl App {
             _ => (None, None),
         };
         let mut open = self.shell.open;
+        let before = open;
         let win = |title: &str, pos: egui::Pos2, size: egui::Vec2| {
             let mut w = egui::Window::new(title)
                 .constrain_to(area)
@@ -1015,8 +1160,25 @@ impl App {
                 _ => vec2(900.0, 680.0),
             };
             let first_pos = a.min + vec2(160.0, 30.0);
-            win("Synth", first_pos, size)
-                .id(egui::Id::unique(("synth-window", face)))
+            // the window is named after the channel it shows
+            let title = self
+                .bound
+                .and_then(|b| {
+                    self.project
+                        .loaded
+                        .as_ref()?
+                        .project
+                        .channels
+                        .get(b.channel())
+                        .map(|c| c.name.clone())
+                })
+                .unwrap_or_else(|| "Instrument".into());
+            let id = egui::Id::unique(("synth-window", face));
+            if std::mem::take(&mut self.shell.raise_synth) {
+                ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
+            }
+            win(&title, first_pos, size)
+                .id(id)
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
                     Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
@@ -1068,16 +1230,22 @@ impl App {
         }
         if open.export {
             egui::Window::new("Export audio")
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.content_rect().center())
                 .open(&mut open.export)
                 .resizable(false)
                 .collapsible(false)
                 .show(ctx, |ui| self.export_window(ui));
         }
-        self.shell.open = open;
+        // only what the windows' own close buttons changed is taken back: a window
+        // opened from inside another one (the rack's "Piano roll") stays open
+        self.shell.open.close_from(&before, &open);
         self.about_window(ctx);
         self.keys_window(ctx);
         self.history_window(ctx);
         self.settings_window(ctx);
+        self.notice_window(ctx);
+        self.drag_label(ctx);
         self.analyser_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
@@ -1312,7 +1480,8 @@ impl App {
     fn export_window(&mut self, ui: &mut Ui) {
         if self.shell.export.path.is_empty() {
             if let Some(l) = &self.project.loaded {
-                self.shell.export.path = format!("{}.wav", l.path.trim_end_matches(".las"));
+                let (_, kind, _) = FORMATS[self.shell.export.format];
+                self.shell.export.path = default_export_path(&l.path, kind);
             }
         }
         // a render that has finished
@@ -1326,8 +1495,31 @@ impl App {
         }
         let busy = self.shell.export.working.is_some();
         ui.horizontal(|ui| {
-            ui.label("File");
-            ui.add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(360.0));
+            ui.label("Save to");
+            ui.add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0));
+            if ui
+                .add_enabled(!busy, egui::Button::new("Choose..."))
+                .on_hover_text("Pick the folder and file name")
+                .clicked()
+            {
+                let (name, kind, _) = FORMATS[self.shell.export.format];
+                let now = std::path::PathBuf::from(&self.shell.export.path);
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Export audio")
+                    .add_filter(name, &[kind]);
+                if let Some(dir) = now.parent().filter(|d| d.is_dir()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(file) = now.file_name() {
+                    dialog = dialog.set_file_name(file.to_string_lossy());
+                }
+                if let Some(mut p) = dialog.save_file() {
+                    if p.extension().is_none() {
+                        p.set_extension(kind);
+                    }
+                    self.shell.export.path = p.to_string_lossy().into_owned();
+                }
+            }
         });
         ui.horizontal(|ui| {
             ui.label("Format");
@@ -1365,18 +1557,51 @@ impl App {
             );
         });
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new("Render")).clicked() {
-                self.start_export();
+        if ui
+            .add_enabled(
+                !busy,
+                egui::Button::new(RichText::new("Render").strong()).min_size(vec2(120.0, 30.0)),
+            )
+            .clicked()
+        {
+            self.start_export();
+        }
+        if busy {
+            if let Some(p) = &self.shell.export.progress {
+                let e = &self.shell.export;
+                let f = p.fraction();
+                ui.add(
+                    egui::ProgressBar::new(f as f32)
+                        .text(format!("{:.0}%", f * 100.0))
+                        .desired_width(ui.available_width()),
+                );
+                let total = p.total.load(std::sync::atomic::Ordering::Relaxed) as f64 / 44_100.0;
+                let done = total * f;
+                let (bpm, beats) = e.tempo;
+                let bar = |s: f64| (s * bpm / 60.0 / beats).floor() as u64 + 1;
+                let elapsed = e.started.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                let left = if f > 0.02 {
+                    format!(", about {} left", clock(elapsed / f - elapsed))
+                } else {
+                    String::new()
+                };
+                ui.label(format!(
+                    "Bar {} of {}   {} of {}{left}",
+                    bar(done).min(bar(total)),
+                    bar(total),
+                    clock(done),
+                    clock(total),
+                ));
             }
-            if busy {
-                ui.spinner();
-                ui.label("Rendering...");
-            }
-        });
+        }
         match &self.shell.export.message {
             Some(Ok(m)) => {
-                ui.label(RichText::new(m).color(pal().ok));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(m).color(pal().ok));
+                    if ui.button("Show in folder").clicked() {
+                        show_in_folder(&self.shell.export.path);
+                    }
+                });
             }
             Some(Err(e)) => {
                 ui.label(RichText::new(e).color(pal().hot));
@@ -1407,8 +1632,20 @@ impl App {
             Mode::Song
         };
         let (tx, rx) = channel();
+        let progress = std::sync::Arc::new(las_engine::render::Progress::default());
+        let watch = progress.clone();
+        self.shell.export.progress = Some(progress);
+        self.shell.export.started = Some(Instant::now());
+        self.shell.export.tempo = (project.bpm.max(1.0), f64::from(project.time_sig.0.max(1)));
         std::thread::spawn(move || {
+            las_engine::render::watch_progress(Some(watch));
             let run = || -> Result<String, String> {
+                if let Some(dir) = std::path::Path::new(&path).parent() {
+                    if !dir.as_os_str().is_empty() {
+                        std::fs::create_dir_all(dir)
+                            .map_err(|e| format!("{}: {e}", dir.display()))?;
+                    }
+                }
                 let opts = RenderOptions {
                     sample_rate: 44100.0,
                     mode,
@@ -1442,9 +1679,71 @@ impl App {
     }
 }
 
+/// Minutes and seconds.
+fn clock(s: f64) -> String {
+    let s = s.max(0.0).round() as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Where an export goes when the user has not chosen: next to the project, or in the
+/// Music folder for a project not yet saved.
+fn default_export_path(project: &str, kind: &str) -> String {
+    if !project.is_empty() {
+        return format!("{}.{kind}", project.trim_end_matches(".las"));
+    }
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let music = home.join("Music");
+    let dir = if music.is_dir() { music } else { home };
+    dir.join(format!("Untitled.{kind}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Open the file manager at a file.
+fn show_in_folder(path: &str) {
+    let p = std::path::Path::new(path);
+    let _ = if cfg!(windows) {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", p.display()))
+            .spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg("-R").arg(p).spawn()
+    } else {
+        std::process::Command::new("xdg-open")
+            .arg(p.parent().unwrap_or(p))
+            .spawn()
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_opened_from_inside_another_stays_open() {
+        let mut now = Shell::new().open;
+        let before = now;
+        // the rack's menu opened the piano roll while the windows were drawn
+        now.roll = true;
+        let mut after = before;
+        // and the user closed the playlist with its X in the same frame
+        after.playlist = false;
+        now.close_from(&before, &after);
+        assert!(now.roll);
+        assert!(!now.playlist);
+        assert!(now.rack);
+    }
+
+    #[test]
+    fn export_paths_and_clocks_read_well() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(195.4), "3:15");
+        assert_eq!(default_export_path("/a/song.las", "mp3"), "/a/song.mp3");
+        assert!(default_export_path("", "wav").ends_with("Untitled.wav"));
+    }
 
     #[test]
     fn taps_make_a_tempo() {

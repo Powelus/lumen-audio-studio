@@ -71,6 +71,8 @@ pub struct ProjectState {
     pub mixer_state: mixer::MixerState,
     /// The automation clip whose editor is open, and its state.
     pub open_auto: Option<String>,
+    /// The piano roll was asked for (a pattern clip was double clicked).
+    pub want_roll: bool,
     pub auto_state: AutoState,
     /// Where "Play song" starts, in ticks.
     pub start_tick: f64,
@@ -186,6 +188,12 @@ impl ProjectState {
                     self.stale = true;
                 }
                 PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
+                PlEdit::OpenPattern(id) => {
+                    if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
+                        self.pattern = i;
+                        self.want_roll = true;
+                    }
+                }
                 PlEdit::AskRenameTrack(t) => {
                     let name = l
                         .project
