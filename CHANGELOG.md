@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.56
+
+Faster start, an icon, and a tidier download.
+
+- The app starts faster, above all on Windows: it draws with OpenGL instead of probing DirectX and Vulkan first, and it uses its own bundled fonts instead of scanning every font on the system. The programs are built without debug symbols, so they are smaller.
+- Lumen Audio Studio has its own icon: a glowing L running into a sound wave. It is on the window and, on Windows, on `lumen.exe`.
+- The download shows one program: `lumen` (the app). `las`, the command line renderer, is now in the `tools` folder.
+- This release also carries everything of 0.2.0-alpha.50 to 0.2.0-alpha.55 below.
+
 ## 0.2.0-alpha.49
 
 Weave, a modular synth with patch cables.

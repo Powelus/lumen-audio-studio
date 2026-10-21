@@ -15,3 +15,7 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
+
+[profile.release]
+# no debug symbols in the programs that ship: smaller files that start faster
+strip = true

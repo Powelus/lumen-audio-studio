@@ -96,7 +96,10 @@ jobs:
         run: |
           name="las-$VERSION-${{ matrix.name }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/las${{ matrix.ext }}" "target/${{ matrix.target }}/release/lumen${{ matrix.ext }}" LICENSE README.md CHANGELOG.md "dist/$name/"
+          # the app at the top; the command line renderer in tools, out of the way
+          mkdir -p "dist/$name/tools"
+          cp "target/${{ matrix.target }}/release/las${{ matrix.ext }}" "dist/$name/tools/"
+          cp "target/${{ matrix.target }}/release/lumen${{ matrix.ext }}" LICENSE README.md CHANGELOG.md "dist/$name/"
           cp -r examples "dist/$name/examples"
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then

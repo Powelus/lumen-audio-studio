@@ -19,6 +19,8 @@ Builds for Windows, macOS and Linux are on the
 [releases page](https://github.com/Powelus/lumen-audio-studio/releases). Every
 new version on `main` is published automatically (see [CHANGELOG.md](CHANGELOG.md)).
 
+In the downloads `las` is in the `tools` folder; `lumen` is the app.
+
 ```sh
 ./lumen                                              # the app
 las render-facet examples/facet-bell.json -o bell.wav # offline render
