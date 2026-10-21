@@ -3,7 +3,7 @@
 //! plays, the default input is captured; when playback stops, the take becomes an audio
 //! clip in the playlist where the recording started.
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,11 +21,10 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Open the default input device.
-    pub fn open() -> Result<Self, String> {
-        let device = cpal::default_host()
-            .default_input_device()
-            .ok_or("no audio input device found")?;
+    /// Open the input device of that name (or the default one, for "" or one that is
+    /// not there).
+    pub fn open(name: &str) -> Result<Self, String> {
+        let device = crate::audio::pick_input(name).ok_or("no audio input device found")?;
         let supported = device
             .default_input_config()
             .map_err(|e| format!("cannot read the input format: {e}"))?;

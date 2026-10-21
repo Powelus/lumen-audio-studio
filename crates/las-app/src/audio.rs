@@ -97,6 +97,15 @@ pub enum Command {
     /// Audition a sample (it replaces the one playing).
     Preview(Box<Preview>),
     PreviewStop,
+    /// Play a short chime, to check the output works.
+    TestSound,
+    /// Click `beats` beats at `bpm` (the first one high), then start the player at tick
+    /// `from`: the count-in before recording.
+    CountIn {
+        beats: u32,
+        bpm: f64,
+        from: f64,
+    },
     /// A key played live on one of the project's channels.
     PlayerNote {
         channel: usize,
@@ -117,6 +126,8 @@ pub struct Meters {
     /// The player's position (ticks, as bits of an `f64`) and whether it is playing.
     position: AtomicU64,
     playing: AtomicU32,
+    /// Beats of count-in still to come (0 when not counting in).
+    counting: AtomicU32,
     /// The peak of each mixer insert, master first (bits of an `f32`).
     inserts: [AtomicU32; 32],
     /// The last moments of what goes out, for the analyser.
@@ -208,6 +219,98 @@ impl Meters {
     pub fn playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed) != 0
     }
+    /// Beats of count-in still to come, 0 when not counting in.
+    pub fn counting(&self) -> u32 {
+        self.counting.load(Ordering::Relaxed)
+    }
+}
+
+/// The output the user chose in Settings. Empty or 0 is "the system's default".
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AudioChoice {
+    /// The output device, by name.
+    pub output: String,
+    /// Frames per second.
+    pub sample_rate: u32,
+    /// Frames per buffer.
+    pub buffer: u32,
+    /// The input device recording uses, by name.
+    pub input: String,
+}
+
+/// Sample rates offered in Settings.
+pub const RATES: [u32; 4] = [44100, 48000, 88200, 96000];
+/// Buffer sizes offered in Settings, frames.
+pub const BUFFERS: [u32; 8] = [64, 128, 256, 512, 1024, 2048, 4096, 8192];
+
+/// How long a buffer of `frames` lasts, milliseconds.
+pub fn latency_ms(frames: u32, rate: u32) -> f64 {
+    if rate == 0 {
+        0.0
+    } else {
+        f64::from(frames) * 1000.0 / f64::from(rate)
+    }
+}
+
+/// The name a device is shown and saved by.
+pub fn device_name(d: &cpal::Device) -> String {
+    d.description()
+        .map(|x| x.name().to_string())
+        .or_else(|_| d.id().map(|id| id.to_string()))
+        .unwrap_or_else(|_| "Unknown device".into())
+}
+
+/// The output devices there are, by name.
+pub fn output_devices() -> Vec<String> {
+    let mut v: Vec<String> = cpal::default_host()
+        .output_devices()
+        .map(|it| it.map(|d| device_name(&d)).collect())
+        .unwrap_or_default();
+    v.dedup();
+    v
+}
+
+/// The input devices there are, by name.
+pub fn input_devices() -> Vec<String> {
+    let mut v: Vec<String> = cpal::default_host()
+        .input_devices()
+        .map(|it| it.map(|d| device_name(&d)).collect())
+        .unwrap_or_default();
+    v.dedup();
+    v
+}
+
+/// The chosen output device, or the default one when it is not chosen or not there.
+/// The flag says the chosen one was missing.
+fn pick_output(name: &str) -> (Option<cpal::Device>, bool) {
+    let host = cpal::default_host();
+    if !name.is_empty() {
+        if let Some(d) = host
+            .output_devices()
+            .ok()
+            .and_then(|mut it| it.find(|d| device_name(d) == name))
+        {
+            return (Some(d), false);
+        }
+        return (host.default_output_device(), true);
+    }
+    (host.default_output_device(), false)
+}
+
+/// The chosen input device, or the default one.
+pub fn pick_input(name: &str) -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    if !name.is_empty() {
+        if let Some(d) = host
+            .input_devices()
+            .ok()
+            .and_then(|mut it| it.find(|d| device_name(d) == name))
+        {
+            return Some(d);
+        }
+    }
+    host.default_input_device()
 }
 
 pub struct Audio {
@@ -217,6 +320,10 @@ pub struct Audio {
     pub meters: Arc<Meters>,
     pub sample_rate: u32,
     pub device: String,
+    /// The frames per buffer asked for (None: the device's own choice).
+    pub buffer: Option<u32>,
+    /// What did not go as chosen (a missing device, a rate it does not take).
+    pub note: Option<String>,
     /// Wavetables are built here, off the audio thread, and shared.
     tables: TableLibrary,
 }
@@ -227,56 +334,100 @@ pub type MidiSender = Producer<Command>;
 impl Audio {
     /// Open the default output device. Returns the audio handle and the queue
     /// for MIDI input.
+    #[allow(dead_code)]
     pub fn start() -> Result<(Self, MidiSender), String> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or("no audio output device found")?;
-        let name = device
-            .id()
-            .map(|id| id.to_string())
-            .unwrap_or_else(|_| "default output".into());
+        Self::start_with(&AudioChoice::default())
+    }
+
+    /// Open the output chosen in Settings. What cannot be had as chosen falls back to the
+    /// device's defaults (and says so in `note`).
+    pub fn start_with(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
+        let (device, missing) = pick_output(&choice.output);
+        let device = device.ok_or("No audio output device found")?;
+        let mut notes = Vec::new();
+        if missing {
+            notes.push(format!(
+                "{} is not there, using the default output",
+                choice.output
+            ));
+        }
+        let name = device_name(&device);
         let supported = device
             .default_output_config()
             .map_err(|e| format!("cannot read the output format: {e}"))?;
         let format = supported.sample_format();
-        let config: StreamConfig = supported.into();
-        let sample_rate = config.sample_rate;
-
-        let (ui_tx, ui_rx) = RingBuffer::<Command>::new(512);
-        let (midi_tx, midi_rx) = RingBuffer::<Command>::new(512);
-        let (garbage_tx, garbage_rx) = RingBuffer::<Garbage>::new(64);
-        let meters = Arc::new(Meters::default());
-        let state = Renderer::new(
-            sample_rate as f64,
-            config.channels as usize,
-            ui_rx,
-            midi_rx,
-            garbage_tx,
-            meters.clone(),
-        );
-        let stream = match format {
-            SampleFormat::F32 => build::<f32>(&device, config, state),
-            SampleFormat::I16 => build::<i16>(&device, config, state),
-            SampleFormat::U16 => build::<u16>(&device, config, state),
-            SampleFormat::I32 => build::<i32>(&device, config, state),
-            other => Err(format!("unsupported sample format {other}")),
-        }?;
-        stream
-            .play()
-            .map_err(|e| format!("cannot start the output: {e}"))?;
-        Ok((
-            Self {
-                _stream: stream,
-                commands: ui_tx,
-                garbage: garbage_rx,
-                meters,
-                sample_rate,
-                device: name,
-                tables: TableLibrary::new(),
-            },
-            midi_tx,
-        ))
+        let base: StreamConfig = supported.into();
+        // the chosen rate and buffer, if the device takes them
+        let mut config = base;
+        if choice.sample_rate > 0 {
+            let takes = device.supported_output_configs().is_ok_and(|mut it| {
+                it.any(|r| r.channels() == base.channels && r.contains_rate(choice.sample_rate))
+            });
+            if takes {
+                config.sample_rate = choice.sample_rate;
+            } else {
+                notes.push(format!(
+                    "The device does not take {} Hz, using {} Hz",
+                    choice.sample_rate, base.sample_rate
+                ));
+            }
+        }
+        if choice.buffer > 0 {
+            config.buffer_size = cpal::BufferSize::Fixed(choice.buffer);
+        }
+        let open = |config: StreamConfig| -> Result<(Self, MidiSender), String> {
+            let sample_rate = config.sample_rate;
+            let buffer = match config.buffer_size {
+                cpal::BufferSize::Fixed(n) => Some(n),
+                cpal::BufferSize::Default => None,
+            };
+            let (ui_tx, ui_rx) = RingBuffer::<Command>::new(512);
+            let (midi_tx, midi_rx) = RingBuffer::<Command>::new(512);
+            let (garbage_tx, garbage_rx) = RingBuffer::<Garbage>::new(64);
+            let meters = Arc::new(Meters::default());
+            let state = Renderer::new(
+                sample_rate as f64,
+                config.channels as usize,
+                ui_rx,
+                midi_rx,
+                garbage_tx,
+                meters.clone(),
+            );
+            let stream = match format {
+                SampleFormat::F32 => build::<f32>(&device, config, state),
+                SampleFormat::I16 => build::<i16>(&device, config, state),
+                SampleFormat::U16 => build::<u16>(&device, config, state),
+                SampleFormat::I32 => build::<i32>(&device, config, state),
+                other => Err(format!("unsupported sample format {other}")),
+            }?;
+            stream
+                .play()
+                .map_err(|e| format!("cannot start the output: {e}"))?;
+            Ok((
+                Self {
+                    _stream: stream,
+                    commands: ui_tx,
+                    garbage: garbage_rx,
+                    meters,
+                    sample_rate,
+                    device: name.clone(),
+                    buffer,
+                    note: None,
+                    tables: TableLibrary::new(),
+                },
+                midi_tx,
+            ))
+        };
+        let mut got = open(config);
+        if got.is_err() && config != base {
+            // what was chosen does not work here: the device's own settings
+            notes
+                .push("The chosen rate or buffer size did not work, using the device's own".into());
+            got = open(base);
+        }
+        let (mut audio, tx) = got?;
+        audio.note = (!notes.is_empty()).then(|| notes.join(". "));
+        Ok((audio, tx))
     }
 
     pub fn send(&mut self, c: Command) {
@@ -405,6 +556,47 @@ struct Renderer {
     metronome: bool,
     meters: Arc<Meters>,
     load: f32,
+    /// Chimes and clicks the renderer makes itself: frames until it starts, pitch,
+    /// length in frames. Room for a few, made before the stream starts.
+    beeps: Vec<Beep>,
+    /// The count-in: frames until the player starts, the tick it starts at, and the
+    /// beats still to come.
+    count_in: Option<(usize, f64, usize)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Beep {
+    wait: usize,
+    freq: f32,
+    len: usize,
+    at: usize,
+    level: f32,
+}
+
+/// The most beeps the renderer keeps at once.
+const BEEPS: usize = 16;
+
+/// Add the beeps sounding in `l` and `r`.
+fn render_beeps(beeps: &mut Vec<Beep>, sr: f64, l: &mut [f32], r: &mut [f32]) {
+    let sr = sr as f32;
+    for b in beeps.iter_mut() {
+        for i in 0..l.len() {
+            if b.wait > 0 {
+                b.wait -= 1;
+                continue;
+            }
+            if b.at >= b.len {
+                break;
+            }
+            let k = b.at as f32;
+            let env = (1.0 - k / b.len as f32).powi(2) * (k / (sr * 0.002)).min(1.0);
+            let v = (k * b.freq * std::f32::consts::TAU / sr).sin() * env * b.level;
+            l[i] += v;
+            r[i] += v;
+            b.at += 1;
+        }
+    }
+    beeps.retain(|b| b.at < b.len);
 }
 
 impl Renderer {
@@ -441,6 +633,21 @@ impl Renderer {
             metronome: false,
             meters,
             load: 0.0,
+            beeps: Vec::with_capacity(BEEPS),
+            count_in: None,
+        }
+    }
+
+    /// Queue a beep (dropped when there is no room, so nothing is allocated here).
+    fn beep(&mut self, wait: usize, freq: f32, seconds: f64, level: f32) {
+        if self.beeps.len() < BEEPS {
+            self.beeps.push(Beep {
+                wait,
+                freq,
+                len: (seconds * self.sr) as usize,
+                at: 0,
+                level,
+            });
         }
     }
 
@@ -520,6 +727,11 @@ impl Renderer {
                 }
             }
             Command::PlayerStop => {
+                // stopping during a count-in cancels it and its clicks
+                if self.count_in.take().is_some() {
+                    self.meters.counting.store(0, Ordering::Relaxed);
+                    self.beeps.clear();
+                }
                 if let Some(p) = &mut self.player {
                     p.stop();
                 }
@@ -556,6 +768,22 @@ impl Renderer {
                     .set_source(src.left, src.right, src.rate);
             }
             Command::Volume(v) => self.volume = v,
+            Command::TestSound => {
+                // a rising major chord, one note after another
+                for (i, f) in [523.25f32, 659.25, 783.99, 1046.5].iter().enumerate() {
+                    let wait = (i as f64 * 0.16 * self.sr) as usize;
+                    self.beep(wait, *f, 0.5, 0.25);
+                }
+            }
+            Command::CountIn { beats, bpm, from } => {
+                let beat = (60.0 / bpm.max(1.0) * self.sr) as usize;
+                for i in 0..beats.min(BEEPS as u32) as usize {
+                    let f = if i == 0 { 1500.0 } else { 1000.0 };
+                    self.beep(i * beat, f, 0.03, 0.35);
+                }
+                self.count_in = Some((beat * beats as usize, from, beat.max(1)));
+                self.meters.counting.store(beats, Ordering::Relaxed);
+            }
         }
     }
 
@@ -574,8 +802,24 @@ impl Renderer {
         }
         let mut done = 0;
         while done < frames {
+            // the count-in is over: the song starts on this very frame
+            if let Some((0, from, _)) = self.count_in {
+                self.count_in = None;
+                self.meters.counting.store(0, Ordering::Relaxed);
+                if let Some(p) = &mut self.player {
+                    p.play(from);
+                }
+            }
             // very large device buffers are rendered in pieces
-            let n = (frames - done).min(self.l.len());
+            let mut n = (frames - done).min(self.l.len());
+            if let Some((left, _, beat)) = &mut self.count_in {
+                n = n.min(*left);
+                let to_come = left.div_ceil(*beat) as u32;
+                self.meters
+                    .counting
+                    .store(to_come.max(1), Ordering::Relaxed);
+                *left -= n;
+            }
             let (l, r) = (&mut self.l[..n], &mut self.r[..n]);
             l.fill(0.0);
             r.fill(0.0);
@@ -600,6 +844,9 @@ impl Renderer {
                     slot.unit.set_position(pos);
                     slot.process(l, r, None);
                 }
+            }
+            if !self.beeps.is_empty() {
+                render_beeps(&mut self.beeps, self.sr, l, r);
             }
             if let Some((p, pos)) = &mut self.preview {
                 let step = p.rate / self.sr;
@@ -978,6 +1225,86 @@ mod tests {
             loudest = loudest.max(peak(&buf));
         }
         assert!(loudest > 0.005, "a live key sounds through the mixer");
+    }
+
+    #[test]
+    fn the_test_sound_is_heard_and_ends() {
+        let (mut r, mut tx, _g) = renderer();
+        tx.push(Command::TestSound).unwrap();
+        let mut out = vec![0f32; 2 * 4800];
+        r.fill(&mut out);
+        assert!(peak(&out) > 0.05);
+        // a little over a second later it is over
+        for _ in 0..12 {
+            r.fill(&mut out);
+        }
+        assert!(peak(&out) < 1e-6);
+    }
+
+    #[test]
+    fn a_count_in_clicks_and_then_the_song_starts_on_time() {
+        let (mut r, mut tx, _g) = renderer();
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .unwrap();
+        // two beats at 120 BPM: one second
+        tx.push(Command::CountIn {
+            beats: 2,
+            bpm: 120.0,
+            from: 0.0,
+        })
+        .unwrap();
+        let mut out = vec![0f32; 2 * 4800];
+        r.fill(&mut out);
+        assert!(peak(&out) > 0.05, "the first click");
+        assert_eq!(r.meters.counting(), 2);
+        assert!(!r.player.as_ref().unwrap().is_playing());
+        // 0.9 s in: still counting, one beat to come
+        for _ in 0..8 {
+            r.fill(&mut out);
+        }
+        assert_eq!(r.meters.counting(), 1);
+        assert!(!r.player.as_ref().unwrap().is_playing());
+        // the count-in ends with this buffer and the song starts on the next frame
+        r.fill(&mut out);
+        r.fill(&mut out);
+        assert!(r.player.as_ref().unwrap().is_playing());
+        assert_eq!(r.meters.counting(), 0);
+    }
+
+    #[test]
+    fn stopping_during_a_count_in_cancels_it() {
+        let (mut r, mut tx, _g) = renderer();
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .unwrap();
+        tx.push(Command::CountIn {
+            beats: 4,
+            bpm: 120.0,
+            from: 0.0,
+        })
+        .unwrap();
+        let mut out = vec![0f32; 2 * 4800];
+        r.fill(&mut out);
+        tx.push(Command::PlayerStop).unwrap();
+        for _ in 0..30 {
+            r.fill(&mut out);
+        }
+        assert!(!r.player.as_ref().unwrap().is_playing());
+        assert_eq!(r.meters.counting(), 0);
+    }
+
+    #[test]
+    fn latency_is_the_buffer_in_milliseconds() {
+        assert!((latency_ms(512, 48000) - 10.666).abs() < 0.01);
+        assert_eq!(latency_ms(441, 44100), 10.0);
+        assert_eq!(latency_ms(256, 0), 0.0);
+    }
+
+    #[test]
+    fn audio_choices_load_from_old_settings() {
+        let c: AudioChoice = serde_json::from_str(r#"{"buffer": 256}"#).unwrap();
+        assert_eq!(c.buffer, 256);
+        assert!(c.output.is_empty(), "the default device");
+        assert_eq!(c.sample_rate, 0);
     }
 
     #[test]

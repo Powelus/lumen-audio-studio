@@ -319,14 +319,16 @@ pub fn draw(
                     let (ch, start, kr) =
                         mini_knob_resp(ui, &mut vol, (0.0, 1.25), 1.0, "Level", p.text2);
                     kr.context_menu(|ui| {
+                        let req = || crate::auto::AutoRequest {
+                            target: crate::auto::channel_target(&c.id, "volume"),
+                            name: format!("{} level", c.name),
+                            start: c.volume / 1.25,
+                        };
                         if ui.button("Create automation clip").clicked() {
-                            out.chans.push(ChanEdit::Automate(crate::auto::AutoRequest {
-                                target: crate::auto::channel_target(&c.id, "volume"),
-                                name: format!("{} level", c.name),
-                                start: c.volume / 1.25,
-                            }));
+                            out.chans.push(ChanEdit::Automate(req()));
                             ui.close();
                         }
+                        crate::midilearn::menu_item(ui, req);
                     });
                     if start {
                         out.chans.push(ChanEdit::Begin);
@@ -341,14 +343,16 @@ pub fn draw(
                     let (ch, start, kr) =
                         mini_knob_resp(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.accent);
                     kr.context_menu(|ui| {
+                        let req = || crate::auto::AutoRequest {
+                            target: crate::auto::channel_target(&c.id, "pan"),
+                            name: format!("{} pan", c.name),
+                            start: (c.pan + 1.0) / 2.0,
+                        };
                         if ui.button("Create automation clip").clicked() {
-                            out.chans.push(ChanEdit::Automate(crate::auto::AutoRequest {
-                                target: crate::auto::channel_target(&c.id, "pan"),
-                                name: format!("{} pan", c.name),
-                                start: (c.pan + 1.0) / 2.0,
-                            }));
+                            out.chans.push(ChanEdit::Automate(req()));
                             ui.close();
                         }
+                        crate::midilearn::menu_item(ui, req);
                     });
                     if start {
                         out.chans.push(ChanEdit::Begin);

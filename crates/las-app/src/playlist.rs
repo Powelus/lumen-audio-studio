@@ -278,8 +278,14 @@ fn hit(p: &Project, tick: f64, track: usize, edge_ticks: f64) -> Option<(usize, 
 /// `x_of` turns ticks into x; returns the (fade in, fade out) handle centres' x.
 fn fade_handles(c: &Clip, x_of: impl Fn(f64) -> f32) -> (f32, f32) {
     let e = c.audio.as_ref();
-    let fi = e.and_then(|a| a.fade_in).unwrap_or(0.0).clamp(0.0, c.length);
-    let fo = e.and_then(|a| a.fade_out).unwrap_or(0.0).clamp(0.0, c.length);
+    let fi = e
+        .and_then(|a| a.fade_in)
+        .unwrap_or(0.0)
+        .clamp(0.0, c.length);
+    let fo = e
+        .and_then(|a| a.fade_out)
+        .unwrap_or(0.0)
+        .clamp(0.0, c.length);
     (
         x_of(c.start + fi) + HANDLE / 2.0,
         x_of(c.start + c.length - fo) - HANDLE / 2.0 - 1.0,
@@ -329,12 +335,12 @@ fn audio_clip_menu(ui: &mut Ui, project: &Project, c: &Clip, edits: &mut Vec<PlE
         // stretching to the tempo makes the clip as long as the sample then plays
         let tempo = |x: &AudioClipEdit| x.stretch.as_ref().map(|s| s.bpm);
         if let Some(sec) = seconds.filter(|_| tempo(&e) != tempo(&before)) {
-                let own = tempo(&e).unwrap_or(project.bpm);
-                let len = crate::clipedit::stretched_length(sec, own);
-                edits.push(PlEdit::Resize {
-                    id: c.id.clone(),
-                    length: (len - c.offset).max(1.0),
-                });
+            let own = tempo(&e).unwrap_or(project.bpm);
+            let len = crate::clipedit::stretched_length(sec, own);
+            edits.push(PlEdit::Resize {
+                id: c.id.clone(),
+                length: (len - c.offset).max(1.0),
+            });
         }
         edits.push(PlEdit::AudioEdit {
             id: c.id.clone(),
@@ -1137,7 +1143,11 @@ pub fn draw(
                         Drag::Fade { id, out } => {
                             if let Some(c) = project.playlist.clips.iter().find(|c| c.id == id) {
                                 let mut e = c.audio.clone().unwrap_or_default();
-                                let v = if out { c.start + c.length - t } else { t - c.start };
+                                let v = if out {
+                                    c.start + c.length - t
+                                } else {
+                                    t - c.start
+                                };
                                 let v = v.clamp(0.0, c.length);
                                 let v = (v > 1.0).then_some(v);
                                 if out {

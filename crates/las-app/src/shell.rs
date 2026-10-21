@@ -607,15 +607,40 @@ impl App {
                 self.send(Command::PreviewStop);
             }
             let rec = self.shell.record;
-            if icon_button(
+            let what = match (self.settings.record_notes, self.settings.record_audio) {
+                (true, true) => "notes and audio",
+                (true, false) => "notes",
+                (false, true) => "audio",
+                (false, false) => "nothing (right click to choose)",
+            };
+            let r = icon_button(
                 ui,
                 Icon::Record,
                 rec,
-                "Record: play to capture the audio input",
-            )
-            .clicked()
-            {
+                &format!(
+                    "Record {what}: switch on, then press Play. Notes go into the current pattern on the selected channel.\nRight click for recording options."
+                ),
+            );
+            if r.clicked() {
                 self.shell.record = !rec;
+            }
+            let mut changed = false;
+            r.context_menu(|ui| {
+                let s = &mut self.settings;
+                ui.label(RichText::new("Recording").strong());
+                changed |= ui.checkbox(&mut s.record_notes, "Notes (MIDI and computer keyboard)").changed();
+                changed |= ui.checkbox(&mut s.record_audio, "Audio input").changed();
+                ui.separator();
+                changed |= ui
+                    .checkbox(&mut s.quantize_recording, "Quantize notes to the piano roll's snap")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut s.count_in, "Count in one bar")
+                    .on_hover_text("The metronome clicks one bar before recording starts")
+                    .changed();
+            });
+            if changed {
+                self.settings.save();
             }
             let metro = self.shell.metronome;
             if icon_button(ui, Icon::Metronome, metro, "Metronome").clicked() {
@@ -794,11 +819,32 @@ impl App {
                         ))
                         .color(if load > 0.7 { p.hot } else { p.muted })
                     }
-                    None => {
-                        RichText::new(format!("No sound: {}", self.status_audio())).color(p.hot)
-                    }
+                    None => RichText::new(format!(
+                        "No sound: {} (click for audio settings)",
+                        self.status_audio()
+                    ))
+                    .color(p.hot),
                 };
-                ui.label(audio.size(12.0));
+                let r = ui
+                    .add(egui::Label::new(audio.size(12.0)).sense(Sense::click()))
+                    .on_hover_text("Click to choose the audio device in Settings");
+                if r.clicked() {
+                    self.shell.open.settings = true;
+                }
+                if let Some(c) = self
+                    .audio
+                    .as_ref()
+                    .map(|a| a.meters.counting())
+                    .filter(|c| *c > 0)
+                {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Count-in {c}"))
+                            .size(12.0)
+                            .strong()
+                            .color(p.hot),
+                    );
+                }
                 ui.separator();
                 ui.label(
                     RichText::new(format!("Keys oct {}", self.octave))
@@ -1713,16 +1759,14 @@ impl App {
                 };
                 if stems {
                     let dir = stem_dir(&path);
-                    std::fs::create_dir_all(&dir)
-                        .map_err(|e| format!("{}: {e}", dir.display()))?;
+                    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                     let all = las_engine::render_stems(&project, &samples, &opts)?;
                     let files = stem_files(&name, &project, kind);
                     let mut secs = 0.0;
                     for (stem, file) in all.iter().zip(&files) {
                         let to = dir.join(file);
                         let bytes = encode(&stem.audio, normalize, kind, bits)?;
-                        std::fs::write(&to, bytes)
-                            .map_err(|e| format!("{}: {e}", to.display()))?;
+                        std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
                         secs = stem.audio.seconds();
                     }
                     return Ok(format!(
@@ -1796,7 +1840,13 @@ pub fn stem_dir(path: &str) -> std::path::PathBuf {
 fn safe_name(s: &str) -> String {
     let t: String = s
         .chars()
-        .map(|c| if "/\\:*?\"<>|".contains(c) || c.is_control() { '_' } else { c })
+        .map(|c| {
+            if "/\\:*?\"<>|".contains(c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let t = t.trim().trim_end_matches('.').to_string();
     if t.is_empty() {
@@ -1919,7 +1969,10 @@ mod tests {
         let stems = las_engine::used_inserts(&p).len() + 1;
         assert_eq!(files.len(), stems);
         assert_eq!(safe_name("a/b:c?"), "a_b_c_");
-        assert_eq!(stem_dir("/tmp/x/song.wav"), std::path::PathBuf::from("/tmp/x"));
+        assert_eq!(
+            stem_dir("/tmp/x/song.wav"),
+            std::path::PathBuf::from("/tmp/x")
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub fn is_plain(e: &AudioClipEdit) -> bool {
 /// (1, 2, 4 ... 128) that gives a tempo between 70 and 180 BPM, the one nearest the
 /// project's tempo. `None` for a sound too short or too long to be a loop.
 pub fn guess_bpm(seconds: f64, project_bpm: f64) -> Option<f64> {
-    if !(seconds > 0.1) {
+    if seconds.is_nan() || seconds <= 0.1 {
         return None;
     }
     let mut best: Option<f64> = None;

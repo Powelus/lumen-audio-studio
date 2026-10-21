@@ -5,7 +5,9 @@
 use las_engine::render::{Mode, RenderOptions};
 use las_engine::render_mix_with;
 use las_project::create::{add_channel, empty_project};
-use las_project::{AudioClipEdit, Clip, ClipKind, Project, Sample, SampleRef, Stretch, StretchMode};
+use las_project::{
+    AudioClipEdit, Clip, ClipKind, Project, Sample, SampleRef, Stretch, StretchMode,
+};
 use std::collections::BTreeMap;
 
 const SR: u32 = 44100;
