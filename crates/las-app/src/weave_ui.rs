@@ -2,13 +2,15 @@
 //! Weave's window: the patch as modules on a canvas, joined by cables. Drag a module by
 //! its title; drag from an output (the dots on the right) to an input or a parameter
 //! (the dots on the left) to plug a cable in. Click a cable's handle to set its amount
-//! or pull it out. Every edit goes into the channel's state as one undo step.
+//! or pull it out. Drag a parameter's bar to set it (shift for fine steps, a double
+//! click for its default). Ctrl and the wheel zoom; Fit frames every module. Every
+//! edit goes into the channel's state as one undo step.
 
 use crate::app::App;
 use crate::theme::pal;
 use eframe::egui::{self, pos2, vec2, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use las_dsp::modular::{
-    factory, param_id, Cable, Kind, Node, Patch, FILTER_MODES, MAX_VOICES, WAVES,
+    factory, param_id, Cable, Kind, Node, ParamSpec, Patch, CATEGORIES, MAX_GLIDE, MAX_VOICES,
 };
 use serde_json::{json, Value};
 
@@ -16,60 +18,90 @@ const NODE_W: f32 = 180.0;
 const TITLE_H: f32 = 22.0;
 const ROW_H: f32 = 20.0;
 const PORT_R: f32 = 5.0;
+const MIN_ZOOM: f32 = 0.3;
+const MAX_ZOOM: f32 = 2.0;
 
 /// What the editor remembers between frames.
 #[derive(Default)]
 pub struct WeaveEditor {
-    /// How far the canvas is scrolled.
+    /// How far the canvas is scrolled, in screen points.
     pan: Vec2,
+    /// How big the modules are drawn (0 is taken as 1).
+    zoom: f32,
     /// A cable being drawn from an output: the node and the output's place.
     dragging: Option<(u32, usize)>,
     /// The cable whose amount is being set.
     selected: Option<usize>,
+    /// Frame every module on the next frame.
+    fit: bool,
+    /// The channel last shown, to frame a patch the first time it opens.
+    seen: Option<usize>,
+    /// The size of the canvas last frame.
+    view: Vec2,
+}
+
+impl WeaveEditor {
+    fn z(&self) -> f32 {
+        if self.zoom <= 0.0 {
+            1.0
+        } else {
+            self.zoom
+        }
+    }
 }
 
 pub fn kind_name(k: Kind) -> &'static str {
     match k {
         Kind::Keys => "Keys",
         Kind::Osc => "Oscillator",
+        Kind::Fm => "FM operator",
         Kind::Noise => "Noise",
+        Kind::Macro => "Macro",
         Kind::Lfo => "LFO",
         Kind::Env => "Envelope",
+        Kind::Hold => "Sample & hold",
+        Kind::Seq => "Step sequencer",
+        Kind::Slew => "Slew",
         Kind::Filter => "Filter",
+        Kind::Ladder => "Ladder filter",
+        Kind::Shaper => "Wavefolder",
+        Kind::Ring => "Ring mod",
+        Kind::Delay => "Delay",
+        Kind::Chorus => "Chorus",
+        Kind::Reverb => "Reverb",
         Kind::Vca => "VCA",
         Kind::Mix => "Mixer",
         Kind::Math => "Math",
+        Kind::Quant => "Quantizer",
+        Kind::Compare => "Comparator",
+        Kind::Pan => "Pan",
         Kind::Output => "Output",
     }
 }
 
-/// The rows of a module: its outputs, then its inputs, then its parameters.
-fn rows(k: Kind) -> usize {
-    let s = k.spec();
-    s.outputs.len() + s.inputs.len() + s.params.len()
+/// The size of a module at zoom 1.
+fn node_size(k: Kind) -> Vec2 {
+    vec2(NODE_W, TITLE_H + k.rows() as f32 * ROW_H + 6.0)
 }
 
-fn node_rect(n: &Node, origin: Pos2) -> Rect {
-    Rect::from_min_size(
-        origin + vec2(n.pos[0], n.pos[1]),
-        vec2(NODE_W, TITLE_H + rows(n.kind) as f32 * ROW_H + 6.0),
-    )
+fn node_rect(n: &Node, origin: Pos2, z: f32) -> Rect {
+    Rect::from_min_size(origin + vec2(n.pos[0], n.pos[1]) * z, node_size(n.kind) * z)
 }
 
-fn row_y(r: &Rect, row: usize) -> f32 {
-    r.min.y + TITLE_H + row as f32 * ROW_H + ROW_H * 0.5
+fn row_y(r: &Rect, row: usize, z: f32) -> f32 {
+    r.min.y + (TITLE_H + row as f32 * ROW_H + ROW_H * 0.5) * z
 }
 
 /// Where output `o` of a module is drawn.
-fn out_pos(n: &Node, origin: Pos2, o: usize) -> Pos2 {
-    let r = node_rect(n, origin);
-    pos2(r.max.x, row_y(&r, o))
+fn out_pos(n: &Node, origin: Pos2, o: usize, z: f32) -> Pos2 {
+    let r = node_rect(n, origin, z);
+    pos2(r.max.x, row_y(&r, o, z))
 }
 
 /// Where input `i` (plain inputs, then parameters) of a module is drawn.
-fn in_pos(n: &Node, origin: Pos2, i: usize) -> Pos2 {
-    let r = node_rect(n, origin);
-    pos2(r.min.x, row_y(&r, n.kind.spec().outputs.len() + i))
+fn in_pos(n: &Node, origin: Pos2, i: usize, z: f32) -> Pos2 {
+    let r = node_rect(n, origin, z);
+    pos2(r.min.x, row_y(&r, n.kind.spec().outputs.len() + i, z))
 }
 
 /// The name of input `i` of a kind (a plain input or a parameter).
@@ -114,19 +146,48 @@ pub fn add_node(p: &mut Patch, kind: Kind, pos: [f32; 2]) -> u32 {
     id
 }
 
+/// A copy of a module with its parameters (not its cables), a little below and to the
+/// right; the copy's id.
+pub fn duplicate_node(p: &mut Patch, id: u32) -> Option<u32> {
+    let mut n = p.node(id)?.clone();
+    n.id = p.free_id();
+    n.pos = [n.pos[0] + 30.0, n.pos[1] + 30.0];
+    let new = n.id;
+    p.nodes.push(n);
+    Some(new)
+}
+
+/// The zoom and scroll that frame every module in a view of this size.
+fn fit_view(p: &Patch, view: Vec2) -> (f32, Vec2) {
+    let mut min = pos2(f32::MAX, f32::MAX);
+    let mut max = pos2(f32::MIN, f32::MIN);
+    for n in &p.nodes {
+        let r = node_rect(n, Pos2::ZERO, 1.0);
+        min = min.min(r.min);
+        max = max.max(r.max);
+    }
+    if p.nodes.is_empty() || view.x <= 0.0 || view.y <= 0.0 {
+        return (1.0, Vec2::ZERO);
+    }
+    let size = max - min + vec2(40.0, 40.0);
+    let z = (view.x / size.x).min(view.y / size.y).clamp(MIN_ZOOM, 1.0);
+    let pan = (view - (max - min) * z) * 0.5 - min.to_vec2() * z;
+    (z, pan)
+}
+
 /// The patch a channel's state holds.
 pub fn patch_of(state: &Value) -> Patch {
     las_engine::weave::patch_of(state)
 }
 
-fn bezier(a: Pos2, b: Pos2) -> [Pos2; 4] {
-    let d = ((b.x - a.x).abs() * 0.5).max(40.0);
+fn bezier(a: Pos2, b: Pos2, z: f32) -> [Pos2; 4] {
+    let d = ((b.x - a.x).abs() * 0.5).max(40.0 * z);
     [a, a + vec2(d, 0.0), b - vec2(d, 0.0), b]
 }
 
 /// The middle of a cable, where its handle is.
-fn mid(a: Pos2, b: Pos2) -> Pos2 {
-    let [p0, p1, p2, p3] = bezier(a, b);
+fn mid(a: Pos2, b: Pos2, z: f32) -> Pos2 {
+    let [p0, p1, p2, p3] = bezier(a, b, z);
     // the point at t = 0.5 of a cubic bezier
     pos2(
         (p0.x + 3.0 * p1.x + 3.0 * p2.x + p3.x) / 8.0,
@@ -136,11 +197,41 @@ fn mid(a: Pos2, b: Pos2) -> Pos2 {
 
 fn kind_color(k: Kind) -> Color32 {
     match k {
-        Kind::Keys | Kind::Output => Color32::from_rgb(120, 140, 160),
-        Kind::Osc | Kind::Noise => Color32::from_rgb(230, 140, 60),
-        Kind::Lfo | Kind::Env => Color32::from_rgb(90, 170, 230),
-        Kind::Filter => Color32::from_rgb(170, 110, 220),
-        Kind::Vca | Kind::Mix | Kind::Math => Color32::from_rgb(100, 190, 120),
+        Kind::Keys | Kind::Output | Kind::Macro => Color32::from_rgb(120, 140, 160),
+        _ => match k.category() {
+            0 => Color32::from_rgb(230, 140, 60),
+            1 => Color32::from_rgb(90, 170, 230),
+            2 => Color32::from_rgb(170, 110, 220),
+            3 => Color32::from_rgb(230, 90, 140),
+            _ => Color32::from_rgb(100, 190, 120),
+        },
+    }
+}
+
+/// A parameter's value as it is read out, with its unit.
+pub fn value_text(k: Kind, ps: &ParamSpec, v: f64) -> String {
+    if let Some(c) = k.choices(ps.name) {
+        return c.get(v as usize).unwrap_or(&"").to_string();
+    }
+    if ps.steps > 0 {
+        return format!("{v:.0}");
+    }
+    match ps.name {
+        "cutoff" if v >= 1000.0 => format!("{:.2} kHz", v / 1000.0),
+        "cutoff" => format!("{v:.0} Hz"),
+        "rate" => format!("{v:.2} Hz"),
+        "attack" | "decay" | "release" | "rise" | "fall" | "glide" | "time" if v < 1.0 => {
+            format!("{:.0} ms", v * 1000.0)
+        }
+        "attack" | "decay" | "release" | "rise" | "fall" | "glide" | "time" => {
+            format!("{v:.2} s")
+        }
+        "tune" | "bend_range" => format!("{v:+.1} st"),
+        "fine" | "detune" => format!("{v:+.0} ct"),
+        "ratio" | "drive" => format!("{v:.2}x"),
+        "pan" | "curve" | "threshold" | "offset" | "scale" => format!("{v:+.2}"),
+        n if n.starts_with("step_") => format!("{:+.1} st", v * 12.0),
+        _ => format!("{:.0}%", v * 100.0),
     }
 }
 
@@ -160,31 +251,74 @@ impl App {
         let before = patch.clone();
         let ed = &mut self.weave;
         let p = pal();
+        let skin = crate::skin::current();
+        if ed.seen != Some(channel) {
+            ed.seen = Some(channel);
+            ed.fit = true;
+            ed.selected = None;
+        }
 
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&name).size(16.0).strong());
-            ui.label(RichText::new("Weave modular").color(p.muted));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&name).size(15.0).strong());
             ui.menu_button("Patches", |ui| {
                 for (pname, fp) in factory() {
                     if ui.button(pname).clicked() {
                         patch = fp;
                         ed.selected = None;
+                        ed.fit = true;
                         ui.close();
                     }
                 }
             });
             ui.menu_button("Add module", |ui| {
-                for k in Kind::ALL {
-                    if ui.button(kind_name(k)).clicked() {
-                        // where the view is, a little in
-                        let at = [40.0 - ed.pan.x, 40.0 - ed.pan.y];
-                        add_node(&mut patch, k, at);
-                        ui.close();
-                    }
+                for (ci, cat) in CATEGORIES.iter().enumerate() {
+                    ui.menu_button(*cat, |ui| {
+                        for k in Kind::ALL.into_iter().filter(|k| k.category() == ci) {
+                            if ui.button(kind_name(k)).clicked() {
+                                // in the middle of the view
+                                let z = ed.z();
+                                let at = (ed.view * 0.5 - ed.pan) / z - node_size(k) * 0.5;
+                                add_node(&mut patch, k, [at.x, at.y]);
+                                ui.close();
+                            }
+                        }
+                    });
                 }
             });
-            ui.label("Voices");
-            ui.add(egui::DragValue::new(&mut patch.voices).range(1..=MAX_VOICES));
+            if ui
+                .button("Fit")
+                .on_hover_text("Zoom and scroll to show every module")
+                .clicked()
+            {
+                ed.fit = true;
+            }
+            ui.separator();
+            ui.add_enabled_ui(!patch.mono, |ui| {
+                ui.label("Voices");
+                ui.add(egui::DragValue::new(&mut patch.voices).range(1..=MAX_VOICES));
+            });
+            ui.checkbox(&mut patch.mono, "Mono")
+                .on_hover_text("One voice that plays the newest key held");
+            ui.add_enabled_ui(patch.mono, |ui| {
+                ui.checkbox(&mut patch.legato, "Legato").on_hover_text(
+                    "A key played while another is held does not start the envelopes again",
+                );
+                ui.label("Glide");
+                ui.add(
+                    egui::DragValue::new(&mut patch.glide)
+                        .range(0.0..=MAX_GLIDE)
+                        .speed(0.005)
+                        .suffix(" s")
+                        .fixed_decimals(2),
+                );
+            });
+            ui.label("Volume");
+            ui.add(
+                egui::DragValue::new(&mut patch.volume)
+                    .range(0.0..=2.0)
+                    .speed(0.005)
+                    .fixed_decimals(2),
+            );
             if ui
                 .button("Reset")
                 .on_hover_text("Start again from the default patch")
@@ -192,6 +326,7 @@ impl App {
             {
                 patch = Patch::default();
                 ed.selected = None;
+                ed.fit = true;
             }
             if let Some(i) = ed.selected.filter(|&i| i < patch.cables.len()) {
                 ui.separator();
@@ -211,18 +346,40 @@ impl App {
         ui.separator();
 
         let (canvas, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        ed.view = canvas.size();
+        if ed.fit {
+            (ed.zoom, ed.pan) = fit_view(&patch, canvas.size());
+            ed.fit = false;
+        }
         // modules partly off the canvas are cut at its edge
         ui.set_clip_rect(canvas.intersect(ui.clip_rect()));
         let painter = ui.painter_at(canvas);
-        painter.rect_filled(canvas, 4.0, p.roll_bg);
+        painter.rect_filled(canvas, 4.0, skin.map_or(p.roll_bg, |s| s.screen));
+        let dot = skin.map_or(p.grid, |s| s.edge);
+
+        // ctrl and the wheel zoom about the pointer; the wheel alone scrolls
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        if let Some(q) = pointer.filter(|q| canvas.contains(*q)) {
+            let (zd, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta()));
+            let z = ed.z();
+            if zd != 1.0 {
+                let nz = (z * zd).clamp(MIN_ZOOM, MAX_ZOOM);
+                let world = (q - canvas.min - ed.pan) / z;
+                ed.pan = q - canvas.min - world * nz;
+                ed.zoom = nz;
+            } else if scroll != Vec2::ZERO {
+                ed.pan += scroll;
+            }
+        }
+        let z = ed.z();
         // a dotted grid that moves with the canvas
-        let step = 24.0;
+        let step = 24.0 * z;
         let off = vec2(ed.pan.x.rem_euclid(step), ed.pan.y.rem_euclid(step));
         let mut y = canvas.min.y + off.y;
         while y < canvas.max.y {
             let mut x = canvas.min.x + off.x;
             while x < canvas.max.x {
-                painter.circle_filled(pos2(x, y), 1.0, p.grid);
+                painter.circle_filled(pos2(x, y), 1.0, dot);
                 x += step;
             }
             y += step;
@@ -234,7 +391,7 @@ impl App {
             ed.selected = None;
         }
         let origin = canvas.min + ed.pan;
-        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let font = |size: f32| egui::FontId::proportional(size * z);
 
         // cables under the modules
         let (mut picked, mut pull) = (None, None);
@@ -246,7 +403,7 @@ impl App {
             else {
                 continue;
             };
-            let (pa, pb) = (out_pos(a, origin, o), in_pos(b, origin, i));
+            let (pa, pb) = (out_pos(a, origin, o, z), in_pos(b, origin, i, z));
             let selected = ed.selected == Some(ci);
             let col = if selected {
                 p.accent_strong
@@ -254,12 +411,12 @@ impl App {
                 kind_color(a.kind).gamma_multiply(0.4 + 0.6 * c.amount.abs().min(1.0) as f32)
             };
             painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                bezier(pa, pb),
+                bezier(pa, pb, z),
                 false,
                 Color32::TRANSPARENT,
                 Stroke::new(if selected { 3.0 } else { 2.0 }, col),
             ));
-            let m = mid(pa, pb);
+            let m = mid(pa, pb, z);
             let handle = Rect::from_center_size(m, vec2(12.0, 12.0));
             let r = ui.interact(handle, ui.scope_id().with(("cable", ci)), Sense::click());
             painter.circle_filled(m, if r.hovered() { 6.0 } else { 4.0 }, col);
@@ -269,7 +426,14 @@ impl App {
             if r.secondary_clicked() {
                 pull = Some(ci);
             }
-            r.on_hover_text(format!("{} → {} ({:.2})", c.output, c.input, c.amount));
+            r.on_hover_text(format!(
+                "{} {} → {} {} ({:.2})\nClick to set the amount, right click to pull out",
+                kind_name(a.kind),
+                c.output,
+                kind_name(b.kind),
+                c.input,
+                c.amount
+            ));
         }
         if let Some(ci) = picked {
             ed.selected = Some(ci);
@@ -282,29 +446,32 @@ impl App {
 
         // the modules
         let mut remove = None;
+        let mut duplicate = None;
         let mut automate: Option<(u32, String, f64)> = None;
         let mut drop_on: Option<(u32, usize)> = None;
+        let fine = ui.input(|i| i.modifiers.shift);
         for n in patch.nodes.iter_mut() {
-            let rect = node_rect(n, origin);
+            let rect = node_rect(n, origin, z);
             if !canvas.intersects(rect) {
                 continue;
             }
             let spec = n.kind.spec();
-            painter.rect_filled(rect, 6.0, p.panel2);
+            let kc = kind_color(n.kind);
+            painter.rect_filled(rect, 6.0 * z, skin.map_or(p.panel2, |s| s.section));
             painter.rect_stroke(
                 rect,
-                6.0,
-                Stroke::new(1.0, kind_color(n.kind)),
+                6.0 * z,
+                Stroke::new(1.0, kc),
                 egui::StrokeKind::Inside,
             );
-            let title = Rect::from_min_size(rect.min, vec2(NODE_W, TITLE_H));
-            painter.rect_filled(title, 6.0, kind_color(n.kind).gamma_multiply(0.35));
+            let title = Rect::from_min_size(rect.min, vec2(NODE_W, TITLE_H) * z);
+            painter.rect_filled(title, 6.0 * z, kc.gamma_multiply(0.35));
             painter.text(
-                title.left_center() + vec2(8.0, 0.0),
+                title.left_center() + vec2(8.0 * z, 0.0),
                 egui::Align2::LEFT_CENTER,
                 kind_name(n.kind),
-                egui::FontId::proportional(13.0),
-                p.text,
+                font(13.0),
+                skin.map_or(p.text, |s| s.text),
             );
             let t = ui.interact(
                 title,
@@ -312,26 +479,36 @@ impl App {
                 Sense::click_and_drag(),
             );
             if t.dragged() {
-                n.pos[0] += t.drag_delta().x;
-                n.pos[1] += t.drag_delta().y;
+                n.pos[0] += t.drag_delta().x / z;
+                n.pos[1] += t.drag_delta().y / z;
             }
             let id = n.id;
-            t.context_menu(|ui| {
+            t.on_hover_text(format!(
+                "{} ({})\nDrag to move, right click for more",
+                kind_name(n.kind),
+                CATEGORIES[n.kind.category()]
+            ))
+            .context_menu(|ui| {
+                if ui.button("Duplicate module").clicked() {
+                    duplicate = Some(id);
+                    ui.close();
+                }
                 if ui.button("Remove module").clicked() {
                     remove = Some(id);
                     ui.close();
                 }
             });
 
+            let label = skin.map_or(p.text2, |s| s.dim);
             // outputs: label and a dot on the right; drag from the dot
             for (o, oname) in spec.outputs.iter().enumerate() {
-                let y = row_y(&rect, o);
+                let y = row_y(&rect, o, z);
                 painter.text(
-                    pos2(rect.max.x - 12.0, y),
+                    pos2(rect.max.x - 12.0 * z, y),
                     egui::Align2::RIGHT_CENTER,
                     *oname,
-                    egui::FontId::proportional(11.0),
-                    p.text2,
+                    font(11.0),
+                    label,
                 );
                 let at = pos2(rect.max.x, y);
                 let r = ui.interact(
@@ -339,15 +516,16 @@ impl App {
                     ui.scope_id().with(("out", id, o)),
                     Sense::drag(),
                 );
-                painter.circle_filled(at, PORT_R, kind_color(n.kind));
+                painter.circle_filled(at, PORT_R * z.max(0.6), kc);
                 if r.drag_started() {
                     ed.dragging = Some((id, o));
                 }
+                r.on_hover_text(format!("{oname}: drag to an input or a parameter"));
             }
-            // inputs and parameters: a dot on the left, a slider for a parameter
+            // inputs and parameters: a dot on the left, a bar for a parameter
             let first = spec.outputs.len();
             for k in 0..spec.inputs.len() + spec.params.len() {
-                let y = row_y(&rect, first + k);
+                let y = row_y(&rect, first + k, z);
                 let at = pos2(rect.min.x, y);
                 let near = pointer.is_some_and(|q| q.distance(at) < 10.0);
                 let col = if near && ed.dragging.is_some() {
@@ -355,76 +533,119 @@ impl App {
                 } else {
                     p.border2
                 };
-                painter.circle_filled(at, PORT_R, col);
+                painter.circle_filled(at, PORT_R * z.max(0.6), col);
                 if near && ed.dragging.is_some() {
                     drop_on = Some((id, k));
                 }
                 let row = Rect::from_min_size(
-                    pos2(rect.min.x + 10.0, y - 9.0),
-                    vec2(NODE_W - 18.0, 18.0),
+                    pos2(rect.min.x + 10.0 * z, y - 8.0 * z),
+                    vec2(NODE_W - 20.0, 16.0) * z,
                 );
                 if k < spec.inputs.len() {
                     painter.text(
                         row.left_center(),
                         egui::Align2::LEFT_CENTER,
                         spec.inputs[k].name,
-                        egui::FontId::proportional(11.0),
-                        p.text2,
+                        font(11.0),
+                        label,
                     );
                     continue;
                 }
-                let ps = &spec.params[k - spec.inputs.len()];
+                let pi = k - spec.inputs.len();
+                let ps = &spec.params[pi];
                 let mut v = n.param(ps.name);
-                let changed = if ps.steps > 0 {
-                    let names: &[&str] = match (n.kind, ps.name) {
-                        (Kind::Filter, "mode") => &FILTER_MODES,
-                        _ => &WAVES,
-                    };
-                    let mut c = false;
-                    ui.put(row, |ui: &mut Ui| {
-                        egui::ComboBox::from_id_salt(("weave", id, ps.name))
-                            .width(NODE_W - 24.0)
-                            .selected_text(format!(
-                                "{} {}",
-                                ps.name,
-                                names.get(v as usize).unwrap_or(&"")
-                            ))
-                            .show_ui(ui, |ui| {
-                                for (i, nm) in names.iter().enumerate() {
-                                    c |= ui.selectable_value(&mut v, i as f64, *nm).changed();
-                                }
-                            })
-                            .response
-                    });
-                    c
+                let r = ui.interact(
+                    row,
+                    ui.scope_id().with(("param", id, pi)),
+                    Sense::click_and_drag(),
+                );
+                // the bar: how far along its range the value is
+                let at_n = ps.normalize(v) as f32;
+                painter.rect_filled(row, 3.0 * z, skin.map_or(p.well_deep, |s| s.track));
+                let fill =
+                    Rect::from_min_max(row.min, pos2(row.min.x + row.width() * at_n, row.max.y));
+                let lit = if r.hovered() || r.dragged() {
+                    0.75
                 } else {
-                    let r = ui.put(row, |ui: &mut Ui| {
-                        ui.spacing_mut().slider_width = NODE_W - 80.0;
-                        // the rail shows against the module
-                        ui.visuals_mut().widgets.inactive.bg_fill = p.well_deep;
-                        ui.add(
-                            egui::Slider::new(&mut v, ps.min..=ps.max)
-                                .logarithmic(ps.log)
-                                .text(ps.name)
-                                .show_value(false),
-                        )
-                    });
-                    if r.double_clicked() {
-                        v = ps.default;
-                    }
-                    let changed = r.changed() || r.double_clicked();
-                    let pid = param_id(id, k - spec.inputs.len());
-                    let label = format!("{} {}", kind_name(n.kind), ps.name);
-                    let at = ps.normalize(v);
-                    r.on_hover_text(format!("{} {v:.3}", ps.name))
-                        .context_menu(|ui| {
-                            if ui.button("Create automation clip").clicked() {
-                                automate = Some((pid, label.clone(), at));
-                                ui.close();
-                            }
-                        });
-                    changed
+                    0.5
                 };
+                painter.rect_filled(fill, 3.0 * z, kc.gamma_multiply(lit));
+                painter.text(
+                    row.left_center() + vec2(4.0 * z, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    ps.name,
+                    font(10.5),
+                    skin.map_or(p.text, |s| s.text),
+                );
+                let shown = value_text(n.kind, ps, v);
+                painter.text(
+                    row.right_center() - vec2(4.0 * z, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    &shown,
+                    font(10.5),
+                    skin.map_or(p.text, |s| s.text),
+                );
+                let mut changed = false;
+                if let Some(choices) = n.kind.choices(ps.name) {
+                    egui::Popup::menu(&r).show(|ui| {
+                        for (ci, nm) in choices.iter().enumerate() {
+                            if ui.selectable_label(v as usize == ci, *nm).clicked() {
+                                v = ci as f64;
+                                changed = true;
+                            }
+                        }
+                    });
+                } else if r.dragged() {
+                    let speed = if fine { 0.1 } else { 1.0 };
+                    let nn = (ps.normalize(v) + f64::from(r.drag_delta().x / row.width() * speed))
+                        .clamp(0.0, 1.0);
+                    // a whole number moves by its own steps, kept between frames
+                    let id_acc = ui.scope_id().with(("acc", id, pi));
+                    let acc: f64 = if ps.steps > 0 {
+                        ui.data_mut(|d| {
+                            let a = d.get_temp_mut_or(id_acc, ps.normalize(v));
+                            *a = (*a + f64::from(r.drag_delta().x / row.width() * speed))
+                                .clamp(0.0, 1.0);
+                            *a
+                        })
+                    } else {
+                        nn
+                    };
+                    v = ps.denormalize(acc);
+                    changed = true;
+                }
+                if r.drag_stopped() {
+                    ui.data_mut(|d| d.remove::<f64>(ui.scope_id().with(("acc", id, pi))));
+                }
+                if r.double_clicked() && n.kind.choices(ps.name).is_none() {
+                    v = ps.default;
+                    changed = true;
+                }
+                let pid = param_id(id, pi);
+                let alabel = format!("{} {}", kind_name(n.kind), ps.name);
+                let at = ps.normalize(v);
+                let range = format!(
+                    "{} to {}",
+                    value_text(n.kind, ps, ps.min),
+                    value_text(n.kind, ps, ps.max)
+                );
+                r.on_hover_text(format!(
+                    "{}: {}\n{range}, default {}\nDrag to set (shift for fine), double click to reset, right click to automate",
+                    ps.name,
+                    shown,
+                    value_text(n.kind, ps, ps.default)
+                ))
+                .context_menu(|ui| {
+                    if ui.button("Create automation clip").clicked() {
+                        automate = Some((pid, alabel.clone(), at));
+                        ui.close();
+                    }
+                    if ui.button("Reset to default").clicked() {
+                        v = ps.default;
+                        changed = true;
+                        ui.close();
+                    }
+                });
                 if changed {
                     n.params.insert(ps.name.to_string(), v);
                 }
@@ -434,12 +655,15 @@ impl App {
             remove_node(&mut patch, id);
             ed.selected = None;
         }
+        if let Some(id) = duplicate {
+            duplicate_node(&mut patch, id);
+        }
 
         // the cable being drawn
         if let Some((from, o)) = ed.dragging {
             if let (Some(n), Some(q)) = (patch.node(from), pointer) {
                 painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                    bezier(out_pos(n, origin, o), q),
+                    bezier(out_pos(n, origin, o, z), q, z),
                     false,
                     Color32::TRANSPARENT,
                     Stroke::new(2.0, p.accent_strong),
@@ -515,15 +739,62 @@ mod tests {
     fn every_port_has_a_place() {
         for k in Kind::ALL {
             let n = Node::new(1, k, [10.0, 20.0]);
-            let r = node_rect(&n, Pos2::ZERO);
             let s = k.spec();
-            for o in 0..s.outputs.len() {
-                assert!(r.contains(out_pos(&n, Pos2::ZERO, o) - vec2(1.0, 0.0)));
+            for z in [0.5, 1.0, 1.5] {
+                let r = node_rect(&n, Pos2::ZERO, z);
+                for o in 0..s.outputs.len() {
+                    assert!(r.contains(out_pos(&n, Pos2::ZERO, o, z) - vec2(1.0, 0.0)));
+                }
+                for i in 0..s.inputs.len() + s.params.len() {
+                    assert!(r.contains(in_pos(&n, Pos2::ZERO, i, z) + vec2(1.0, 0.0)));
+                    assert!(k.input_index(input_name(k, i)) == Some(i));
+                }
             }
-            for i in 0..s.inputs.len() + s.params.len() {
-                assert!(r.contains(in_pos(&n, Pos2::ZERO, i) + vec2(1.0, 0.0)));
-                assert!(k.input_index(input_name(k, i)) == Some(i));
+            // every parameter reads out
+            for ps in s.params {
+                assert!(
+                    !value_text(k, ps, ps.default).is_empty(),
+                    "{k:?} {}",
+                    ps.name
+                );
             }
         }
+    }
+
+    #[test]
+    fn a_duplicate_keeps_the_parameters_but_not_the_cables() {
+        let mut p = Patch::default();
+        let cables = p.cables.len();
+        let id = duplicate_node(&mut p, 4).unwrap();
+        let (a, b) = (p.node(4).unwrap(), p.node(id).unwrap());
+        assert_eq!((a.kind, &a.params), (b.kind, &b.params));
+        assert_ne!(a.pos, b.pos);
+        assert_eq!(p.cables.len(), cables);
+        assert!(duplicate_node(&mut p, 99).is_none());
+    }
+
+    #[test]
+    fn fit_shows_every_module() {
+        for (_, p) in factory() {
+            let view = vec2(860.0, 520.0);
+            let (z, pan) = fit_view(&p, view);
+            let shown = Rect::from_min_size(Pos2::ZERO, view);
+            // at the smallest zoom a very big patch may not fit; these all do
+            assert!(z >= MIN_ZOOM);
+            for n in &p.nodes {
+                let r = node_rect(n, Pos2::ZERO + pan, z);
+                assert!(shown.expand(1.0).contains_rect(r), "{:?}", n.kind);
+            }
+        }
+    }
+
+    #[test]
+    fn values_read_out_in_their_units() {
+        let cutoff = Kind::Filter.param("cutoff").unwrap();
+        assert_eq!(value_text(Kind::Filter, cutoff, 2_000.0), "2.00 kHz");
+        let attack = Kind::Env.param("attack").unwrap();
+        assert_eq!(value_text(Kind::Env, attack, 0.005), "5 ms");
+        let wave = Kind::Osc.param("wave").unwrap();
+        assert_eq!(value_text(Kind::Osc, wave, 4.0), "morph");
     }
 }

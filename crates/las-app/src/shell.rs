@@ -1019,7 +1019,11 @@ impl App {
                             self.nebula_window(ui, c)
                         })
                     }
-                    Some(crate::inst::Bound::Weave(c)) => self.weave_window(ui, c),
+                    Some(crate::inst::Bound::Weave(c)) => {
+                        crate::skin::face(ui, crate::skin::skin_for("weave"), |ui| {
+                            self.weave_window(ui, c)
+                        })
+                    }
                     Some(crate::inst::Bound::Pads(c)) => {
                         crate::skin::face(ui, crate::skin::skin_for("lumapad"), |ui| {
                             self.pads_window(ui, c)
