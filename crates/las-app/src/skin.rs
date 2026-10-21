@@ -173,6 +173,23 @@ pub fn skin_for(plugin: &str) -> Skin {
             screen: rgb(20, 12, 14),
             trace: rgb(255, 130, 140),
         },
+        // the modular synth: a deep indigo case with patch cable magenta
+        "weave" => Skin {
+            name: "WEAVE",
+            tagline: "modular synthesizer",
+            bg_top: rgb(36, 32, 52),
+            bg_bottom: rgb(20, 18, 30),
+            section: rgb(30, 27, 44),
+            edge: rgb(70, 62, 98),
+            header: rgb(16, 14, 24),
+            text: rgb(230, 224, 244),
+            dim: rgb(150, 140, 176),
+            accent: rgb(232, 84, 200),
+            knob: rgb(56, 50, 78),
+            track: rgb(18, 16, 28),
+            screen: rgb(14, 12, 22),
+            trace: rgb(255, 140, 230),
+        },
         // effect windows: a rack unit in brushed dark steel with a green LED accent
         "fx" => Skin {
             name: "EFFECT",
@@ -560,12 +577,13 @@ mod tests {
     fn every_instrument_has_its_own_face() {
         let ids = [
             "polaris", "vortex", "monolith", "zenith", "triosc", "facet", "mist", "nebula",
-            "lumapad", "sampler",
+            "lumapad", "sampler", "weave",
         ];
         let accents: std::collections::HashSet<_> =
             ids.iter().map(|i| skin_for(i).accent).collect();
         assert!(accents.len() >= 8, "faces are told apart by colour");
         assert_eq!(skin_for("vortex").name, "VORTEX");
+        assert_eq!(skin_for("weave").name, "WEAVE");
         // text stands out from its background on every face
         for i in ids {
             let s = skin_for(i);
