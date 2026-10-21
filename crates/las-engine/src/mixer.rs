@@ -61,6 +61,51 @@ impl Delay2 {
     }
 }
 
+/// One biquad section on both sides (direct form 1).
+struct Section {
+    c: [f32; 5],
+    z: [[f32; 4]; 2],
+}
+
+impl Section {
+    fn new(kind: las_dsp::biquad::Kind, f0: f64, gain_db: f64, q: f64, sr: f64) -> Self {
+        let k = las_dsp::biquad::coeffs(kind, f0.min(sr * 0.45), gain_db, q, sr);
+        Self {
+            c: [k.b0, k.b1, k.b2, k.a1, k.a2].map(|v| v as f32),
+            z: [[0.0; 4]; 2],
+        }
+    }
+
+    fn run(&mut self, side: usize, x: &mut [f32]) {
+        let [b0, b1, b2, a1, a2] = self.c;
+        let [x1, x2, y1, y2] = &mut self.z[side];
+        for s in x.iter_mut() {
+            let y = b0 * *s + b1 * *x1 + b2 * *x2 - a1 * *y1 - a2 * *y2;
+            *x2 = *x1;
+            *x1 = *s;
+            *y2 = *y1;
+            *y1 = y;
+            *s = y;
+        }
+    }
+}
+
+/// An insert's built-in three-band EQ: only the bands that are not flat run.
+fn insert_eq(eq: &las_project::InsertEq, sr: f64) -> Vec<Section> {
+    use las_dsp::biquad::Kind;
+    let kinds = [Kind::LowShelf, Kind::Peaking, Kind::HighShelf];
+    let qs = [0.707, 0.9, 0.707];
+    eq.gains()
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.is_finite() && g.abs() > 1e-6)
+        .map(|(b, g)| {
+            let g = g.clamp(-las_project::InsertEq::RANGE, las_project::InsertEq::RANGE);
+            Section::new(kinds[b], las_project::InsertEq::FREQS[b], g, qs[b], sr)
+        })
+        .collect()
+}
+
 /// Where an insert sends its output.
 struct Route {
     target: usize,
@@ -83,6 +128,9 @@ struct Slot {
 struct Track {
     slots: Vec<Slot>,
     bypass: bool,
+    eq: Vec<Section>,
+    invert: bool,
+    swap: bool,
     width: EffectUnit,
     pan: Param,
     fader: Param,
@@ -220,6 +268,9 @@ impl Mixer {
             tracks.push(Track {
                 slots,
                 bypass: t.fx_bypass,
+                eq: insert_eq(&t.eq, sr),
+                invert: t.invert,
+                swap: t.swap,
                 width,
                 pan: Param::new(t.pan),
                 fader: Param::new(t.volume),
@@ -557,8 +608,24 @@ impl Mixer {
                         .process_gains(sl, sr, sc, &self.wet_gain, &self.dry_gain);
                 }
             }
-            // width, pan, fader, mute
+            // the built-in EQ, polarity and swap, then width, pan, fader, mute
             let t = &mut self.tracks[i];
+            for sec in &mut t.eq {
+                let [sl, sr] = &mut t.sum;
+                sec.run(0, &mut sl[..n]);
+                sec.run(1, &mut sr[..n]);
+            }
+            if t.swap {
+                let [sl, sr] = &mut t.sum;
+                sl[..n].swap_with_slice(&mut sr[..n]);
+            }
+            if t.invert {
+                for b in &mut t.sum {
+                    for v in &mut b[..n] {
+                        *v = -*v;
+                    }
+                }
+            }
             for b in &mut t.tmp {
                 b.resize(n, 0.0);
             }
@@ -618,5 +685,100 @@ impl Mixer {
             out_l[j] = m.out[0][j] * gains[j];
             out_r[j] = m.out[1][j] * gains[j];
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use las_project::create::mixer_track;
+
+    const SR: f64 = 48_000.0;
+    const BLOCK: usize = 256;
+
+    /// Play `l`/`r` through insert 1 of a two-insert mixer set up by `setup`; returns
+    /// the master's output.
+    fn run(setup: impl Fn(&mut MixerTrack), l: &[f32], r: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let mut tracks = vec![mixer_track(0, None), mixer_track(1, None)];
+        setup(&mut tracks[1]);
+        let mut m = Mixer::new(&tracks, 1.0, SR, BLOCK);
+        let (mut ol, mut or) = (Vec::new(), Vec::new());
+        let mut bl = vec![0f32; BLOCK];
+        let mut br = vec![0f32; BLOCK];
+        for (k, (cl, cr)) in l.chunks(BLOCK).zip(r.chunks(BLOCK)).enumerate() {
+            let n = cl.len();
+            m.begin(n);
+            m.add_input(1, cl, cr);
+            m.process(k * BLOCK, &mut bl[..n], &mut br[..n]);
+            ol.extend_from_slice(&bl[..n]);
+            or.extend_from_slice(&br[..n]);
+        }
+        (ol, or)
+    }
+
+    fn tone(freq: f64, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .map(|i| (0.25 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin()) as f32)
+            .collect()
+    }
+
+    fn rms(x: &[f32]) -> f64 {
+        // skip the start, where the filters settle
+        let x = &x[x.len() / 2..];
+        (x.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn the_built_in_eq_boosts_and_cuts_its_bands() {
+        let low = tone(60.0, 24_000);
+        let high = tone(12_000.0, 24_000);
+        let flat_low = rms(&run(|_| {}, &low, &low).0);
+        let flat_high = rms(&run(|_| {}, &high, &high).0);
+        let boosted = |t: &mut MixerTrack| t.eq.low = 12.0;
+        let up = rms(&run(boosted, &low, &low).0);
+        // +12 dB is four times the level; a low shelf at 100 Hz gives most of it at 60 Hz
+        assert!(up > flat_low * 2.5, "{up} vs {flat_low}");
+        // the high tone hardly moves
+        let other = rms(&run(boosted, &high, &high).0);
+        assert!((other / flat_high - 1.0).abs() < 0.1, "{other} vs {flat_high}");
+        let cut = rms(&run(|t| t.eq.high = -12.0, &high, &high).0);
+        assert!(cut < flat_high * 0.4, "{cut} vs {flat_high}");
+        let mid = rms(&run(|t| t.eq.mid = 9.0, &tone(1000.0, 24_000), &tone(1000.0, 24_000)).0);
+        let flat_mid = rms(&run(|_| {}, &tone(1000.0, 24_000), &tone(1000.0, 24_000)).0);
+        assert!(mid > flat_mid * 2.0, "{mid} vs {flat_mid}");
+    }
+
+    #[test]
+    fn polarity_inverts_and_swap_trades_the_sides() {
+        let l = vec![0.5f32; 1024];
+        let r = vec![0.1f32; 1024];
+        let (pl, pr) = run(|_| {}, &l, &r);
+        let (il, ir) = run(|t| t.invert = true, &l, &r);
+        for j in 0..1024 {
+            assert!((il[j] + pl[j]).abs() < 1e-6 && (ir[j] + pr[j]).abs() < 1e-6);
+        }
+        let (sl, sr) = run(|t| t.swap = true, &l, &r);
+        for j in 0..1024 {
+            assert!((sl[j] - pr[j]).abs() < 1e-6 && (sr[j] - pl[j]).abs() < 1e-6);
+        }
+        assert!(pl[100] > pr[100]);
+        // width 0 makes it mono
+        let (ml, mr) = run(|t| t.width = 0.0, &l, &r);
+        assert!((ml[500] - mr[500]).abs() < 1e-4, "{} {}", ml[500], mr[500]);
+    }
+
+    #[test]
+    fn a_flat_eq_is_not_saved_and_old_projects_read_flat() {
+        let t = mixer_track(1, None);
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("eq").is_none() && v.get("invert").is_none() && v.get("swapLR").is_none());
+        let back: MixerTrack = serde_json::from_value(v).unwrap();
+        assert!(back.eq.is_flat() && !back.invert && !back.swap);
+        let mut t = t;
+        t.eq.low = 3.0;
+        t.swap = true;
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["eq"]["low"], 3.0);
+        assert_eq!(v["swapLR"], true);
     }
 }
