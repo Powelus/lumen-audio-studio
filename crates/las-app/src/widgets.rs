@@ -108,9 +108,9 @@ fn knob_scaled(
     k: f32,
 ) -> bool {
     let skin = crate::skin::current();
-    let k = KNOB_SCALE.with(std::cell::Cell::get);
+    // the knob's own size, times the size of the knobs of the panel drawing it
+    let k = k * KNOB_SCALE.with(std::cell::Cell::get);
     let size = vec2(54.0 * k.max(0.8), 30.0 + 46.0 * k);
-    let size = vec2(54.0 * k, 76.0 * k);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut changed = false;
     if resp.double_clicked() {
@@ -191,7 +191,6 @@ fn knob_scaled(
     );
     painter.text(
         pos2(rect.center().x, rect.top() + 49.0 * k + (1.0 - k) * 4.0),
-        pos2(rect.center().x, rect.top() + 49.0 * k),
         Align2::CENTER_CENTER,
         show(*value),
         FontId::proportional(11.0 * k.sqrt()),
@@ -199,7 +198,6 @@ fn knob_scaled(
     );
     painter.text(
         pos2(rect.center().x, rect.top() + 49.0 * k + 15.0),
-        pos2(rect.center().x, rect.top() + 64.0 * k),
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(11.0 * k.sqrt()),

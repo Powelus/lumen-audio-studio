@@ -2,21 +2,37 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
-## 0.2.0-alpha.50
+## 0.2.0-alpha.56
 
-CLAP plugin windows.
+Faster start, an icon, and a tidier download.
 
-- A CLAP channel or effect now has the Plugin window button too, and opens the plugin's own window, as VST3 plugins have since 0.2.0-alpha.48. What you turn in it goes into the project with undo, and the playing plugin follows.
-- The host side serves what CLAP windows need: size requests and closing, parameter flushes, timers, and on Linux and macOS the file descriptors that drive a plugin's event loop.
-- The test CLAP plugin has a window, and a test opens it in a real X server and checks the edits it sends, including one from a timer.
+- The app starts faster, above all on Windows: it draws with OpenGL instead of probing DirectX and Vulkan first, and it uses its own bundled fonts instead of scanning every font on the system. The programs are built without debug symbols, so they are smaller.
+- Lumen Audio Studio has its own icon: a glowing L running into a sound wave. It is on the window and, on Windows, on `lumen.exe`.
+- The download shows one program: `lumen` (the app). `las`, the command line renderer, is now in the `tools` folder.
+- This release also carries everything of 0.2.0-alpha.50 to 0.2.0-alpha.55 below.
 
-## 0.2.0-alpha.51
+## 0.2.0-alpha.55
 
-Plugins in their own process.
+Nebula becomes a ROM-style preset player.
 
-- Each CLAP or VST3 plugin now runs in its own small program, `lumen-plugin-host`, which ships next to the app. A plugin that crashes takes only that program with it: its channel or effect goes silent and the app, the project and the other plugins keep playing. A plugin that hangs for two seconds is treated the same way.
-- Notes, audio, parameters and state go to the plugin over a pipe, block by block. The result is the same as running it inside the app (a test checks this sample for sample with both test plugins).
-- Set `LUMEN_PLUGINS_IN_PROCESS=1` to run plugins inside the app as before. The plugin windows still open inside the app.
+- Nebula is now a layered ROM-style preset player. Its window has a category column and a searchable preset list, a large display showing the sound that is loaded, previous, next and random buttons, and favourites. There are seven big macro knobs (cutoff, resonance, attack, release and the new drive, width and detune) and built-in filter, chorus, delay and reverb, each with an on switch and its own knobs. A layers page edits each layer's synth, and an arp and gate page has the arpeggiator settings and a sixteen-step trance gate.
+- The bank grows from 230 to 488 presets, with new Piano, Synth, Chords and Drums categories, and Nebula has a new deep indigo look.
+
+## 0.2.0-alpha.54
+
+Weave gives full control over the sound.
+
+- Oscillators have unison with detune and stereo spread, hard sync, linear and pitch FM, a wave that morphs from sine through triangle and saw to square, and a choice to reset the phase on each note or let it run free.
+- New modules: an FM operator, a wavefolder and distortion, a ring modulator, sample and hold, an eight step sequencer, slew, a scale quantizer, a comparator, delay, chorus, reverb, a ladder filter with drive, four macro knobs you can cable anywhere and automate, and a stereo pan. Envelopes can curve and loop, LFOs can restart on each note and have a random step wave, and the output has a stereo width control. Patches can play in mono with legato and glide and have a master volume.
+- The editor shows every value as you hover, groups modules by category, zooms with Ctrl and the mouse wheel, frames the whole patch with Fit, duplicates modules from the right click menu, and has its own WEAVE look. There are now 30 factory patches covering bass, leads, pads, plucks, keys, effects, drums and sequences. Patches made in earlier versions still load and sound the same.
+
+## 0.2.0-alpha.53
+
+Monolith, Zenith and TriOsc get their own faces.
+
+- Monolith, Zenith and TriOsc are now instruments in their own right instead of recoloured copies of Polaris. Monolith is a one page virtual analogue laid out like a classic hardware synth between wooden side panels, with three oscillators, a mixer with noise, a big filter cutoff, two contour envelopes and an LFO. Zenith is built for supersaws and pads, with a big unison section that draws the detuned voices, an XY pad for detune and brightness, quick chorus, echo and reverb controls, a saw layer and a pad and sub layer. TriOsc is a small window with three simple oscillator rows and a compact filter and envelope strip.
+- Each comes with 32 new presets of its own, and the preset list now shows the presets of the instrument you are looking at. Polaris and Vortex keep the full wavetable panel.
+
 ## 0.2.0-alpha.52
 
 Settings: your own sample and plugin folders.
@@ -30,20 +46,22 @@ Settings: your own sample and plugin folders.
 - The app opens maximised and sizes everything to the screen: the layout fits a 1280 by 720 screen and grows on bigger ones (about 135% at 1080p, 180% at 1440p, 270% at 4K), drawn at the screen's real resolution so it stays sharp. Settings > Display sets your own size from 50% to 200% on top. `--size 1920x1080` opens the window at a given size instead.
 - Settings are kept in `settings.json` in the app's folder.
 - Analyser (the Analyser button in the top bar): what the master output sounds like, four ways. A heat map scrolls the spectrum by in time, low notes at the bottom and loud in bright yellow. A spectrum shows the level of each frequency with a slowly falling peak line. A goniometer draws left against right (a mono sound is an upright line, a wide one a cloud) with correlation and balance bars. Loudness shows momentary, short term and integrated LUFS, true peak, and left and right peak meters. The audio thread hands the output over without waiting or allocating.
-## 0.2.0-alpha.53
 
-Monolith, Zenith and TriOsc get their own faces.
+## 0.2.0-alpha.51
 
-- Monolith, Zenith and TriOsc are now instruments in their own right instead of recoloured copies of Polaris. Monolith is a one page virtual analogue laid out like a classic hardware synth between wooden side panels, with three oscillators, a mixer with noise, a big filter cutoff, two contour envelopes and an LFO. Zenith is built for supersaws and pads, with a big unison section that draws the detuned voices, an XY pad for detune and brightness, quick chorus, echo and reverb controls, a saw layer and a pad and sub layer. TriOsc is a small window with three simple oscillator rows and a compact filter and envelope strip.
-- Each comes with 32 new presets of its own, and the preset list now shows the presets of the instrument you are looking at. Polaris and Vortex keep the full wavetable panel.
-## 0.2.0-alpha.56
+Plugins in their own process.
 
-Faster start, an icon, and a tidier download.
+- Each CLAP or VST3 plugin now runs in its own small program, `lumen-plugin-host`, which ships next to the app. A plugin that crashes takes only that program with it: its channel or effect goes silent and the app, the project and the other plugins keep playing. A plugin that hangs for two seconds is treated the same way.
+- Notes, audio, parameters and state go to the plugin over a pipe, block by block. The result is the same as running it inside the app (a test checks this sample for sample with both test plugins).
+- Set `LUMEN_PLUGINS_IN_PROCESS=1` to run plugins inside the app as before. The plugin windows still open inside the app.
 
-- The app starts faster, above all on Windows: it draws with OpenGL instead of probing DirectX and Vulkan first, and it uses its own bundled fonts instead of scanning every font on the system. The programs are built without debug symbols, so they are smaller.
-- Lumen Audio Studio has its own icon: a glowing L running into a sound wave. It is on the window and, on Windows, on `lumen.exe`.
-- The download shows one program: `lumen` (the app). `las`, the command line renderer, is now in the `tools` folder.
-- This release also carries everything of 0.2.0-alpha.50 to 0.2.0-alpha.55 below.
+## 0.2.0-alpha.50
+
+CLAP plugin windows.
+
+- A CLAP channel or effect now has the Plugin window button too, and opens the plugin's own window, as VST3 plugins have since 0.2.0-alpha.48. What you turn in it goes into the project with undo, and the playing plugin follows.
+- The host side serves what CLAP windows need: size requests and closing, parameter flushes, timers, and on Linux and macOS the file descriptors that drive a plugin's event loop.
+- The test CLAP plugin has a window, and a test opens it in a real X server and checks the edits it sends, including one from a timer.
 
 ## 0.2.0-alpha.49
 

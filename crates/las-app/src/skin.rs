@@ -150,20 +150,6 @@ pub fn skin_for(plugin: &str) -> Skin {
         // a ROM preset player: deep indigo panels around a violet blue display
         "nebula" => Skin {
             name: "NEBULA",
-            tagline: "layered macro instrument",
-            bg_top: rgb(36, 32, 52),
-            bg_bottom: rgb(20, 18, 32),
-            section: rgb(30, 27, 44),
-            edge: rgb(70, 60, 100),
-            header: rgb(14, 12, 24),
-            text: rgb(232, 226, 250),
-            dim: rgb(150, 140, 180),
-            accent: rgb(220, 110, 255),
-            knob: rgb(48, 42, 68),
-            track: rgb(16, 14, 26),
-            screen: rgb(16, 12, 28),
-            trace: rgb(230, 160, 255),
-            flat: false,
             tagline: "layered rom preset player",
             bg_top: rgb(30, 26, 62),
             bg_bottom: rgb(12, 10, 30),
@@ -177,6 +163,7 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(14, 12, 34),
             screen: rgb(14, 18, 58),
             trace: rgb(140, 200, 255),
+            flat: false,
         },
         // drum pads: black with red
         "lumapad" => Skin {
@@ -212,6 +199,7 @@ pub fn skin_for(plugin: &str) -> Skin {
             track: rgb(18, 16, 28),
             screen: rgb(14, 12, 22),
             trace: rgb(255, 140, 230),
+            flat: false,
         },
         // effect windows: a rack unit in brushed dark steel with a green LED accent
         "fx" => Skin {
