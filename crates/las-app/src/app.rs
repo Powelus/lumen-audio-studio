@@ -249,14 +249,6 @@ impl App {
             let at = app.project.channel;
             app.open_channel(at);
         }
-        // `--channel 1` opens that channel's instrument window
-        if let Some(n) = std::env::args()
-            .skip_while(|a| a != "--channel")
-            .nth(1)
-            .and_then(|n| n.parse::<usize>().ok())
-        {
-            app.open_channel(n);
-        }
         // `--effect 1,0` opens the window of the effect in slot 0 of insert 1
         if let Some(v) = std::env::args().skip_while(|a| a != "--effect").nth(1) {
             let mut it = v.split(',').filter_map(|n| n.parse::<usize>().ok());
@@ -297,6 +289,23 @@ impl App {
         // silently, for screenshots on machines without sound
         if std::env::args().any(|a| a == "--demo-song") {
             app.open_demo();
+        }
+        // `--channel 1` opens that channel's instrument window (after the demo song, so
+        // it is that song's channel); `--channel-tab envelope` picks the tab of a
+        // sampler's Channel settings
+        if let Some(n) = std::env::args()
+            .skip_while(|a| a != "--channel")
+            .nth(1)
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            app.open_channel(n);
+        }
+        if let Some(t) = std::env::args()
+            .skip_while(|a| a != "--channel-tab")
+            .nth(1)
+            .and_then(|t| crate::samplerui::Tab::from_name(&t))
+        {
+            crate::samplerui::ASK_TAB.with(|c| c.set(Some(t)));
         }
         // `--demo-audio` adds an audio clip to the playlist (screenshots of waveforms)
         if std::env::args().any(|a| a == "--demo-audio") {

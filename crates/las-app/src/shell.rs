@@ -415,6 +415,9 @@ pub struct Shell {
     pub nebula_page: usize,
     pub nebula_cat: String,
     pub nebula_find: String,
+    /// The channel whose shared Channel settings (Arp and chords) window is open; a
+    /// sampler shows them as tabs of its own window instead.
+    pub chan_settings: Option<usize>,
     /// The memory the app uses, megabytes, and when it was last read.
     ram: (Option<Instant>, f64),
     pub search: String,
@@ -464,6 +467,7 @@ impl Shell {
             nebula_page: 0,
             nebula_cat: String::new(),
             nebula_find: String::new(),
+            chan_settings: None,
             ram: (None, 0.0),
             search: String::new(),
             theme: theme::saved_choice(),
@@ -1505,6 +1509,31 @@ impl App {
                     _ => self.synth_window(ui),
                 });
         }
+        if let Some(c) = self.shell.chan_settings {
+            let mut keep = true;
+            let name = self
+                .project
+                .loaded
+                .as_ref()
+                .and_then(|l| l.project.channels.get(c))
+                .map(|ch| ch.name.clone());
+            match name {
+                Some(name) => {
+                    win(
+                        &format!("Channel settings: {name}"),
+                        a.min + vec2(300.0, 110.0),
+                        vec2(460.0, 420.0),
+                    )
+                    .id(egui::Id::unique("chan-settings-window"))
+                    .open(&mut keep)
+                    .show(ctx, |ui| self.shared_settings(ui, c));
+                }
+                None => keep = false,
+            }
+            if !keep {
+                self.shell.chan_settings = None;
+            }
+        }
         if let Some((insert, slot)) = self.project.open_effect {
             let mut keep = true;
             win("Effect", a.min + vec2(260.0, 120.0), vec2(620.0, 420.0))
@@ -1620,6 +1649,9 @@ impl App {
         }
         if let Some(c) = out.open_synth {
             self.open_channel(c);
+        }
+        if let Some(c) = out.open_settings {
+            self.open_channel_settings(c);
         }
         for (ch, e) in &out.notes {
             self.project.edit_channel(*ch, std::slice::from_ref(e));

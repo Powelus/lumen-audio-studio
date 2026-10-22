@@ -499,6 +499,8 @@ pub struct Out {
     pub open_roll: Option<usize>,
     /// A channel whose name was double-clicked: open its instrument.
     pub open_synth: Option<usize>,
+    /// A channel whose Channel settings (Arp and chords) were asked for.
+    pub open_settings: Option<usize>,
     /// A new length for the pattern, in steps (0: as long as its notes).
     pub steps: Option<usize>,
 }
@@ -989,6 +991,14 @@ fn channel_menu(
     }
     if ui.button("Instrument").clicked() {
         out.open_synth = Some(i);
+        ui.close();
+    }
+    if ui
+        .button("Channel settings (arp, chords)...")
+        .on_hover_text("The arpeggiator and chord presets of this channel; for a sampler also its sample and envelopes")
+        .clicked()
+    {
+        out.open_settings = Some(i);
         ui.close();
     }
     ui.separator();

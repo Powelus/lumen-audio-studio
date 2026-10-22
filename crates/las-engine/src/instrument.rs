@@ -115,6 +115,8 @@ enum Core {
 pub struct Instrument {
     core: Core,
     arp: Option<Arpeggiator>,
+    /// The chord each note becomes (semitones above it; just 0 for none).
+    chord: &'static [i32],
     rack: Vec<RackSlot>,
     sr: f64,
     scratch: [Vec<f32>; 2],
@@ -357,7 +359,10 @@ impl Instrument {
             _ => Core::Silent,
         };
         let arp_state = ArpState::from_json(state.get("arp"));
-        let arp = arp_state.on.then(|| Arpeggiator::new(arp_state));
+        let chord = crate::arp::chord_intervals(&arp_state.chord);
+        // the arpeggiator plays an instrument's notes (not the pads' or an audio clip's)
+        let arp = (arp_state.on && !matches!(core, Core::Pads(_) | Core::AudioClip(_)))
+            .then(|| Arpeggiator::new(arp_state));
         let mut rack = Vec::new();
         let items = state.get("fx").and_then(Value::as_array);
         for (index, item) in items.into_iter().flatten().enumerate() {
@@ -394,6 +399,7 @@ impl Instrument {
         Ok(Self {
             core,
             arp,
+            chord,
             rack,
             sr,
             scratch: [Vec::new(), Vec::new()],
@@ -517,20 +523,6 @@ impl Instrument {
     ) {
         self.gate.at(time);
         let rel_scale = release_scale(release);
-        if let Core::Sampler(s) = &mut self.core {
-            // step notes ring out like FL; piano roll notes are gated by their length
-            let ring = one_shot && s.state_loop() != Some(true);
-            s.play_note(
-                key as i32,
-                vel,
-                time,
-                (!ring).then_some(duration),
-                fine,
-                pan,
-                rel_scale,
-            );
-            return;
-        }
         if let Core::Pads(p) = &mut self.core {
             p.play_note(key as i32, vel, time, fine);
             return;
@@ -539,11 +531,28 @@ impl Instrument {
             c.play_note(time);
             return;
         }
-        if let Some(arp) = &mut self.arp {
-            arp.play_note(key, vel, time, duration);
-            return;
+        for &semis in self.chord {
+            let key = key + f64::from(semis);
+            if let Some(arp) = &mut self.arp {
+                arp.play_note(key, vel, time, duration);
+                continue;
+            }
+            if let Core::Sampler(s) = &mut self.core {
+                // step notes ring out like FL; piano roll notes are gated by their length
+                let ring = one_shot && s.state_loop() != Some(true);
+                s.play_note(
+                    key as i32,
+                    vel,
+                    time,
+                    (!ring).then_some(duration),
+                    fine,
+                    pan,
+                    rel_scale,
+                );
+                continue;
+            }
+            self.direct(key, vel, time, duration, fine, pan, rel_scale);
         }
-        self.direct(key, vel, time, duration, fine, pan, rel_scale);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -558,6 +567,18 @@ impl Instrument {
         rel_scale: f64,
     ) {
         self.gate.at(time);
+        if let Core::Sampler(s) = &mut self.core {
+            s.play_note(
+                key as i32,
+                vel,
+                time,
+                Some(duration),
+                fine,
+                pan,
+                rel_scale,
+            );
+            return;
+        }
         let off = time + duration.max(0.005);
         let evs = [
             Event::On {
