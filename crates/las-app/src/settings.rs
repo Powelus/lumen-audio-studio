@@ -125,16 +125,19 @@ impl Settings {
 /// The audio and MIDI devices there are, for the Settings window.
 #[derive(Clone, Debug, Default)]
 pub struct Devices {
+    /// The audio drivers there are, the system's default first.
+    pub drivers: Vec<String>,
     pub outputs: Vec<String>,
     pub inputs: Vec<String>,
     pub midi: Vec<String>,
 }
 
 impl Devices {
-    pub fn read() -> Self {
+    pub fn read(driver: &str) -> Self {
         Self {
-            outputs: crate::audio::output_devices(),
-            inputs: crate::audio::input_devices(),
+            drivers: crate::audio::drivers(),
+            outputs: crate::audio::output_devices(driver),
+            inputs: crate::audio::input_devices(driver),
             midi: crate::midi::ports(),
         }
     }
@@ -360,7 +363,7 @@ impl App {
         let mut changed = false;
         let mut rescan = false;
         if open && self.devices.is_none() {
-            self.devices = Some(Devices::read());
+            self.devices = Some(Devices::read(&self.settings.audio.driver));
         }
         let mut io = IoOut::default();
         crate::raise::front(
@@ -441,7 +444,7 @@ impl App {
         self.shell.open.settings = open;
         changed |= io.changed;
         if io.refresh {
-            self.devices = Some(Devices::read());
+            self.devices = Some(Devices::read(&self.settings.audio.driver));
         }
         if io.restart {
             self.settings.save();
@@ -531,19 +534,23 @@ impl App {
         // what is playing now
         match &self.audio {
             Some(a) => {
-                let lat = a
-                    .buffer
+                // what the driver really hands over each time, else what was asked for
+                let frames = match a.meters.callback_frames() {
+                    0 => a.buffer,
+                    n => Some(n),
+                };
+                let lat = frames
                     .map(|b| {
                         format!(
-                            ", {:.1} ms buffer",
+                            ", buffer {b} frames ({:.1} ms latency)",
                             crate::audio::latency_ms(b, a.sample_rate)
                         )
                     })
                     .unwrap_or_default();
                 ui.label(
                     RichText::new(format!(
-                        "Playing through {} at {} Hz{lat}",
-                        a.device, a.sample_rate
+                        "Playing through {} ({}) at {} Hz{lat}",
+                        a.device, a.driver, a.sample_rate
                     ))
                     .color(p.ok),
                 );
@@ -575,6 +582,63 @@ impl App {
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
+                ui.label("Audio driver").on_hover_text(
+                    "How the sound reaches the device. ASIO gives the lowest latency; install ASIO4ALL if your sound card has no ASIO driver",
+                );
+                let default_driver = dev.drivers.first().cloned().unwrap_or_default();
+                let driver_text = |d: &str| {
+                    if d.is_empty() {
+                        format!("System default ({default_driver})")
+                    } else {
+                        d.to_string()
+                    }
+                };
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("audio-driver")
+                        .selected_text(driver_text(&a.driver))
+                        .width(300.0)
+                        .show_ui(ui, |ui| {
+                            let mut pick = a.driver.clone();
+                            ui.selectable_value(&mut pick, String::new(), driver_text(""));
+                            for d in &dev.drivers {
+                                ui.selectable_value(&mut pick, d.clone(), d.as_str())
+                                    .on_hover_text(crate::audio::driver_help(d));
+                            }
+                            if pick != a.driver {
+                                // another driver has other devices: start from its default
+                                a.driver = pick;
+                                a.output.clear();
+                                a.input.clear();
+                                out.restart = true;
+                                out.refresh = true;
+                            }
+                        });
+                    let shown = if a.driver.is_empty() {
+                        default_driver.as_str()
+                    } else {
+                        a.driver.as_str()
+                    };
+                    ui.label(RichText::new("?").color(p.muted))
+                        .on_hover_text(crate::audio::driver_help(shown));
+                });
+                ui.end_row();
+                if cfg!(windows) && !crate::audio::HAS_ASIO {
+                    ui.label("");
+                    ui.label(
+                        RichText::new("This build has no ASIO support, only WASAPI")
+                            .color(p.muted)
+                            .size(11.5),
+                    );
+                    ui.end_row();
+                } else if cfg!(windows) && !dev.drivers.iter().any(|d| d.eq_ignore_ascii_case("asio")) {
+                    ui.label("");
+                    ui.label(
+                        RichText::new("No ASIO driver found. ASIO4ALL (asio4all.org) adds one for any sound card")
+                            .color(p.muted)
+                            .size(11.5),
+                    );
+                    ui.end_row();
+                }
                 ui.label("Output device").on_hover_text(
                     "Where the sound goes: speakers, headphones or an audio interface",
                 );
@@ -636,7 +700,13 @@ impl App {
                 ui.label("Latency");
                 ui.label(
                     RichText::new(if a.buffer == 0 {
-                        "Set by the device".to_string()
+                        match self.audio.as_ref().map_or(0, |x| x.meters.callback_frames()) {
+                            0 => "Set by the device".to_string(),
+                            n => format!(
+                                "{:.1} ms from a key to the sound ({n} frames, set by the device)",
+                                crate::audio::latency_ms(n, rate)
+                            ),
+                        }
                     } else {
                         format!(
                             "{:.1} ms from a key to the sound (one buffer)",
