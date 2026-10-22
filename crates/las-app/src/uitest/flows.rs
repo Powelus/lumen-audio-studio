@@ -525,7 +525,7 @@ fn playlist_place_move_resize_duplicate_delete() {
             break;
         }
     }
-    let at = at.expect("a click on an empty spot places a clip");
+    at.expect("a click on an empty spot places a clip");
     let placed = h.project().playlist.clips.last().unwrap().clone();
     // drag it right
     let (mid, _) = clip_at(&h, &placed.id);
@@ -1194,7 +1194,7 @@ fn undo_takes_every_kind_of_edit_back_and_redo_does_them_again() {
     let mut h = Harness::demo();
     let start = serde_json::to_value(h.project()).unwrap();
     let mut states = vec![start.clone()];
-    let mut note = |h: &Harness, states: &mut Vec<serde_json::Value>, what: &str| {
+    let note = |h: &Harness, states: &mut Vec<serde_json::Value>, what: &str| {
         let now = serde_json::to_value(h.project()).unwrap();
         assert_ne!(Some(&now), states.last(), "{what} changed the project");
         states.push(now);
@@ -1260,4 +1260,128 @@ fn enter_confirms_the_save_as_template_box_and_the_template_is_offered() {
         !h.app.project.has_file(),
         "a template opens as a new, unsaved project"
     );
+}
+
+/// Buttons a masher leaves alone: those that open the system's file dialogs (which
+/// would wait for a person) or leave the app.
+fn opens_a_dialog(label: &str) -> bool {
+    let l = label.to_lowercase();
+    l.contains("...")
+        || l.contains('\u{2026}')
+        || [
+            "load",
+            "save",
+            "choose",
+            "browse",
+            "import",
+            "open",
+            "export",
+            "quit",
+            "replace",
+            "sample file",
+            "folder",
+            "close window",
+            "hide",
+        ]
+        .iter()
+        .any(|w| l.contains(w))
+}
+
+/// Click every button of the window titled `title` once, checking the app never
+/// panics and the project stays valid.
+fn mash(h: &mut Harness, title: &str) -> usize {
+    let Some(win) = h
+        .find_all(title)
+        .into_iter()
+        .find(|n| n.role == eframe::egui::accesskit::Role::Window)
+    else {
+        return 0;
+    };
+    let labels: Vec<String> = h
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.role == eframe::egui::accesskit::Role::Button
+                && !n.disabled
+                && !n.label.is_empty()
+                && win.rect.contains_rect(n.rect)
+                && !opens_a_dialog(&n.label)
+        })
+        .map(|n| n.label.clone())
+        .collect();
+    let mut clicked = 0;
+    for l in labels {
+        let Some(win) = h
+            .find_all(title)
+            .into_iter()
+            .find(|n| n.role == eframe::egui::accesskit::Role::Window)
+        else {
+            break;
+        };
+        let Some(b) = h
+            .find_all(&l)
+            .into_iter()
+            .find(|n| win.rect.contains_rect(n.rect) && !n.disabled)
+        else {
+            continue;
+        };
+        h.click_at(b.rect.center());
+        // close whatever popup the button opened
+        h.key(eframe::egui::Key::Escape);
+        clicked += 1;
+        if h.app.project.loaded.is_some() {
+            let bytes = las_project::encode(h.project(), &Default::default(), false);
+            assert!(
+                bytes.is_ok(),
+                "after {l:?} in {title}: the project still saves"
+            );
+        }
+    }
+    clicked
+}
+
+#[test]
+fn every_button_of_every_instrument_window_can_be_clicked() {
+    for (id, name, _) in las_project::create::INSTRUMENTS {
+        let mut h = Harness::demo();
+        let o = &mut h.app.shell.open;
+        o.rack = false;
+        o.playlist = false;
+        o.mixer = false;
+        h.app.add_channel(id);
+        let ch = h.project().channels.len() - 1;
+        h.app.open_channel(ch);
+        h.run(4);
+        let title = h.project().channels[ch].name.clone();
+        let n = mash(&mut h, &title);
+        println!("{name}: {n} buttons");
+    }
+}
+
+#[test]
+fn every_button_of_the_main_windows_can_be_clicked() {
+    let mut h = Harness::demo();
+    for (title, open) in [
+        (
+            "Piano Roll",
+            (|o: &mut crate::shell::Windows| o.roll = true) as fn(&mut crate::shell::Windows),
+        ),
+        ("Mixer", |o| o.mixer = true),
+        ("Channel Rack", |o| o.rack = true),
+        ("Playlist - Arrangement", |o| o.playlist = true),
+        ("Keyboard shortcuts", |o| o.keys = true),
+        ("History", |o| o.history = true),
+        ("Analyser", |o| o.analyser = true),
+    ] {
+        let o = &mut h.app.shell.open;
+        *o = crate::shell::Windows { ..*o };
+        o.rack = false;
+        o.playlist = false;
+        o.mixer = false;
+        o.roll = false;
+        open(o);
+        h.run(4);
+        let n = mash(&mut h, title);
+        println!("{title}: {n} buttons");
+    }
 }

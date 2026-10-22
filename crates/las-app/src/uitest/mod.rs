@@ -289,16 +289,6 @@ impl Harness {
         self.click_at(n.rect.center());
     }
 
-    pub fn double_click(&mut self, label: &str) {
-        let n = self.get(label);
-        self.double_click_at(n.rect.center());
-    }
-
-    pub fn right_click(&mut self, label: &str) {
-        let n = self.get(label);
-        self.right_click_at(n.rect.center());
-    }
-
     /// Open the menu `path[0]` of the menu bar and click through the rest.
     pub fn menu(&mut self, path: &[&str]) {
         for (i, label) in path.iter().enumerate() {
