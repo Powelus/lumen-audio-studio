@@ -470,7 +470,13 @@ impl App {
         let mut open = self.shell.open.history;
         let (back, forward) = self.project.history();
         let mut go = None;
+        crate::raise::front(
+            ctx,
+            crate::raise::Win::History,
+            crate::raise::Win::History.id(),
+        );
         egui::Window::new("History")
+            .id(crate::raise::Win::History.id())
             .open(&mut open)
             .default_size([260.0, 360.0])
             .show(ctx, |ui| {
@@ -509,7 +515,9 @@ impl App {
             self.shell.open.keys = !self.shell.open.keys;
         }
         let mut open = self.shell.open.keys;
+        crate::raise::front(ctx, crate::raise::Win::Keys, crate::raise::Win::Keys.id());
         egui::Window::new("Keyboard shortcuts")
+            .id(crate::raise::Win::Keys.id())
             .open(&mut open)
             .collapsible(false)
             .default_width(380.0)
@@ -538,7 +546,9 @@ impl App {
 
     pub(crate) fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.shell.open.about;
+        crate::raise::front(ctx, crate::raise::Win::About, crate::raise::Win::About.id());
         egui::Window::new("About")
+            .id(crate::raise::Win::About.id())
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -611,7 +621,7 @@ impl App {
                 .add_enabled(loaded, egui::Button::new("Export...    Ctrl+R"))
                 .clicked()
             {
-                self.shell.open.export = true;
+                self.shell.open.show(crate::raise::Win::Export);
                 ui.close();
             }
             ui.separator();
@@ -631,7 +641,7 @@ impl App {
             }
             ui.separator();
             if ui.button("History...").clicked() {
-                self.shell.open.history = true;
+                self.shell.open.show(crate::raise::Win::History);
                 ui.close();
             }
         });
@@ -700,14 +710,16 @@ impl App {
                 ("Synth", o.synth),
             ] {
                 if ui.selectable_label(on, label).clicked() {
-                    let w = &mut self.shell.open;
-                    match label.split_whitespace().next().unwrap_or("") {
-                        "Playlist" => w.playlist = !on,
-                        "Channel" => w.rack = !on,
-                        "Piano" => w.roll = !on,
-                        "Mixer" => w.mixer = !on,
-                        _ => w.synth = !on,
-                    }
+                    use crate::raise::Win;
+                    let w = match label.split_whitespace().next().unwrap_or("") {
+                        "Playlist" => Win::Playlist,
+                        "Channel" => Win::Rack,
+                        "Piano" => Win::Roll,
+                        "Mixer" => Win::Mixer,
+                        _ => Win::Synth,
+                    };
+                    let c = self.covered(ui.ctx(), w);
+                    self.shell.open.toggle(w, c);
                     ui.close();
                 }
             }
@@ -721,7 +733,7 @@ impl App {
         });
         ui.menu_button("Options", |ui| {
             if ui.button("Settings...").clicked() {
-                self.shell.open.settings = true;
+                self.shell.open.show(crate::raise::Win::Settings);
                 ui.close();
             }
             ui.menu_button("Theme", |ui| {
@@ -755,11 +767,11 @@ impl App {
                 ui.close();
             }
             if ui.button("Keyboard shortcuts    F1").clicked() {
-                self.shell.open.keys = true;
+                self.shell.open.show(crate::raise::Win::Keys);
                 ui.close();
             }
             if ui.button("About").clicked() {
-                self.shell.open.about = true;
+                self.shell.open.show(crate::raise::Win::About);
                 ui.close();
             }
         });

@@ -363,7 +363,13 @@ impl App {
             self.devices = Some(Devices::read());
         }
         let mut io = IoOut::default();
+        crate::raise::front(
+            ctx,
+            crate::raise::Win::Settings,
+            crate::raise::Win::Settings.id(),
+        );
         egui::Window::new("Settings")
+            .id(crate::raise::Win::Settings.id())
             .open(&mut open)
             .default_size([600.0, 620.0])
             .pivot(egui::Align2::CENTER_CENTER)

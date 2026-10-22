@@ -217,11 +217,11 @@ impl App {
         }
         // `lumen --mist` or `--facet` start on that instrument (Polaris is the default)
         if std::env::args().any(|a| a == "--mist") {
-            app.shell.open.synth = true;
+            app.shell.open.show(crate::raise::Win::Synth);
             app.switch(Instrument::Mist);
         }
         if std::env::args().any(|a| a == "--facet") {
-            app.shell.open.synth = true;
+            app.shell.open.show(crate::raise::Win::Synth);
             app.switch(Instrument::Facet);
         }
         app.new_project();
@@ -361,7 +361,7 @@ impl App {
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
             app.view = View::Effects;
-            app.shell.open.synth = true;
+            app.shell.open.show(crate::raise::Win::Synth);
         }
         app
     }
@@ -391,7 +391,7 @@ impl App {
                 }
             });
         }
-        self.shell.open.playlist = true;
+        self.shell.open.show(crate::raise::Win::Playlist);
         self.shell.open.rack = false;
         self.project.playlist.zoom = 0.1;
         self.project.create_automation(&crate::auto::AutoRequest {
@@ -1694,11 +1694,11 @@ impl App {
     /// A key played from the screen or the computer keyboard: the project's selected
     /// channel while its page is open, otherwise the synth on the other pages.
     pub(crate) fn note(&mut self, key: u8, vel: f64, on: bool) {
-        if self.shell.keys_to_project() {
+        if self.keys_to_project() {
             self.record_key(key, vel, on);
         }
         self.remember_key(key, vel, on);
-        let c = if self.shell.keys_to_project() && self.project.has_player {
+        let c = if self.keys_to_project() && self.project.has_player {
             Command::PlayerNote {
                 channel: self.project.channel,
                 key,
@@ -1839,6 +1839,31 @@ impl App {
     }
 }
 
+impl App {
+    /// Where files dragged from the system are, or were let go. winit on Windows sends
+    /// no pointer moves during an OLE drag, so egui's pointer is stale or gone then:
+    /// there the cursor is read from the system. Elsewhere it is the pointer, or the
+    /// last place it was seen while the files hovered.
+    fn file_drop_pos(&mut self, ctx: &egui::Context) -> Option<egui::Pos2> {
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let dropping = ctx.input(|i| !i.raw.dropped_files.is_empty());
+        if !hovering && !dropping {
+            self.shell.file_hover = None;
+            return None;
+        }
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let at = crate::shell::os_cursor_pos(ctx)
+            .or(pointer)
+            .or(self.shell.file_hover);
+        if hovering {
+            self.shell.file_hover = at;
+        } else {
+            self.shell.file_hover = None;
+        }
+        at
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.scale_ui(ctx);
@@ -1850,6 +1875,7 @@ impl eframe::App for App {
         self.shortcuts(ctx);
         self.workflow_logic(ctx);
         let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));
+        let file_at = self.file_drop_pos(ctx);
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1868,24 +1894,26 @@ impl eframe::App for App {
             && egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ctx)
         {
             if let Some(item) = egui::DragAndDrop::take_payload::<crate::shell::Dragged>(ctx) {
-                self.drop_item((*item).clone(), drop_at);
+                let over = crate::shell::Over::at(ctx, drop_at);
+                self.drop_item((*item).clone(), drop_at, over);
             }
         }
-        for path in dropped {
-            if path.extension().is_some_and(|e| e == "las") {
-                self.open_project(&path.to_string_lossy());
-                continue;
-            }
-            if self.project.loaded.is_some() {
-                self.drop_item(crate::shell::Dragged::File(path), drop_at);
-                continue;
-            }
-            match self.load_wav(&path) {
-                Ok(()) => {
-                    self.error = None;
-                    self.switch(Instrument::Mist);
+        if !dropped.is_empty() && self.project.loaded.is_some()
+            || dropped
+                .iter()
+                .any(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("las")))
+        {
+            let over = crate::shell::Over::at(ctx, file_at);
+            self.drop_files(dropped, file_at, over);
+        } else {
+            for path in dropped {
+                match self.load_wav(&path) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.switch(Instrument::Mist);
+                    }
+                    Err(e) => self.error = Some(format!("{}: {e}", path.display())),
                 }
-                Err(e) => self.error = Some(format!("{}: {e}", path.display())),
             }
         }
         if let Some(a) = &mut self.audio {
@@ -1893,7 +1921,7 @@ impl eframe::App for App {
         }
         self.serve_editors();
         if std::mem::take(&mut self.project.want_roll) {
-            self.shell.open.roll = true;
+            self.shell.open.show(crate::raise::Win::Roll);
         }
         self.autosave();
         self.feed_analyser();
@@ -1923,7 +1951,7 @@ impl eframe::App for App {
                             .on_hover_text("Audio and MIDI devices, recording, folders, autosave and the size of everything")
                             .clicked()
                         {
-                            self.shell.open.settings = true;
+                            self.shell.open.show(crate::raise::Win::Settings);
                         }
                     });
                 });

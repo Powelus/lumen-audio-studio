@@ -312,6 +312,22 @@ impl Area {
     }
 }
 
+/// Where the files of one drop land: from `first` (the tick and track under the
+/// pointer), one file per track down. None when the drop is not on the playlist.
+pub fn drop_spots(first: Option<(f64, usize)>, n: usize) -> Vec<Option<(f64, usize)>> {
+    (0..n)
+        .map(|i| first.map(|(tick, track)| (tick, track + i)))
+        .collect()
+}
+
+/// The first track with no clips, at tick `at`: where a drop with no pointer
+/// position goes.
+pub fn free_track(p: &las_project::Project, at: f64) -> (f64, usize) {
+    let used: HashSet<usize> = p.playlist.clips.iter().map(|c| c.track).collect();
+    let track = (0..).find(|t| !used.contains(t)).unwrap_or(0);
+    (at, track)
+}
+
 impl Default for PlaylistState {
     fn default() -> Self {
         Self {
@@ -2517,6 +2533,21 @@ mod tests {
         assert_eq!(a.place(egui::pos2(50.0, 100.0)), None, "the track names");
         assert_eq!(a.place(egui::pos2(900.0, 100.0)), None, "outside");
         assert_eq!(a.place(egui::pos2(300.0, 399.0)).unwrap().1, 4);
+    }
+
+    #[test]
+    fn several_files_dropped_land_on_tracks_one_after_another() {
+        assert_eq!(
+            drop_spots(Some((1440.0, 2)), 3),
+            vec![Some((1440.0, 2)), Some((1440.0, 3)), Some((1440.0, 4))]
+        );
+        assert_eq!(drop_spots(None, 2), vec![None, None]);
+        let mut p = project();
+        let (at, t) = free_track(&p, 384.0);
+        assert_eq!(at, 384.0);
+        assert!(p.playlist.clips.iter().all(|c| c.track != t));
+        p.playlist.clips.clear();
+        assert_eq!(free_track(&p, 0.0), (0.0, 0));
     }
 
     fn project() -> Project {

@@ -891,6 +891,43 @@ fn arp_page(ui: &mut Ui, st: &mut Value) -> bool {
 mod tests {
     use super::*;
 
+    /// A held middle C on channel 0 of a project, through the player built for it.
+    fn hear(p: &las_project::Project) -> Vec<f32> {
+        let mut pl = las_engine::Player::new(
+            std::sync::Arc::new(p.clone()),
+            &Default::default(),
+            24000.0,
+            las_engine::PlayMode::Song,
+        )
+        .unwrap();
+        pl.note_on(0, 60.0, 0.9);
+        let (mut l, mut r) = (vec![0f32; 256], vec![0f32; 256]);
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            pl.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+        }
+        out
+    }
+
+    #[test]
+    fn a_preset_loaded_changes_the_channel_and_what_the_player_plays() {
+        let b = las_dsp::presets::bank("nebula").unwrap();
+        let mut p = las_project::create::empty_project("t");
+        let ch = las_project::create::add_channel(&mut p, "nebula");
+        let before = hear(&p);
+        let i = (0..b.presets.len())
+            .find(|&i| b.presets[i].name != "Init")
+            .unwrap();
+        let s = preset_state(b, i, &p.channels[ch].state);
+        p.channels[ch].state = s.clone();
+        assert_eq!(p.channels[ch].state["preset"], json!(b.presets[i].name));
+        assert_eq!(p.channels[ch].state["layers"], b.presets[i].state["layers"]);
+        let after = hear(&p);
+        assert!(after.iter().any(|v| v.abs() > 1e-4), "the preset sounds");
+        assert_ne!(before, after, "the player plays the new preset");
+    }
+
     #[test]
     fn the_browser_filters_and_a_preset_keeps_the_favourites() {
         let b = las_dsp::presets::bank("nebula").unwrap();

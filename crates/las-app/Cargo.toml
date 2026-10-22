@@ -27,6 +27,7 @@ las-dsp = { path = "../las-dsp" }
 las-engine = { path = "../las-engine" }
 las-host = { path = "../las-host" }
 las-project = { path = "../las-project" }
+las-window = { path = "../las-window" }
 midir = "0.11.1"
 rtrb = "0.4.0"
 serde = { version = "1", features = ["derive"] }

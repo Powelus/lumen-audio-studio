@@ -523,6 +523,7 @@ impl App {
         } else {
             self.project.channel = channel;
             self.shell.chan_settings = Some(channel);
+            crate::raise::raise(crate::raise::Win::ChanSettings);
         }
     }
 

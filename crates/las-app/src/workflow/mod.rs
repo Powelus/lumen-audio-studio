@@ -243,14 +243,6 @@ impl App {
                 .hint("new channel"),
             );
         }
-        items.push(
-            Item::new(
-                "Add Weave",
-                "Instrument",
-                Cmd::AddInstrument(las_engine::weave::WEAVE_ID.into()),
-            )
-            .hint("new channel"),
-        );
         for d in las_dsp::fx::registry::descriptors() {
             items.push(
                 Item::new(d.name.clone(), "Effect", Cmd::AddEffect(d.id.clone()))
@@ -395,13 +387,13 @@ impl App {
             Cmd::Save => self.save_project(),
             Cmd::SaveAs => self.save_as_dialog(),
             Cmd::Import if loaded => self.import_dialog(),
-            Cmd::Export => self.shell.open.export = true,
+            Cmd::Export => self.shell.open.show(crate::raise::Win::Export),
             Cmd::Undo => self.project.undo(),
             Cmd::Redo => self.project.redo(),
-            Cmd::History => self.shell.open.history = true,
+            Cmd::History => self.shell.open.show(crate::raise::Win::History),
             Cmd::NewPattern if loaded => self.new_pattern(),
-            Cmd::Shortcuts => self.shell.open.keys = true,
-            Cmd::About => self.shell.open.about = true,
+            Cmd::Shortcuts => self.shell.open.show(crate::raise::Win::Keys),
+            Cmd::About => self.shell.open.show(crate::raise::Win::About),
             Cmd::Capture => self.capture_midi(),
             Cmd::Consolidate => self.consolidate(),
             Cmd::RenderChannel => {
@@ -427,11 +419,11 @@ impl App {
             Cmd::Window(w) => {
                 let o = &mut self.shell.open;
                 match w {
-                    "playlist" => o.playlist = true,
-                    "rack" => o.rack = true,
-                    "roll" => o.roll = true,
-                    "mixer" => o.mixer = true,
-                    "synth" => o.synth = true,
+                    "playlist" => o.show(crate::raise::Win::Playlist),
+                    "rack" => o.show(crate::raise::Win::Rack),
+                    "roll" => o.show(crate::raise::Win::Roll),
+                    "mixer" => o.show(crate::raise::Win::Mixer),
+                    "synth" => o.show(crate::raise::Win::Synth),
                     "browser" => self.shell.browser = true,
                     "tuner" => {
                         let i = self.project.mixer_state.selected;
@@ -467,7 +459,7 @@ impl App {
                     },
                     MixEdit::OpenEffect { insert, slot },
                 ]);
-                self.shell.open.mixer = true;
+                self.shell.open.show(crate::raise::Win::Mixer);
             }
             Cmd::Preset(k, i) => {
                 let inst = [
@@ -477,7 +469,7 @@ impl App {
                 ][k.min(2)];
                 self.load_preset(inst, i);
                 self.switch(inst);
-                self.shell.open.synth = true;
+                self.shell.open.show(crate::raise::Win::Synth);
             }
             Cmd::Sample(id, name) if loaded => self.add_factory_channel(&id, &name),
             Cmd::Recent(p) => {
