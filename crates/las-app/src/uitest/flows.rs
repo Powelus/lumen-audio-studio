@@ -129,6 +129,10 @@ fn view_menu_and_toolbar_open_and_close_every_window() {
     ] {
         let was = get(&h);
         h.menu(&["View", label]);
+        if was && get(&h) {
+            // it was open but covered: the first press brought it to the front
+            h.menu(&["View", label]);
+        }
         assert_eq!(get(&h), !was, "View > {label} toggles");
         h.menu(&["View", label]);
         assert_eq!(get(&h), was, "View > {label} toggles back");

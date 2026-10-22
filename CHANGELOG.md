@@ -14,6 +14,25 @@ Quick search, capturing what you played, rendering, and safer projects.
 - Tuner: a tuner for any mixer insert shows the note and how far off it is.
 - Templates: New from template starts a project from one of your templates, and Save as template keeps the current project as one.
 - Autosave: your project is saved in the background every 2 minutes, and after a crash Lumen offers to restore it.
+- Windows come to the front when opened. The top bar buttons bring a covered window forward, and close it if it is already on top.
+- While a channel's window is open the keys play that channel, so Nebula and the other presets are heard at once.
+- Audio files dragged from Explorer land on the playlist track under the pointer, several files go on consecutive tracks, and .las files open as projects.
+- Weave is in the Add menus.
+- Audio driver setting: WASAPI or ASIO on Windows, with ASIO4ALL, FL Studio ASIO or your interface's own driver. The status shows the driver, the device, the real buffer size and the latency.
+- About 20% less CPU while playing (reverb, EQ, stereo width, delays and envelopes), and release builds are fully optimised.
+- The F4 to F9 shortcuts work.
+- The channel rack scrolls instead of growing off the screen.
+- Typing in a text box no longer plays notes.
+- Synth windows show each channel's own preset.
+- The delete tool and right drag erase every note they pass over.
+- A new or opened project starts without the old project's loop and selection, and the song loop is saved with the project.
+- Missing symbols are fixed, slider rails are visible, and the export path follows the open project.
+- Windows fit the screen: no more creeping windows, and the mixer scrolls.
+- Quick search fixes: a preset never lands in a channel of another synth, and a name typed in full comes first.
+- The effects menu scrolls instead of running off the screen.
+- In the mixer, right click automation and MIDI link work, and double clicking a fader resets it.
+- Enter confirms the rename, save as template and new group boxes.
+- Opening another project closes the old project's instrument windows, sample editor and channel settings.
 
 ## 0.2.0-alpha.59
 
