@@ -156,7 +156,7 @@ fn flush(x: f64) -> f64 {
 
 /// JavaScript's `Math.round`: halves round up.
 pub(crate) fn js_round(x: f64) -> f64 {
-    (x + 0.5).floor()
+    crate::floor(x + 0.5)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +177,9 @@ pub struct Env {
     hold_left: f64,
     /// How much longer than the patch's this note's release is.
     rel_scale: f64,
+    /// The last decay or release coefficient, with the step and time it was made for:
+    /// the amplitude envelope steps every sample, and `exp` each time is costly.
+    coef: (f64, f64, f64),
 }
 
 impl Default for Env {
@@ -186,6 +189,7 @@ impl Default for Env {
             level: 0.0,
             hold_left: 0.0,
             rel_scale: 1.0,
+            coef: (f64::NAN, f64::NAN, 0.0),
         }
     }
 }
@@ -219,6 +223,14 @@ impl Env {
         }
     }
 
+    /// `exp(-4.6 * n / time)`, remembered while `n` and `time` stay the same.
+    fn coef(&mut self, n: f64, time: f64) -> f64 {
+        if self.coef.0 != n || self.coef.1 != time {
+            self.coef = (n, time, ((-4.6 * n) / time).exp());
+        }
+        self.coef.2
+    }
+
     /// Advance by `n` samples; returns the level.
     pub fn step(&mut self, p: &EnvPatch, n: f64, sr: f64) -> f64 {
         match self.stage {
@@ -237,7 +249,7 @@ impl Env {
                 }
             }
             Stage::Decay => {
-                let coef = ((-4.6 * n) / (p.d * sr).max(1.0)).exp();
+                let coef = self.coef(n, (p.d * sr).max(1.0));
                 self.level = p.s + (self.level - p.s) * coef;
                 if (self.level - p.s).abs() < 0.0005 {
                     self.level = p.s;
@@ -246,7 +258,8 @@ impl Env {
             }
             Stage::Sustain => self.level = p.s,
             Stage::Release => {
-                self.level *= ((-4.6 * n) / (p.r * self.rel_scale * sr).max(1.0)).exp();
+                let coef = self.coef(n, (p.r * self.rel_scale * sr).max(1.0));
+                self.level *= coef;
                 if self.level < 0.0002 {
                     self.level = 0.0;
                     self.stage = Stage::Idle;

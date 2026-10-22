@@ -152,6 +152,8 @@ pub struct Meters {
     playing: AtomicU32,
     /// Beats of count-in still to come (0 when not counting in).
     counting: AtomicU32,
+    /// Frames the driver asked for in its last callback (the real buffer size).
+    callback_frames: AtomicU32,
     /// The peak of each mixer insert, master first (bits of an `f32`).
     inserts: [AtomicU32; 32],
     /// The last moments of what goes out, for the analyser.
@@ -243,6 +245,11 @@ impl Meters {
     pub fn playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed) != 0
     }
+    /// Frames in the driver's last callback, 0 before the first one. With the device's
+    /// own buffer size this is the only way to know it.
+    pub fn callback_frames(&self) -> u32 {
+        self.callback_frames.load(Ordering::Relaxed)
+    }
     /// Beats of count-in still to come, 0 when not counting in.
     pub fn counting(&self) -> u32 {
         self.counting.load(Ordering::Relaxed)
@@ -253,6 +260,9 @@ impl Meters {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AudioChoice {
+    /// The audio driver (cpal host) by name: "WASAPI" or "ASIO" on Windows, "ALSA" or
+    /// "JACK" on Linux, "CoreAudio" on macOS. Empty is the system's default.
+    pub driver: String,
     /// The output device, by name.
     pub output: String,
     /// Frames per second.
@@ -285,9 +295,51 @@ pub fn device_name(d: &cpal::Device) -> String {
         .unwrap_or_else(|_| "Unknown device".into())
 }
 
-/// The output devices there are, by name.
-pub fn output_devices() -> Vec<String> {
-    let mut v: Vec<String> = cpal::default_host()
+/// The audio drivers this build can use, by name, the system's default first.
+pub fn drivers() -> Vec<String> {
+    let default = cpal::default_host().id();
+    let mut v = vec![default.name().to_string()];
+    for id in cpal::available_hosts() {
+        if id != default {
+            v.push(id.name().to_string());
+        }
+    }
+    v
+}
+
+/// Whether this build can talk to ASIO drivers (Windows builds made with the ASIO SDK).
+pub const HAS_ASIO: bool = cfg!(all(windows, feature = "asio"));
+
+/// What a driver is, in a few words, for Settings.
+pub fn driver_help(name: &str) -> &'static str {
+    match name.to_ascii_lowercase().as_str() {
+        "asio" => "ASIO talks to the audio interface directly and gives the lowest latency. Pick your interface's own ASIO driver, or ASIO4ALL or FL Studio ASIO if your sound card has none. Only one program can use most ASIO drivers at a time",
+        "wasapi" => "WASAPI is Windows' own audio system: it works with every device and lets other programs play at the same time, with a little more latency than ASIO",
+        "alsa" => "ALSA is Linux's own audio system",
+        "jack" => "JACK is a low latency audio server for Linux",
+        "coreaudio" => "Core Audio is macOS's own audio system, with low latency for every device",
+        _ => "The system's audio driver",
+    }
+}
+
+/// The host for a driver name, or the system's default when it is "" or not there.
+fn host(driver: &str) -> cpal::Host {
+    if !driver.is_empty() {
+        if let Some(id) = cpal::available_hosts()
+            .into_iter()
+            .find(|id| id.name().eq_ignore_ascii_case(driver))
+        {
+            if let Ok(h) = cpal::host_from_id(id) {
+                return h;
+            }
+        }
+    }
+    cpal::default_host()
+}
+
+/// The output devices the driver has, by name.
+pub fn output_devices(driver: &str) -> Vec<String> {
+    let mut v: Vec<String> = host(driver)
         .output_devices()
         .map(|it| it.map(|d| device_name(&d)).collect())
         .unwrap_or_default();
@@ -295,9 +347,9 @@ pub fn output_devices() -> Vec<String> {
     v
 }
 
-/// The input devices there are, by name.
-pub fn input_devices() -> Vec<String> {
-    let mut v: Vec<String> = cpal::default_host()
+/// The input devices the driver has, by name.
+pub fn input_devices(driver: &str) -> Vec<String> {
+    let mut v: Vec<String> = host(driver)
         .input_devices()
         .map(|it| it.map(|d| device_name(&d)).collect())
         .unwrap_or_default();
@@ -307,8 +359,8 @@ pub fn input_devices() -> Vec<String> {
 
 /// The chosen output device, or the default one when it is not chosen or not there.
 /// The flag says the chosen one was missing.
-fn pick_output(name: &str) -> (Option<cpal::Device>, bool) {
-    let host = cpal::default_host();
+fn pick_output(name: &str, driver: &str) -> (Option<cpal::Device>, bool) {
+    let host = host(driver);
     if !name.is_empty() {
         if let Some(d) = host
             .output_devices()
@@ -317,14 +369,20 @@ fn pick_output(name: &str) -> (Option<cpal::Device>, bool) {
         {
             return (Some(d), false);
         }
-        return (host.default_output_device(), true);
+        return (first_output(&host), true);
     }
-    (host.default_output_device(), false)
+    (first_output(&host), false)
+}
+
+/// The driver's default output; ASIO has no default, so its first device.
+fn first_output(host: &cpal::Host) -> Option<cpal::Device> {
+    host.default_output_device()
+        .or_else(|| host.output_devices().ok().and_then(|mut it| it.next()))
 }
 
 /// The chosen input device, or the default one.
-pub fn pick_input(name: &str) -> Option<cpal::Device> {
-    let host = cpal::default_host();
+pub fn pick_input(name: &str, driver: &str) -> Option<cpal::Device> {
+    let host = host(driver);
     if !name.is_empty() {
         if let Some(d) = host
             .input_devices()
@@ -335,6 +393,7 @@ pub fn pick_input(name: &str) -> Option<cpal::Device> {
         }
     }
     host.default_input_device()
+        .or_else(|| host.input_devices().ok().and_then(|mut it| it.next()))
 }
 
 pub struct Audio {
@@ -344,6 +403,8 @@ pub struct Audio {
     pub meters: Arc<Meters>,
     pub sample_rate: u32,
     pub device: String,
+    /// The driver the output is open on ("WASAPI", "ASIO", ...).
+    pub driver: String,
     /// The frames per buffer asked for (None: the device's own choice).
     pub buffer: Option<u32>,
     /// What did not go as chosen (a missing device, a rate it does not take).
@@ -368,9 +429,16 @@ impl Audio {
     /// Open the output chosen in Settings. What cannot be had as chosen falls back to the
     /// device's defaults (and says so in `note`).
     pub fn start_with(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
-        let (device, missing) = pick_output(&choice.output);
+        let driver = host(&choice.driver).id().name().to_string();
+        let (device, missing) = pick_output(&choice.output, &choice.driver);
         let device = device.ok_or("No audio output device found")?;
         let mut notes = Vec::new();
+        if !choice.driver.is_empty() && !driver.eq_ignore_ascii_case(&choice.driver) {
+            notes.push(format!(
+                "The {} driver is not in this build or not installed, using {driver}",
+                choice.driver
+            ));
+        }
         if missing {
             notes.push(format!(
                 "{} is not there, using the default output",
@@ -439,6 +507,7 @@ impl Audio {
                     meters,
                     sample_rate,
                     device: name.clone(),
+                    driver: driver.clone(),
                     buffer,
                     note: None,
                     tuner: tuner_rx,
@@ -865,6 +934,9 @@ impl Renderer {
         let started = Instant::now();
         las_host::flush_denormals();
         let frames = out.len() / self.channels;
+        self.meters
+            .callback_frames
+            .store(frames as u32, Ordering::Relaxed);
         let now = self.clock as f64 / self.sr;
         while let Ok(c) = self.ui.pop() {
             self.handle(c, now);
@@ -1455,6 +1527,17 @@ mod tests {
         }
         assert!(!r.player.as_ref().unwrap().is_playing());
         assert_eq!(r.meters.counting(), 0);
+    }
+
+    #[test]
+    fn the_default_driver_comes_first_and_an_unknown_one_falls_back_to_it() {
+        let d = drivers();
+        assert_eq!(d[0], cpal::default_host().id().name());
+        assert_eq!(host("no such driver").id(), cpal::default_host().id());
+        assert_eq!(host("").id(), cpal::default_host().id());
+        assert!(driver_help("ASIO").contains("ASIO4ALL"));
+        let c: AudioChoice = serde_json::from_str(r#"{"output": "x"}"#).unwrap();
+        assert!(c.driver.is_empty(), "old settings keep the system's driver");
     }
 
     #[test]

@@ -189,6 +189,17 @@ impl StereoEffect for Hall {
         let width = p.width.clamp(0.0, 1.0);
         let freeze = p.freeze;
         let (dry, wet) = (p.dry, p.wet);
+        // the two modulation LFOs turn as phasors: one rotation per sample instead of
+        // a sine and a cosine, set again from the phase at each block and each wrap
+        let step = 2.0 * PI * 0.37 / sr;
+        let (r1s, r1c) = step.sin_cos();
+        let (r2s, r2c) = (step * 1.31).sin_cos();
+        let set = |lfo: f64| {
+            let (s1, c1) = (2.0 * PI * lfo).sin_cos();
+            let (s2, c2) = (2.0 * PI * lfo * 1.31).sin_cos();
+            (s1, c1, s2, c2)
+        };
+        let (mut s1, mut c1, mut s2, mut c2) = set(self.lfo);
         for i in 0..out_l.len() {
             let xl = f64::from(in_l[i]);
             let xr = f64::from(in_r[i]);
@@ -209,9 +220,13 @@ impl StereoEffect for Hall {
             self.lfo += 0.37 / sr;
             if self.lfo >= 1.0 {
                 self.lfo -= 1.0;
+                (s1, c1, s2, c2) = set(self.lfo);
+            } else {
+                (s1, c1) = (s1 * r1c + c1 * r1s, c1 * r1c - s1 * r1s);
+                (s2, c2) = (s2 * r2c + c2 * r2s, c2 * r2c - s2 * r2s);
             }
-            let m1 = (2.0 * PI * self.lfo).sin() * mod_depth;
-            let m2 = (2.0 * PI * self.lfo * 1.31).cos() * mod_depth;
+            let m1 = s1 * mod_depth;
+            let m2 = c2 * mod_depth;
             // read line outputs, apply damping and decay gain
             for k in 0..8 {
                 let m = if k == 1 {

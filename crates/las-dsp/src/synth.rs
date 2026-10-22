@@ -345,6 +345,8 @@ struct StereoFilter {
     comb_fb: f64,
     drive: f64,
     drive_gain: f64,
+    /// `tanh(drive_gain)`, worked out once per control block, not per sample.
+    drive_norm: f64,
 }
 
 impl StereoFilter {
@@ -372,6 +374,7 @@ impl StereoFilter {
             comb_fb: 0.0,
             drive: 0.0,
             drive_gain: 1.0,
+            drive_norm: 1f64.tanh(),
         }
     }
 
@@ -390,6 +393,7 @@ impl StereoFilter {
         let res = res.clamp(0.0, 1.0);
         self.drive = drive;
         self.drive_gain = 1.0 + drive * 8.0;
+        self.drive_norm = self.drive_gain.tanh();
         match kind {
             FilterType::Ladder => {
                 let f = ((fc / sr) * 2.2).min(1.0);
@@ -447,7 +451,7 @@ impl StereoFilter {
 
     fn process(&mut self, ch: usize, mut x: f64) -> f64 {
         if self.drive > 0.0 {
-            x = (x * self.drive_gain).tanh() / self.drive_gain.tanh() * (1.0 + self.drive);
+            x = (x * self.drive_gain).tanh() / self.drive_norm * (1.0 + self.drive);
         }
         match self.kind {
             FilterType::Lp24 | FilterType::Hp24 | FilterType::Bp24 => {
@@ -1073,7 +1077,7 @@ impl SynthEngine {
             };
             let mut ph = v.lfo_phase[i] + (rate * nf) / sr;
             let wrapped = ph >= 1.0;
-            ph -= ph.floor();
+            ph -= crate::floor(ph);
             v.lfo_phase[i] = ph;
             let mut val = lfo_shape(l.shape, ph, v, i, wrapped, &mut self.rng);
             if l.delay > 0.0 && v.lfo_time < l.delay {
@@ -1299,7 +1303,7 @@ impl SynthEngine {
                 for u in 0..rt.voices {
                     let mut phase = v.phases[o][u] + rt.inc[u];
                     if phase >= 1.0 {
-                        phase -= phase.floor();
+                        phase -= crate::floor(phase);
                     }
                     v.phases[o][u] = phase;
                     let mut rp = phase;
@@ -1317,11 +1321,11 @@ impl SynthEngine {
                         }
                         WarpMode::Asym => {
                             rp = phase + w * 0.15 * (TAU * phase).sin();
-                            rp -= rp.floor();
+                            rp -= crate::floor(rp);
                         }
                         WarpMode::Fm => {
                             rp = phase + w * 1.5 * fm_src;
-                            rp -= rp.floor();
+                            rp -= crate::floor(rp);
                         }
                         _ => {}
                     }

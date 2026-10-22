@@ -235,6 +235,8 @@ pub struct Eq {
     g: Glides,
     /// The settings each filter's coefficients were last made from.
     made: [[(f32, f32, f32); 2]; EQ_BANDS],
+    /// One channel of the block as it goes through the bands.
+    scratch: Vec<f64>,
 }
 
 impl Eq {
@@ -252,6 +254,7 @@ impl Eq {
             frame: 0,
             g,
             made: [[(f32::NAN, 0.0, 0.0); 2]; EQ_BANDS],
+            scratch: vec![0.0; 1024],
         };
         eq.set_kinds();
         eq
@@ -339,34 +342,73 @@ impl StereoEffect for Eq {
     ) {
         let n = out_l.len();
         self.g.fill(self.frame, n, self.sr);
-        for i in 0..n {
-            let out = self.g.buf(EQ_BANDS * 3)[i];
-            for ch in 0..2 {
-                let mut x = f64::from(if ch == 0 { in_l[i] } else { in_r[i] });
-                for b in 0..EQ_BANDS {
-                    let now = (
-                        self.g.chan(b * 3, ch)[i],
-                        self.g.chan(b * 3 + 1, ch)[i],
-                        self.g.chan(b * 3 + 2, ch)[i],
-                    );
-                    if now != self.made[b][ch] {
-                        self.made[b][ch] = now;
-                        self.filters[b][ch].c = wa_coeffs(
-                            self.kinds[b],
+        // band by band over the whole block: each filter hears the same samples in the
+        // same order as sample by sample, so the result is the same, with far less work
+        let steady = |x: &[f32]| x.iter().all(|v| *v == x[0]);
+        if self.scratch.len() < n {
+            self.scratch.resize(n, 0.0);
+        }
+        for ch in 0..2 {
+            let (input, out) = if ch == 0 {
+                (in_l, &mut *out_l)
+            } else {
+                (in_r, &mut *out_r)
+            };
+            let x = &mut self.scratch[..n];
+            for (d, s) in x.iter_mut().zip(input) {
+                *d = f64::from(*s);
+            }
+            for b in 0..EQ_BANDS {
+                let (fq, gn, q) = (
+                    self.g.chan(b * 3, ch),
+                    self.g.chan(b * 3 + 1, ch),
+                    self.g.chan(b * 3 + 2, ch),
+                );
+                let filter = &mut self.filters[b][ch];
+                let made = &mut self.made[b][ch];
+                let kind = self.kinds[b];
+                let sr = self.sr;
+                let mut remake = |now: (f32, f32, f32), filter: &mut Bq| {
+                    if now != *made {
+                        *made = now;
+                        filter.c = wa_coeffs(
+                            kind,
                             f64::from(now.0),
                             f64::from(now.2),
                             f64::from(now.1),
-                            self.sr,
+                            sr,
                         );
                     }
-                    x = self.filters[b][ch].run(x);
-                }
-                let v = (x as f32) * out;
-                if ch == 0 {
-                    out_l[i] = v;
+                };
+                if n > 0 && steady(&fq[..n]) && steady(&gn[..n]) && steady(&q[..n]) {
+                    remake((fq[0], gn[0], q[0]), filter);
+                    if kind == Kind::Peaking && gn[0] == 0.0 {
+                        // a flat band (one that is off): its output is its input, and
+                        // its memory is kept as if it had run, so turning it on is smooth
+                        for v in x.iter_mut() {
+                            *v = f64::from(*v as f32);
+                        }
+                        if n >= 2 {
+                            (filter.x1, filter.x2) = (x[n - 1], x[n - 2]);
+                        } else {
+                            (filter.x1, filter.x2) = (x[0], filter.x1);
+                        }
+                        (filter.y1, filter.y2) = (filter.x1, filter.x2);
+                    } else {
+                        for v in x.iter_mut() {
+                            *v = filter.run(*v);
+                        }
+                    }
                 } else {
-                    out_r[i] = v;
+                    for (i, v) in x.iter_mut().enumerate() {
+                        remake((fq[i], gn[i], q[i]), filter);
+                        *v = filter.run(*v);
+                    }
                 }
+            }
+            let gain = self.g.buf(EQ_BANDS * 3);
+            for i in 0..n {
+                out[i] = (x[i] as f32) * gain[i];
             }
         }
         self.frame += n;
@@ -1172,6 +1214,14 @@ impl StereoEffect for StereoTool {
     ) {
         let n = out_l.len();
         self.g.fill(self.frame, n, self.sr);
+        let held = |k: usize, v: f32| self.g.buf(k)[..n].iter().all(|x| *x == v);
+        if held(0, 1.0) && held(1, 0.0) && held(2, 0.0) && held(3, 1.0) {
+            // left as it is (what most inserts have): a plain copy
+            out_l[..n].copy_from_slice(&in_l[..n]);
+            out_r[..n].copy_from_slice(&in_r[..n]);
+            self.frame += n;
+            return;
+        }
         for i in 0..n {
             let (l, r) = (in_l[i], in_r[i]);
             out_l[i] = l * self.g.buf(0)[i] + r * self.g.buf(2)[i];

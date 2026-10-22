@@ -226,10 +226,15 @@ impl LoudnessMeter {
                 // true peak: push into the history and evaluate the 4 interpolation phases
                 let h = &mut self.tp_hist[c];
                 h[self.tp_pos] = x;
+                // newest first, once for all four phases
+                let mut recent = [0.0; TP_TAPS];
+                for (k, r) in recent.iter_mut().enumerate() {
+                    *r = h[(self.tp_pos + TP_TAPS - k) % TP_TAPS];
+                }
                 for ph in coef.iter() {
                     let mut acc = 0.0;
-                    for (k, ck) in ph.iter().enumerate() {
-                        acc += ck * h[(self.tp_pos + TP_TAPS - k) % TP_TAPS];
+                    for (ck, r) in ph.iter().zip(&recent) {
+                        acc += ck * r;
                     }
                     let a = acc.abs();
                     if a > self.tpeak {
