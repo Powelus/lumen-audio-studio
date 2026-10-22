@@ -1035,194 +1035,207 @@ fn strip(
     let p = crate::theme::pal();
     let col = channel_colour_of(&t.color);
     let selected = state.selected == i;
-    let frame = egui::Frame::new()
-        .fill(p.panel)
-        .stroke(egui::Stroke::new(
-            if selected { 1.5 } else { 1.0 },
-            if selected { p.accent } else { p.border },
-        ))
-        .corner_radius(6.0)
-        .inner_margin(4.0)
-        .show(ui, |ui| {
-            ui.set_width(58.0);
-            ui.set_min_height(420.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new(if i == 0 {
-                        "M".to_string()
+    // the strip takes clicks where none of its controls is: a sense given to the
+    // scope is checked before its contents, so a fader, knob or button inside keeps
+    // its own clicks and right-click menu (the strip's own menu used to steal them)
+    let scope = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        egui::Frame::new()
+            .fill(p.panel)
+            .stroke(egui::Stroke::new(
+                if selected { 1.5 } else { 1.0 },
+                if selected { p.accent } else { p.border },
+            ))
+            .corner_radius(6.0)
+            .inner_margin(4.0)
+            .show(ui, |ui| {
+                ui.set_width(58.0);
+                ui.set_min_height(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(if i == 0 {
+                            "M".to_string()
+                        } else {
+                            i.to_string()
+                        })
+                        .size(10.0)
+                        .color(p.muted),
+                    );
+                    // the name on a pill in the insert's colour
+                    let name = if t.name.is_empty() {
+                        format!("Insert {i}")
                     } else {
-                        i.to_string()
-                    })
-                    .size(10.0)
-                    .color(p.muted),
-                );
-                // the name on a pill in the insert's colour
-                let name = if t.name.is_empty() {
-                    format!("Insert {i}")
-                } else {
-                    t.name.clone()
-                };
-                let (r, resp) =
-                    ui.allocate_exact_size(egui::vec2(54.0, 17.0), egui::Sense::click());
-                ui.painter().rect_filled(r, 4.0, col.gamma_multiply(0.55));
-                ui.painter().with_clip_rect(r).text(
-                    r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    name,
-                    egui::FontId::proportional(10.5),
-                    p.text,
-                );
-                if resp.clicked() {
-                    state.selected = i;
-                }
-                resp.on_hover_text("Click to select, right-click for render, sidechain and tuner")
-                    .context_menu(|ui| insert_menu(ui, project, i, edits));
-                let mut pan = t.pan;
-                let (ch, start, pr) =
-                    crate::steps::mini_knob_resp(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.text2);
-                pr.context_menu(|ui| {
-                    let req = || crate::auto::AutoRequest {
-                        target: crate::auto::mixer_target(i, "pan"),
-                        name: format!("{} pan", insert_name(project, i)),
-                        start: (t.pan + 1.0) / 2.0,
+                        t.name.clone()
                     };
-                    if ui.button("Create automation clip").clicked() {
-                        edits.push(MixEdit::Automate(req()));
-                        ui.close();
+                    let (r, resp) =
+                        ui.allocate_exact_size(egui::vec2(54.0, 17.0), egui::Sense::click());
+                    ui.painter().rect_filled(r, 4.0, col.gamma_multiply(0.55));
+                    ui.painter().with_clip_rect(r).text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        name,
+                        egui::FontId::proportional(10.5),
+                        p.text,
+                    );
+                    if resp.clicked() {
+                        state.selected = i;
                     }
-                    crate::midilearn::menu_item(ui, req);
-                });
-                if start {
-                    edits.push(MixEdit::Begin);
-                }
-                if ch {
-                    edits.push(MixEdit::Pan {
-                        insert: i,
-                        value: pan,
+                    resp.on_hover_text(
+                        "Click to select, right-click for render, sidechain and tuner",
+                    )
+                    .context_menu(|ui| insert_menu(ui, project, i, edits));
+                    let mut pan = t.pan;
+                    let (ch, start, pr) = crate::steps::mini_knob_resp(
+                        ui,
+                        &mut pan,
+                        (-1.0, 1.0),
+                        0.0,
+                        "Pan",
+                        p.text2,
+                    );
+                    pr.context_menu(|ui| {
+                        let req = || crate::auto::AutoRequest {
+                            target: crate::auto::mixer_target(i, "pan"),
+                            name: format!("{} pan", insert_name(project, i)),
+                            start: (t.pan + 1.0) / 2.0,
+                        };
+                        if ui.button("Create automation clip").clicked() {
+                            edits.push(MixEdit::Automate(req()));
+                            ui.close();
+                        }
+                        crate::midilearn::menu_item(ui, req);
                     });
-                }
-                eq_strip(ui, t, i, edits);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let m = ui.selectable_label(t.mute, "M");
-                    if m.clicked() {
+                    if start {
                         edits.push(MixEdit::Begin);
-                        edits.push(MixEdit::Mute {
+                    }
+                    if ch {
+                        edits.push(MixEdit::Pan {
                             insert: i,
-                            on: !t.mute,
+                            value: pan,
                         });
                     }
-                    let s = ui.selectable_label(t.solo, "S");
-                    if s.clicked() {
-                        edits.push(MixEdit::Begin);
-                        edits.push(MixEdit::Solo {
-                            insert: i,
-                            on: !t.solo,
-                        });
-                    }
-                });
-                // the clip light: lit once the strip went over 0 dB; click to reset
-                let meter = state.meters.get(i).copied().unwrap_or_default();
-                let (cr, cresp) =
-                    ui.allocate_exact_size(egui::vec2(44.0, 9.0), egui::Sense::click());
-                ui.painter().rect_filled(
-                    cr,
-                    2.0,
-                    if meter.clip {
-                        egui::Color32::from_rgb(240, 60, 50)
+                    eq_strip(ui, t, i, edits);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let m = ui.selectable_label(t.mute, "M");
+                        if m.clicked() {
+                            edits.push(MixEdit::Begin);
+                            edits.push(MixEdit::Mute {
+                                insert: i,
+                                on: !t.mute,
+                            });
+                        }
+                        let s = ui.selectable_label(t.solo, "S");
+                        if s.clicked() {
+                            edits.push(MixEdit::Begin);
+                            edits.push(MixEdit::Solo {
+                                insert: i,
+                                on: !t.solo,
+                            });
+                        }
+                    });
+                    // the clip light: lit once the strip went over 0 dB; click to reset
+                    let meter = state.meters.get(i).copied().unwrap_or_default();
+                    let (cr, cresp) =
+                        ui.allocate_exact_size(egui::vec2(44.0, 9.0), egui::Sense::click());
+                    ui.painter().rect_filled(
+                        cr,
+                        2.0,
+                        if meter.clip {
+                            egui::Color32::from_rgb(240, 60, 50)
+                        } else {
+                            p.well_deep
+                        },
+                    );
+                    ui.painter().text(
+                        cr.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "CLIP",
+                        egui::FontId::proportional(7.5),
+                        if meter.clip {
+                            egui::Color32::WHITE
+                        } else {
+                            p.muted
+                        },
+                    );
+                    let peak_db = if meter.hold > 0.0 {
+                        format!("{:.1} dB", 20.0 * meter.hold.log10())
                     } else {
-                        p.well_deep
-                    },
-                );
-                ui.painter().text(
-                    cr.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "CLIP",
-                    egui::FontId::proportional(7.5),
-                    if meter.clip {
-                        egui::Color32::WHITE
-                    } else {
-                        p.muted
-                    },
-                );
-                let peak_db = if meter.hold > 0.0 {
-                    format!("{:.1} dB", 20.0 * meter.hold.log10())
-                } else {
-                    "-\u{221e} dB".into()
-                };
-                if cresp
-                    .on_hover_text(format!(
+                        "-\u{221e} dB".into()
+                    };
+                    if cresp
+                        .on_hover_text(format!(
                         "Peak {peak_db}. Lights red when the level goes over 0 dB. Click to reset."
                     ))
-                    .clicked()
-                {
-                    if let Some(m) = state.meters.get_mut(i) {
-                        m.reset();
-                    }
-                }
-                let mut vol = t.volume;
-                let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, 190.0);
-                // the peak hold line over the fader's meter
-                if meter.hold > 0.0 {
-                    let fr = r.rect;
-                    let m = egui::Rect::from_min_max(
-                        egui::pos2(fr.right() - 12.0, fr.top() + 8.0),
-                        egui::pos2(fr.right() - 4.0, fr.bottom() - 8.0),
-                    );
-                    let pos = crate::widgets::fader_pos(f64::from(meter.hold), 1.25) as f32;
-                    let y = m.bottom() - pos * m.height();
-                    let col = if meter.hold > 1.0 {
-                        egui::Color32::from_rgb(240, 70, 60)
-                    } else {
-                        egui::Color32::from_gray(230)
-                    };
-                    ui.painter().line_segment(
-                        [egui::pos2(m.left(), y), egui::pos2(m.right(), y)],
-                        egui::Stroke::new(1.5, col),
-                    );
-                }
-                if r.changed() {
-                    if r.drag_started() || !r.dragged() {
-                        edits.push(MixEdit::Begin);
-                    }
-                    edits.push(MixEdit::Volume {
-                        insert: i,
-                        value: vol,
-                    });
-                }
-                r.context_menu(|ui| {
-                    let req = || {
-                        // the master's volume is the project's own, not its strip's
-                        let (target, start) = if i == 0 {
-                            (
-                                crate::auto::master_target("volume"),
-                                project.master_volume / 1.25,
-                            )
-                        } else {
-                            (crate::auto::mixer_target(i, "volume"), t.volume / 1.25)
-                        };
-                        crate::auto::AutoRequest {
-                            target,
-                            name: format!("{} volume", insert_name(project, i)),
-                            start,
+                        .clicked()
+                    {
+                        if let Some(m) = state.meters.get_mut(i) {
+                            m.reset();
                         }
-                    };
-                    crate::midilearn::menu_item(ui, req);
-                    if ui.button("Create automation clip").clicked() {
-                        edits.push(MixEdit::Automate(req()));
-                        ui.close();
                     }
+                    let mut vol = t.volume;
+                    let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, 190.0);
+                    // the peak hold line over the fader's meter
+                    if meter.hold > 0.0 {
+                        let fr = r.rect;
+                        let m = egui::Rect::from_min_max(
+                            egui::pos2(fr.right() - 12.0, fr.top() + 8.0),
+                            egui::pos2(fr.right() - 4.0, fr.bottom() - 8.0),
+                        );
+                        let pos = crate::widgets::fader_pos(f64::from(meter.hold), 1.25) as f32;
+                        let y = m.bottom() - pos * m.height();
+                        let col = if meter.hold > 1.0 {
+                            egui::Color32::from_rgb(240, 70, 60)
+                        } else {
+                            egui::Color32::from_gray(230)
+                        };
+                        ui.painter().line_segment(
+                            [egui::pos2(m.left(), y), egui::pos2(m.right(), y)],
+                            egui::Stroke::new(1.5, col),
+                        );
+                    }
+                    if r.changed() {
+                        if r.drag_started() || !r.dragged() {
+                            edits.push(MixEdit::Begin);
+                        }
+                        edits.push(MixEdit::Volume {
+                            insert: i,
+                            value: vol,
+                        });
+                    }
+                    r.context_menu(|ui| {
+                        let req = || {
+                            // the master's volume is the project's own, not its strip's
+                            let (target, start) = if i == 0 {
+                                (
+                                    crate::auto::master_target("volume"),
+                                    project.master_volume / 1.25,
+                                )
+                            } else {
+                                (crate::auto::mixer_target(i, "volume"), t.volume / 1.25)
+                            };
+                            crate::auto::AutoRequest {
+                                target,
+                                name: format!("{} volume", insert_name(project, i)),
+                                start,
+                            }
+                        };
+                        crate::midilearn::menu_item(ui, req);
+                        if ui.button("Create automation clip").clicked() {
+                            edits.push(MixEdit::Automate(req()));
+                            ui.close();
+                        }
+                    });
+                    r.on_hover_text(format!("{} ({:.1} dB)", pct(vol), db(vol)));
+                    let label = if t.volume <= 0.0 {
+                        "-\u{221e}".to_string()
+                    } else {
+                        format!("{:.1}", db(vol))
+                    };
+                    ui.label(RichText::new(label).weak().size(10.0));
                 });
-                r.on_hover_text(format!("{} ({:.1} dB)", pct(vol), db(vol)));
-                let label = if t.volume <= 0.0 {
-                    "-\u{221e}".to_string()
-                } else {
-                    format!("{:.1}", db(vol))
-                };
-                ui.label(RichText::new(label).weak().size(10.0));
             });
-        });
-    let fr = frame.response.interact(egui::Sense::click());
+    });
+    let fr = scope.response;
     if fr.clicked() {
         state.selected = i;
     }

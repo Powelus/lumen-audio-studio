@@ -921,29 +921,174 @@ fn mixer_add_an_effect_from_an_empty_slot_on_a_small_screen() {
     h.run(3);
     let ins = h.app.project.mixer_state.selected;
     let before = h.project().mixer[ins].slots.iter().flatten().count();
-    let slot = h.find_prefix("+ Slot").into_iter().min_by(|a, b| a.rect.top().total_cmp(&b.rect.top())).expect("an empty slot");
+    let slot = h
+        .find_prefix("+ Slot")
+        .into_iter()
+        .min_by(|a, b| a.rect.top().total_cmp(&b.rect.top()))
+        .expect("an empty slot");
     h.click_at(slot.rect.center());
     let screen = h.ctx.content_rect();
-    let names: Vec<String> = las_dsp::fx::registry::descriptors().iter().map(|d| d.name.clone()).collect();
+    let names: Vec<String> = las_dsp::fx::registry::descriptors()
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
     // the menu stays on the screen and scrolls: an effect in view is picked
     let buttons: Vec<_> = names
         .iter()
-        .filter_map(|n| h.find_all(n).into_iter().find(|b| b.role == eframe::egui::accesskit::Role::Button))
+        .filter_map(|n| {
+            h.find_all(n)
+                .into_iter()
+                .find(|b| b.role == eframe::egui::accesskit::Role::Button)
+        })
         .collect();
-    let left = buttons.iter().map(|b| b.rect.left()).fold(f32::MAX, f32::min);
-    let right = buttons.iter().map(|b| b.rect.right()).fold(f32::MIN, f32::max);
+    let left = buttons
+        .iter()
+        .map(|b| b.rect.left())
+        .fold(f32::MAX, f32::min);
+    let right = buttons
+        .iter()
+        .map(|b| b.rect.right())
+        .fold(f32::MIN, f32::max);
     let bar = h
         .nodes
         .iter()
         .filter(|n| n.role == eframe::egui::accesskit::Role::ScrollBar && n.rect.left() > left)
-        .min_by(|a, b| (a.rect.left() - right).abs().total_cmp(&(b.rect.left() - right).abs()))
+        .min_by(|a, b| {
+            (a.rect.left() - right)
+                .abs()
+                .total_cmp(&(b.rect.left() - right).abs())
+        })
         .expect("the effects menu scrolls")
         .rect;
-    assert!(screen.contains_rect(bar), "the menu is on the screen: {bar:?}");
+    assert!(
+        screen.contains_rect(bar),
+        "the menu is on the screen: {bar:?}"
+    );
     let pick = buttons
         .iter()
         .find(|b| b.rect.top() > bar.top() + 4.0 && b.rect.bottom() < bar.bottom() - 4.0)
         .expect("an effect in view");
     h.click_at(pick.rect.center());
-    assert_eq!(h.project().mixer[ins].slots.iter().flatten().count(), before + 1, "the effect is added");
+    assert_eq!(
+        h.project().mixer[ins].slots.iter().flatten().count(),
+        before + 1,
+        "the effect is added"
+    );
+}
+
+/// Right click `node` and choose "Create automation clip"; the clip made.
+fn automate(h: &mut Harness, node: &super::Node) -> las_project::AutomationClip {
+    let n = h.project().automation.len();
+    h.right_click_at(node.rect.center());
+    h.click("Create automation clip");
+    h.run(2);
+    assert_eq!(
+        h.project().automation.len(),
+        n + 1,
+        "a clip for {:?}",
+        node.label
+    );
+    h.project().automation.last().unwrap().clone()
+}
+
+#[test]
+fn right_click_create_automation_clip_on_tempo_channel_and_mixer_controls() {
+    let mut h = Harness::demo();
+    let tempo = h.get("Drag up and down to change the tempo. Right click: Create automation clip (the tempo then follows it in the song)");
+    let c = automate(&mut h, &tempo);
+    assert!(
+        c.target.to_string().contains("tempo") || c.target.to_string().contains("bpm"),
+        "{:?}",
+        c.target
+    );
+    // the first channel's level knob in the rack
+    let lvl = h
+        .find_prefix("Level:")
+        .into_iter()
+        .min_by(|a, b| a.rect.top().total_cmp(&b.rect.top()))
+        .unwrap();
+    let c = automate(&mut h, &lvl);
+    assert!(!c.points.is_empty());
+    // a mixer fader
+    assert!(
+        h.app.project.open_auto.is_some(),
+        "the new clip opens to be edited"
+    );
+    h.app.project.open_auto = None;
+    h.app.shell.open.rack = false;
+    h.app.shell.open.playlist = false;
+    h.key(eframe::egui::Key::F9);
+    h.run(3);
+    let fader = h
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.label
+                .contains(" dB\nDrag, Shift for fine, double-click for 0 dB")
+        })
+        .min_by(|a, b| a.rect.left().total_cmp(&b.rect.left()))
+        .cloned()
+        .expect("a fader");
+    automate(&mut h, &fader);
+    // undo takes the last clip away
+    let n = h.project().automation.len();
+    h.key_with(eframe::egui::Key::Z, eframe::egui::Modifiers::COMMAND);
+    assert_eq!(h.project().automation.len(), n - 1);
+}
+
+#[test]
+fn mixer_faders_and_knobs_keep_their_clicks_inside_a_strip() {
+    let mut h = Harness::demo();
+    h.app.shell.open.rack = false;
+    h.app.shell.open.playlist = false;
+    h.key(eframe::egui::Key::F9);
+    h.run(3);
+    let mut f: Vec<_> = h
+        .nodes
+        .iter()
+        .filter(|n| n.label.contains(" dB\nDrag, Shift for fine"))
+        .cloned()
+        .collect();
+    f.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
+    // the second strip (insert 1), dragged down then double clicked back to 0 dB
+    let fader = f[1].clone();
+    let v0 = h.project().mixer[1].volume;
+    h.drag(
+        fader.rect.center(),
+        fader.rect.center() + eframe::egui::vec2(0.0, 40.0),
+    );
+    let v1 = h.project().mixer[1].volume;
+    assert!(v1 < v0, "a drag down lowers the fader: {v0} -> {v1}");
+    h.double_click_at(fader.rect.center());
+    assert!(
+        (h.project().mixer[1].volume - 1.0).abs() < 1e-9,
+        "a double click is 0 dB"
+    );
+    // an EQ knob turned up
+    let eq = h
+        .find_prefix("EQ Low (100 Hz)")
+        .into_iter()
+        .min_by(|a, b| a.rect.left().total_cmp(&b.rect.left()))
+        .unwrap();
+    let ins = h
+        .nodes
+        .iter()
+        .filter(|n| n.label.starts_with("EQ Low"))
+        .filter(|n| n.rect.left() < eq.rect.left())
+        .count();
+    h.drag(
+        eq.rect.center(),
+        eq.rect.center() - eframe::egui::vec2(0.0, 40.0),
+    );
+    assert!(
+        h.project().mixer[ins].eq.low > 0.0,
+        "the low EQ goes up: {:?}",
+        h.project().mixer[ins].eq
+    );
+    // a click on the strip's background selects it, a right click there gives its menu
+    let pill = h.find_all("Click to select, right-click for render, sidechain and tuner");
+    let mut pill: Vec<_> = pill.into_iter().collect();
+    pill.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
+    h.click_at(pill[2].rect.center());
+    assert_eq!(h.app.project.mixer_state.selected, 2);
 }
