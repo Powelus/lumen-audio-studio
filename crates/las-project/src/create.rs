@@ -204,6 +204,7 @@ pub fn playlist_track(index: usize) -> PlaylistTrack {
         name: format!("Track {}", index + 1),
         color: "#2a3145".into(),
         mute: false,
+        solo: false,
         height: 56.0,
         extra: Extra::new(),
     }

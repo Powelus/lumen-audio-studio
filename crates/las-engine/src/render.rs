@@ -764,7 +764,7 @@ impl Engine {
                 pitch_line: Timeline::default(),
             });
         }
-        let muted_tracks: Vec<bool> = project.playlist.tracks.iter().map(|t| t.mute).collect();
+        let muted_tracks: Vec<bool> = project.playlist.silent_tracks();
         let mixer = Mixer::new(&project.mixer, project.master_volume, sr, BLOCK);
         let mut e = Engine {
             sr,
