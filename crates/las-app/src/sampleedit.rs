@@ -50,7 +50,7 @@ pub fn menu_items(ui: &mut Ui, channel_id: &str) {
     if ui
         .button("Slice to new channel")
         .on_hover_text(
-            "Cut this sound at its beats into a Slicer channel that plays slice N on key C5+N, with a pattern that plays the loop",
+            "Cut this sound at its beats into a Slicer channel that plays one slice per key from middle C up, with a pattern that plays the loop",
         )
         .clicked()
     {
@@ -509,7 +509,7 @@ pub fn make_slicer(ed: &mut SampleEditor, ps: &mut ProjectState) -> Option<usize
     let c = &l.project.channels[ch];
     ed.slicer = Some(c.id.clone());
     ed.status = format!(
-        "Made \"{}\" with {} slices (C5 up) and the pattern \"{}\" that plays them at {:.2} BPM.",
+        "Made \"{}\" with {} slices (one per key from middle C up) and the pattern \"{}\" that plays them at {:.2} BPM.",
         c.name,
         spec.fractions().len(),
         l.project.patterns[pat].name,
@@ -718,7 +718,7 @@ pub fn panel(ui: &mut Ui, ed: &mut SampleEditor, linked: Option<&str>) -> Out {
             None => {
                 out.slice = ui
                     .button("Slice to new channel")
-                    .on_hover_text("Make a Slicer channel (slice N on key C5+N) and a pattern that plays the loop")
+                    .on_hover_text("Make a Slicer channel (one slice per key from middle C up) and a pattern that plays the loop")
                     .clicked();
             }
         }
@@ -1133,7 +1133,7 @@ impl crate::app::App {
         ));
         ui.label(
             RichText::new(
-                "Each key from C5 plays one slice of the loop. Play the slices pattern to hear the loop at the project tempo, or move its notes in the piano roll to make a new groove.",
+                "Each key from middle C up plays one slice of the loop. Play the slices pattern to hear the loop at the project tempo, or move its notes in the piano roll to make a new groove.",
             )
             .weak()
             .size(11.0),
