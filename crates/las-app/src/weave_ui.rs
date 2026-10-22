@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Weave's window: the patch as modules on a canvas, joined by cables. Drag a module by
-//! its title; drag from an output (the dots on the right) to an input or a parameter
-//! (the dots on the left) to plug a cable in. Click a cable's handle to set its amount
-//! or pull it out. Drag a parameter's bar to set it (shift for fine steps, a double
-//! click for its default). Ctrl and the wheel zoom; Fit frames every module. Every
-//! edit goes into the channel's state as one undo step.
+//! its title; drag from an output (the dots on the right) to any row of a module (an
+//! input or a parameter; the places it can go are ringed) to plug a cable in, or from a
+//! plugged input to take its cable out and plug it elsewhere. Click a cable's handle to
+//! select it (its amount is set in the bar above, Delete pulls it out), double click to
+//! pull it out, right click for its menu. Drag a parameter's bar up or down to set it
+//! (shift for fine steps, a double or ctrl click for its default), or turn the wheel
+//! over it. Ctrl and the wheel zoom; the wheel elsewhere or a drag of the background
+//! scrolls; Fit frames every module. Values change the sound as they move (the player
+//! takes them live); new modules or cables build the player again. A drag is one undo
+//! step.
 
 use crate::app::App;
 use crate::theme::pal;
@@ -21,6 +26,41 @@ const PORT_R: f32 = 5.0;
 const MIN_ZOOM: f32 = 0.3;
 const MAX_ZOOM: f32 = 2.0;
 
+/// A whole drag of the mouse turns a control through its range over this many points.
+const DRAG_PX: f32 = 200.0;
+/// Points of wheel scrolling that make one notch.
+const WHEEL_NOTCH: f32 = 50.0;
+
+/// A cable, by its ends (an index would point at another cable after an undo).
+type CableKey = (u32, String, u32, String);
+
+fn cable_key(c: &Cable) -> CableKey {
+    (c.from, c.output.clone(), c.to, c.input.clone())
+}
+
+/// The control being turned: its module, its parameter and where along its range
+/// (0 to 1) the drag has got to, so that a whole number moves by its own steps.
+struct Knob {
+    node: u32,
+    param: usize,
+    at: f64,
+}
+
+/// A control turned by a drag of `dx`, `dy` points: up and right turn it up, a whole
+/// range in [`DRAG_PX`] points (ten times that with shift).
+pub fn knob_turn(at: f64, dx: f32, dy: f32, fine: bool) -> f64 {
+    let speed = if fine { 0.1 } else { 1.0 };
+    (at + f64::from((dx - dy) / DRAG_PX) * speed).clamp(0.0, 1.0)
+}
+
+/// A control (not a whole number) turned by `points` of wheel scrolling: 2% of its
+/// range a notch, a tenth of that with shift.
+pub fn wheel_turn(ps: &ParamSpec, v: f64, points: f32, fine: bool) -> f64 {
+    let speed = if fine { 0.002 } else { 0.02 };
+    let n = ps.normalize(v) + f64::from(points / WHEEL_NOTCH) * speed;
+    ps.denormalize(n.clamp(0.0, 1.0))
+}
+
 /// What the editor remembers between frames.
 #[derive(Default)]
 pub struct WeaveEditor {
@@ -31,7 +71,24 @@ pub struct WeaveEditor {
     /// A cable being drawn from an output: the node and the output's place.
     dragging: Option<(u32, usize)>,
     /// The cable whose amount is being set.
-    selected: Option<usize>,
+    selected: Option<CableKey>,
+    /// The module picked (Delete takes it out).
+    node: Option<u32>,
+    /// The control being dragged.
+    knob: Option<Knob>,
+    /// The pointer is down and has already made an undo step.
+    gesture: bool,
+    /// When the last edit was (the input clock, in seconds).
+    last_edit: f64,
+    /// Wheel scrolling over a whole-number control not yet a notch.
+    wheel: f32,
+    /// The patch as this editor left it last frame, to see changes from outside.
+    last: Option<Patch>,
+    /// Where the canvas's point (0, 0) was drawn last frame.
+    origin: Pos2,
+    /// What was sent to the player live (for the tests).
+    #[cfg(test)]
+    pub sent: Vec<(usize, Patch)>,
     /// Frame every module on the next frame.
     fit: bool,
     /// The channel last shown, to frame a patch the first time it opens.
@@ -40,7 +97,49 @@ pub struct WeaveEditor {
     view: Vec2,
 }
 
+#[cfg(test)]
 impl WeaveEditor {
+    /// Where output `o` of module `node` was drawn last frame.
+    pub fn out_at(&self, p: &Patch, node: u32, o: usize) -> Pos2 {
+        out_pos(p.node(node).expect("a module"), self.origin, o, self.z())
+    }
+
+    /// The middle of row `k` (an input, then the parameters) of module `node`.
+    pub fn row_at(&self, p: &Patch, node: u32, k: usize) -> Pos2 {
+        let n = p.node(node).expect("a module");
+        let r = node_rect(n, self.origin, self.z());
+        row_rect(&r, n.kind.spec().outputs.len() + k, self.z()).center()
+    }
+
+    /// The dot of input `k` of module `node`.
+    pub fn in_at(&self, p: &Patch, node: u32, k: usize) -> Pos2 {
+        in_pos(p.node(node).expect("a module"), self.origin, k, self.z())
+    }
+
+    /// The handle of cable `i`.
+    pub fn cable_at(&self, p: &Patch, i: usize) -> Pos2 {
+        let c = &p.cables[i];
+        let (a, b) = (p.node(c.from).unwrap(), p.node(c.to).unwrap());
+        let o = a.kind.output_index(&c.output).unwrap();
+        let k = b.kind.input_index(&c.input).unwrap();
+        mid(self.out_at(p, c.from, o), self.in_at(p, c.to, k), self.z())
+    }
+
+    /// The control being dragged now: (module, parameter).
+    pub fn turning(&self) -> Option<(u32, usize)> {
+        self.knob.as_ref().map(|k| (k.node, k.param))
+    }
+}
+
+impl WeaveEditor {
+    /// Let go of everything picked or held (a new patch came).
+    fn forget(&mut self) {
+        self.selected = None;
+        self.node = None;
+        self.knob = None;
+        self.dragging = None;
+    }
+
     fn z(&self) -> f32 {
         if self.zoom <= 0.0 {
             1.0
@@ -90,6 +189,15 @@ fn node_rect(n: &Node, origin: Pos2, z: f32) -> Rect {
 
 fn row_y(r: &Rect, row: usize, z: f32) -> f32 {
     r.min.y + (TITLE_H + row as f32 * ROW_H + ROW_H * 0.5) * z
+}
+
+/// The bar of a row (a parameter's control, or an input's label).
+fn row_rect(r: &Rect, row: usize, z: f32) -> Rect {
+    let y = row_y(r, row, z);
+    Rect::from_min_size(
+        pos2(r.min.x + 10.0 * z, y - 8.0 * z),
+        vec2(NODE_W - 20.0, 16.0) * z,
+    )
 }
 
 /// Where output `o` of a module is drawn.
@@ -236,8 +344,32 @@ pub fn value_text(k: Kind, ps: &ParamSpec, v: f64) -> String {
 }
 
 impl App {
-    /// The window of a Weave channel.
+    /// The window of a Weave channel. A panic while drawing it is caught: the editor
+    /// starts again and says so, instead of the app closing.
     pub(crate) fn weave_window(&mut self, ui: &mut Ui, channel: usize) {
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.weave_window_inner(ui, channel)
+        }));
+        if caught.is_err() {
+            self.weave = WeaveEditor::default();
+            self.project.error =
+                Some("Weave's editor hit an error and was reset. Please report it.".into());
+        }
+    }
+
+    /// Tell the player about new values of a Weave patch, so they are heard at once.
+    fn send_weave_live(&mut self, channel: usize, patch: &Patch) {
+        #[cfg(test)]
+        self.weave.sent.push((channel, patch.clone()));
+        if let Some(a) = &mut self.audio {
+            a.send(crate::audio::Command::WeavePatch {
+                channel,
+                patch: Box::new(patch.clone()),
+            });
+        }
+    }
+
+    fn weave_window_inner(&mut self, ui: &mut Ui, channel: usize) {
         let Some((name, state, channel_id)) = self
             .project
             .loaded
@@ -252,11 +384,29 @@ impl App {
         let ed = &mut self.weave;
         let p = pal();
         let skin = crate::skin::current();
+        let (down, now, fine, ctrl) = ui.input(|i| {
+            (
+                i.pointer.any_down(),
+                i.time,
+                i.modifiers.shift,
+                i.modifiers.command,
+            )
+        });
+        if !down {
+            ed.gesture = false;
+        }
         if ed.seen != Some(channel) {
             ed.seen = Some(channel);
             ed.fit = true;
-            ed.selected = None;
+            ed.forget();
+        } else if ed.last.as_ref().is_some_and(|l| *l != patch) {
+            // changed from outside (undo, redo, a preset, automation clips): what was
+            // being dragged may be gone
+            ed.knob = None;
+            ed.dragging = None;
         }
+        // an edit that is a step of its own (not part of a drag)
+        let mut discrete = false;
 
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&name).size(15.0).strong());
@@ -264,8 +414,9 @@ impl App {
                 for (pname, fp) in factory() {
                     if ui.button(pname).clicked() {
                         patch = fp;
-                        ed.selected = None;
+                        ed.forget();
                         ed.fit = true;
+                        discrete = true;
                         ui.close();
                     }
                 }
@@ -278,7 +429,8 @@ impl App {
                                 // in the middle of the view
                                 let z = ed.z();
                                 let at = (ed.view * 0.5 - ed.pan) / z - node_size(k) * 0.5;
-                                add_node(&mut patch, k, [at.x, at.y]);
+                                ed.node = Some(add_node(&mut patch, k, [at.x, at.y]));
+                                discrete = true;
                                 ui.close();
                             }
                         }
@@ -295,7 +447,12 @@ impl App {
             ui.separator();
             ui.add_enabled_ui(!patch.mono, |ui| {
                 ui.label("Voices");
-                ui.add(egui::DragValue::new(&mut patch.voices).range(1..=MAX_VOICES));
+                ui.add(
+                    egui::DragValue::new(&mut patch.voices)
+                        .range(1..=MAX_VOICES)
+                        .speed(0.1),
+                )
+                .on_hover_text("How many keys play at once (drag, type or use the wheel)");
             });
             ui.checkbox(&mut patch.mono, "Mono")
                 .on_hover_text("One voice that plays the newest key held");
@@ -325,10 +482,15 @@ impl App {
                 .clicked()
             {
                 patch = Patch::default();
-                ed.selected = None;
+                ed.forget();
                 ed.fit = true;
+                discrete = true;
             }
-            if let Some(i) = ed.selected.filter(|&i| i < patch.cables.len()) {
+            let sel = ed
+                .selected
+                .as_ref()
+                .and_then(|k| patch.cables.iter().position(|c| cable_key(c) == *k));
+            if let Some(i) = sel {
                 ui.separator();
                 let c = &mut patch.cables[i];
                 ui.label(format!("{} ➡ {}", c.output, c.input));
@@ -340,6 +502,7 @@ impl App {
                 if ui.button("Pull out").clicked() {
                     patch.cables.remove(i);
                     ed.selected = None;
+                    discrete = true;
                 }
             }
         });
@@ -356,10 +519,28 @@ impl App {
         let painter = ui.painter_at(canvas);
         painter.rect_filled(canvas, 4.0, skin.map_or(p.roll_bg, |s| s.screen));
         let dot = skin.map_or(p.grid, |s| s.edge);
-
-        // ctrl and the wheel zoom about the pointer; the wheel alone scrolls
         let pointer = ui.input(|i| i.pointer.hover_pos());
-        if let Some(q) = pointer.filter(|q| canvas.contains(*q)) {
+        let over_canvas = pointer.is_some_and(|q| canvas.contains(q));
+
+        // the parameter under the pointer (the wheel turns it rather than scrolling)
+        let hovered_param = pointer.filter(|_| over_canvas).and_then(|q| {
+            let (z, origin) = (ed.z(), canvas.min + ed.pan);
+            patch.nodes.iter().rev().find_map(|n| {
+                let rect = node_rect(n, origin, z);
+                if !rect.contains(q) {
+                    return None;
+                }
+                let s = n.kind.spec();
+                let first = s.outputs.len() + s.inputs.len();
+                (0..s.params.len())
+                    .find(|&pi| row_rect(&rect, first + pi, z).contains(q))
+                    .map(|pi| (n.id, pi))
+            })
+        });
+
+        // ctrl and the wheel zoom about the pointer; the wheel turns the parameter under
+        // the pointer, or scrolls
+        if let Some(q) = pointer.filter(|_| over_canvas) {
             let (zd, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta()));
             let z = ed.z();
             if zd != 1.0 {
@@ -368,8 +549,29 @@ impl App {
                 ed.pan = q - canvas.min - world * nz;
                 ed.zoom = nz;
             } else if scroll != Vec2::ZERO {
-                ed.pan += scroll;
+                if let Some((id, pi)) = hovered_param.filter(|_| ed.dragging.is_none()) {
+                    if let Some(n) = patch.nodes.iter_mut().find(|n| n.id == id) {
+                        let ps = &n.kind.spec().params[pi];
+                        let v = n.param(ps.name);
+                        let turned = scroll.y + scroll.x;
+                        let nv = if ps.steps > 0 {
+                            ed.wheel += turned;
+                            let notches = (ed.wheel / WHEEL_NOTCH).trunc();
+                            ed.wheel -= notches * WHEEL_NOTCH;
+                            (v + f64::from(notches)).clamp(ps.min, ps.max)
+                        } else {
+                            wheel_turn(ps, v, turned, fine)
+                        };
+                        if nv != v {
+                            n.params.insert(ps.name.to_string(), nv);
+                        }
+                    }
+                } else {
+                    ed.pan += scroll;
+                }
             }
+            // the window around the canvas does not scroll as well
+            ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
         }
         let z = ed.z();
         // a dotted grid that moves with the canvas
@@ -384,17 +586,24 @@ impl App {
             }
             y += step;
         }
-        if bg.dragged() && ed.dragging.is_none() {
+        if bg.dragged() && ed.dragging.is_none() && ed.knob.is_none() {
             ed.pan += bg.drag_delta();
         }
         if bg.clicked() {
             ed.selected = None;
+            ed.node = None;
         }
         let origin = canvas.min + ed.pan;
+        ed.origin = origin;
         let font = |size: f32| egui::FontId::proportional(size * z);
+        let text_col = skin.map_or(p.text, |s| s.text);
+        // text this small is not drawn
+        let words = z >= 0.45;
 
         // cables under the modules
-        let (mut picked, mut pull) = (None, None);
+        let mut picked = None;
+        let mut pull = None;
+        let mut amount: Option<(usize, f64)> = None;
         for (ci, c) in patch.cables.iter().enumerate() {
             let (Some(a), Some(b)) = (patch.node(c.from), patch.node(c.to)) else {
                 continue;
@@ -404,8 +613,12 @@ impl App {
                 continue;
             };
             let (pa, pb) = (out_pos(a, origin, o, z), in_pos(b, origin, i, z));
-            let selected = ed.selected == Some(ci);
-            let col = if selected {
+            let key = cable_key(c);
+            let selected = ed.selected.as_ref() == Some(&key);
+            let m = mid(pa, pb, z);
+            let handle = Rect::from_center_size(m, vec2(16.0, 16.0));
+            let r = ui.interact(handle, ui.scope_id().with(("cable", &key)), Sense::click());
+            let col = if selected || r.hovered() {
                 p.accent_strong
             } else {
                 kind_color(a.kind).gamma_multiply(0.4 + 0.6 * c.amount.abs().min(1.0) as f32)
@@ -414,73 +627,171 @@ impl App {
                 bezier(pa, pb, z),
                 false,
                 Color32::TRANSPARENT,
-                Stroke::new(if selected { 3.0 } else { 2.0 }, col),
+                Stroke::new(if selected || r.hovered() { 3.0 } else { 2.0 }, col),
             ));
-            let m = mid(pa, pb, z);
-            let handle = Rect::from_center_size(m, vec2(12.0, 12.0));
-            let r = ui.interact(handle, ui.scope_id().with(("cable", ci)), Sense::click());
             painter.circle_filled(m, if r.hovered() { 6.0 } else { 4.0 }, col);
-            if r.clicked() {
-                picked = Some(ci);
-            }
-            if r.secondary_clicked() {
+            if r.double_clicked() {
                 pull = Some(ci);
+            } else if r.clicked() {
+                picked = Some(key.clone());
             }
+            let mut amt = c.amount;
             r.on_hover_text(format!(
-                "{} {} ➡ {} {} ({:.2})\nClick to set the amount, right click to pull out",
+                "{} {} ➡ {} {} ({:.2})\nClick to select (Delete pulls it out), double click to pull out, right click for more",
                 kind_name(a.kind),
                 c.output,
                 kind_name(b.kind),
                 c.input,
                 c.amount
-            ));
+            ))
+            .context_menu(|ui| {
+                if ui
+                    .add(egui::Slider::new(&mut amt, -1.0..=1.0).text("amount"))
+                    .changed()
+                {
+                    amount = Some((ci, amt));
+                }
+                if ui.button("Pull out cable").clicked() {
+                    pull = Some(ci);
+                    ui.close();
+                }
+            });
         }
-        if let Some(ci) = picked {
-            ed.selected = Some(ci);
+        if let Some(k) = picked {
+            ed.selected = Some(k);
+            ed.node = None;
         }
-        // a right click on a handle pulls the cable out
-        if let Some(ci) = pull {
+        if let Some((ci, a)) = amount {
+            if let Some(c) = patch.cables.get_mut(ci) {
+                c.amount = a.clamp(-1.0, 1.0);
+            }
+        }
+        if let Some(ci) = pull.filter(|&ci| ci < patch.cables.len()) {
             patch.cables.remove(ci);
             ed.selected = None;
+            discrete = true;
         }
+        // Delete pulls out the selected cable, or takes out the selected module
+        if over_canvas && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+            if let Some(k) = ed.selected.take() {
+                patch.cables.retain(|c| cable_key(c) != k);
+                discrete = true;
+            } else if let Some(id) = ed.node.take() {
+                remove_node(&mut patch, id);
+                discrete = true;
+            }
+        }
+
+        // what can take the cable being drawn, and what it would go into
+        let drawing = ed.dragging.and_then(|(from, o)| {
+            let n = patch.node(from)?;
+            Some((from, n.kind.spec().outputs.get(o).copied()?))
+        });
+        if ed.dragging.is_some() && drawing.is_none() {
+            ed.dragging = None;
+        }
+        let idle: Vec<Vec<Option<&'static str>>> = patch
+            .nodes
+            .iter()
+            .map(|n| {
+                n.kind
+                    .spec()
+                    .params
+                    .iter()
+                    .map(|ps| patch.idle_reason(n, ps.name))
+                    .collect()
+            })
+            .collect();
+        let free_to: Vec<Vec<bool>> = patch
+            .nodes
+            .iter()
+            .map(|n| {
+                let s = n.kind.spec();
+                (0..s.inputs.len() + s.params.len())
+                    .map(|k| {
+                        drawing.is_some_and(|(from, output)| {
+                            let input = input_name(n.kind, k);
+                            !patch.cables.iter().any(|c| {
+                                c.from == from
+                                    && c.output == output
+                                    && c.to == n.id
+                                    && c.input == input
+                            })
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let into: Vec<Vec<usize>> = patch
+            .nodes
+            .iter()
+            .map(|n| {
+                let s = n.kind.spec();
+                (0..s.inputs.len() + s.params.len())
+                    .map(|k| {
+                        let input = input_name(n.kind, k);
+                        patch
+                            .cables
+                            .iter()
+                            .filter(|c| c.to == n.id && c.input == input)
+                            .count()
+                    })
+                    .collect()
+            })
+            .collect();
 
         // the modules
         let mut remove = None;
         let mut duplicate = None;
+        let mut unplug: Option<(u32, usize)> = None;
         let mut automate: Option<(u32, String, f64)> = None;
         let mut drop_on: Option<(u32, usize)> = None;
-        let fine = ui.input(|i| i.modifiers.shift);
-        for n in patch.nodes.iter_mut() {
+        let mut bubble: Option<(Pos2, String)> = None;
+        for (ni, n) in patch.nodes.iter_mut().enumerate() {
             let rect = node_rect(n, origin, z);
             if !canvas.intersects(rect) {
                 continue;
             }
             let spec = n.kind.spec();
             let kc = kind_color(n.kind);
+            let picked_node = ed.node == Some(n.id);
             painter.rect_filled(rect, 6.0 * z, skin.map_or(p.panel2, |s| s.section));
             painter.rect_stroke(
                 rect,
                 6.0 * z,
-                Stroke::new(1.0, kc),
+                Stroke::new(
+                    if picked_node { 2.0 } else { 1.0 },
+                    if picked_node { p.accent_strong } else { kc },
+                ),
                 egui::StrokeKind::Inside,
             );
             let title = Rect::from_min_size(rect.min, vec2(NODE_W, TITLE_H) * z);
             painter.rect_filled(title, 6.0 * z, kc.gamma_multiply(0.35));
-            painter.text(
-                title.left_center() + vec2(8.0 * z, 0.0),
-                egui::Align2::LEFT_CENTER,
-                kind_name(n.kind),
-                font(13.0),
-                skin.map_or(p.text, |s| s.text),
-            );
+            if words {
+                painter.text(
+                    title.left_center() + vec2(8.0 * z, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    kind_name(n.kind),
+                    font(13.0),
+                    text_col,
+                );
+            }
             let t = ui.interact(
                 title,
                 ui.scope_id().with(("node", n.id)),
                 Sense::click_and_drag(),
             );
+            if t.drag_started() || t.clicked() {
+                ed.node = Some(n.id);
+                ed.selected = None;
+            }
             if t.dragged() {
-                n.pos[0] += t.drag_delta().x / z;
-                n.pos[1] += t.drag_delta().y / z;
+                let d = t.drag_delta() / z;
+                n.pos[0] += d.x;
+                n.pos[1] += d.y;
+            }
+            if t.hovered() || t.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
             let id = n.id;
             t.on_hover_text(format!(
@@ -503,22 +814,29 @@ impl App {
             // outputs: label and a dot on the right; drag from the dot
             for (o, oname) in spec.outputs.iter().enumerate() {
                 let y = row_y(&rect, o, z);
-                painter.text(
-                    pos2(rect.max.x - 12.0 * z, y),
-                    egui::Align2::RIGHT_CENTER,
-                    *oname,
-                    font(11.0),
-                    label,
-                );
+                if words {
+                    painter.text(
+                        pos2(rect.max.x - 12.0 * z, y),
+                        egui::Align2::RIGHT_CENTER,
+                        *oname,
+                        font(11.0),
+                        label,
+                    );
+                }
                 let at = pos2(rect.max.x, y);
                 let r = ui.interact(
-                    Rect::from_center_size(at, vec2(14.0, 14.0)),
+                    Rect::from_center_size(at, vec2(18.0, 18.0)),
                     ui.scope_id().with(("out", id, o)),
                     Sense::drag(),
                 );
-                painter.circle_filled(at, PORT_R * z.max(0.6), kc);
+                let lit = r.hovered() || ed.dragging == Some((id, o));
+                painter.circle_filled(at, PORT_R * z.max(0.6) * if lit { 1.4 } else { 1.0 }, kc);
                 if r.drag_started() {
                     ed.dragging = Some((id, o));
+                    ed.knob = None;
+                }
+                if r.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
                 }
                 r.on_hover_text(format!("{oname}: drag to an input or a parameter"));
             }
@@ -527,28 +845,64 @@ impl App {
             for k in 0..spec.inputs.len() + spec.params.len() {
                 let y = row_y(&rect, first + k, z);
                 let at = pos2(rect.min.x, y);
-                let near = pointer.is_some_and(|q| q.distance(at) < 10.0);
-                let col = if near && ed.dragging.is_some() {
+                let valid = free_to[ni][k];
+                // the whole row takes the cable being drawn, not just its dot
+                let band = Rect::from_min_max(
+                    pos2(rect.min.x - 12.0 * z.max(0.6), y - ROW_H * 0.5 * z),
+                    pos2(rect.max.x, y + ROW_H * 0.5 * z),
+                );
+                let target = valid && pointer.is_some_and(|q| band.contains(q));
+                if target {
+                    drop_on = Some((id, k));
+                }
+                let plugged = into[ni][k] > 0;
+                let col = if target {
                     p.accent_strong
+                } else if plugged {
+                    kc
                 } else {
                     p.border2
                 };
-                painter.circle_filled(at, PORT_R * z.max(0.6), col);
-                if near && ed.dragging.is_some() {
-                    drop_on = Some((id, k));
-                }
-                let row = Rect::from_min_size(
-                    pos2(rect.min.x + 10.0 * z, y - 8.0 * z),
-                    vec2(NODE_W - 20.0, 16.0) * z,
+                painter.circle_filled(
+                    at,
+                    PORT_R * z.max(0.6) * if target { 1.4 } else { 1.0 },
+                    col,
                 );
-                if k < spec.inputs.len() {
-                    painter.text(
-                        row.left_center(),
-                        egui::Align2::LEFT_CENTER,
-                        spec.inputs[k].name,
-                        font(11.0),
-                        label,
+                if valid {
+                    // every place the cable can go is ringed
+                    painter.circle_stroke(
+                        at,
+                        (PORT_R + 3.0) * z.max(0.6),
+                        Stroke::new(
+                            1.5,
+                            p.accent_strong
+                                .gamma_multiply(if target { 1.0 } else { 0.5 }),
+                        ),
                     );
+                }
+                // drag from a plugged input to take its cable out and plug it elsewhere
+                if plugged {
+                    let pr = ui.interact(
+                        Rect::from_center_size(at, vec2(18.0, 18.0)),
+                        ui.scope_id().with(("in", id, k)),
+                        Sense::drag(),
+                    );
+                    if pr.drag_started() {
+                        unplug = Some((id, k));
+                    }
+                    pr.on_hover_text("Drag to take this cable out and plug it in elsewhere");
+                }
+                let row = row_rect(&rect, first + k, z);
+                if k < spec.inputs.len() {
+                    if words {
+                        painter.text(
+                            row.left_center(),
+                            egui::Align2::LEFT_CENTER,
+                            spec.inputs[k].name,
+                            font(11.0),
+                            label,
+                        );
+                    }
                     continue;
                 }
                 let pi = k - spec.inputs.len();
@@ -559,32 +913,49 @@ impl App {
                     ui.scope_id().with(("param", id, pi)),
                     Sense::click_and_drag(),
                 );
+                let turning = ed
+                    .knob
+                    .as_ref()
+                    .is_some_and(|kn| kn.node == id && kn.param == pi);
+                let why = idle[ni][pi];
                 // the bar: how far along its range the value is
                 let at_n = ps.normalize(v) as f32;
                 painter.rect_filled(row, 3.0 * z, skin.map_or(p.well_deep, |s| s.track));
                 let fill =
                     Rect::from_min_max(row.min, pos2(row.min.x + row.width() * at_n, row.max.y));
-                let lit = if r.hovered() || r.dragged() {
+                let lit = if turning {
+                    0.95
+                } else if r.hovered() {
                     0.75
+                } else if why.is_some() {
+                    0.25
                 } else {
                     0.5
                 };
                 painter.rect_filled(fill, 3.0 * z, kc.gamma_multiply(lit));
-                painter.text(
-                    row.left_center() + vec2(4.0 * z, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    ps.name,
-                    font(10.5),
-                    skin.map_or(p.text, |s| s.text),
-                );
                 let shown = value_text(n.kind, ps, v);
-                painter.text(
-                    row.right_center() - vec2(4.0 * z, 0.0),
-                    egui::Align2::RIGHT_CENTER,
-                    &shown,
-                    font(10.5),
-                    skin.map_or(p.text, |s| s.text),
-                );
+                if words {
+                    let tc = if why.is_some() { label } else { text_col };
+                    let val = painter.layout_no_wrap(shown.clone(), font(10.5), tc);
+                    let nm = painter.layout_no_wrap(ps.name.replace('_', " "), font(10.5), tc);
+                    let pad = 4.0 * z;
+                    painter.galley(
+                        pos2(
+                            row.max.x - pad - val.size().x,
+                            row.center().y - val.size().y * 0.5,
+                        ),
+                        val.clone(),
+                        tc,
+                    );
+                    // the name only where it does not run into the value
+                    if nm.size().x + val.size().x + 3.0 * pad <= row.width() {
+                        painter.galley(
+                            pos2(row.min.x + pad, row.center().y - nm.size().y * 0.5),
+                            nm,
+                            tc,
+                        );
+                    }
+                }
                 let mut changed = false;
                 if let Some(choices) = n.kind.choices(ps.name) {
                     egui::Popup::menu(&r).show(|ui| {
@@ -595,31 +966,48 @@ impl App {
                             }
                         }
                     });
-                } else if r.dragged() {
-                    let speed = if fine { 0.1 } else { 1.0 };
-                    let nn = (ps.normalize(v) + f64::from(r.drag_delta().x / row.width() * speed))
-                        .clamp(0.0, 1.0);
-                    // a whole number moves by its own steps, kept between frames
-                    let id_acc = ui.scope_id().with(("acc", id, pi));
-                    let acc: f64 = if ps.steps > 0 {
-                        ui.data_mut(|d| {
-                            let a = d.get_temp_mut_or(id_acc, ps.normalize(v));
-                            *a = (*a + f64::from(r.drag_delta().x / row.width() * speed))
-                                .clamp(0.0, 1.0);
-                            *a
-                        })
-                    } else {
-                        nn
-                    };
-                    v = ps.denormalize(acc);
-                    changed = true;
+                } else {
+                    if r.drag_started() {
+                        ed.knob = Some(Knob {
+                            node: id,
+                            param: pi,
+                            at: ps.normalize(v),
+                        });
+                    }
+                    if r.dragged() {
+                        // read outside any lock of the context
+                        let d = r.drag_delta();
+                        if let Some(kn) = ed
+                            .knob
+                            .as_mut()
+                            .filter(|kn| kn.node == id && kn.param == pi)
+                        {
+                            kn.at = knob_turn(kn.at, d.x, d.y, fine);
+                            let nv = ps.denormalize(kn.at);
+                            if nv != v {
+                                v = nv;
+                                changed = true;
+                            }
+                        }
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    }
+                    if r.drag_stopped() {
+                        ed.knob = None;
+                    }
+                    if r.double_clicked() || (r.clicked() && ctrl) {
+                        v = ps.default;
+                        changed = true;
+                    }
                 }
-                if r.drag_stopped() {
-                    ui.data_mut(|d| d.remove::<f64>(ui.scope_id().with(("acc", id, pi))));
-                }
-                if r.double_clicked() && n.kind.choices(ps.name).is_none() {
-                    v = ps.default;
-                    changed = true;
+                if turning || r.dragged() {
+                    bubble = Some((
+                        row.center_top(),
+                        format!(
+                            "{} {}",
+                            ps.name.replace('_', " "),
+                            value_text(n.kind, ps, v)
+                        ),
+                    ));
                 }
                 let pid = param_id(id, pi);
                 let alabel = format!("{} {}", kind_name(n.kind), ps.name);
@@ -629,8 +1017,16 @@ impl App {
                     value_text(n.kind, ps, ps.min),
                     value_text(n.kind, ps, ps.max)
                 );
+                let how = if n.kind.choices(ps.name).is_some() {
+                    "Click to choose, wheel to step, right click to automate"
+                } else {
+                    "Drag up or down to set (shift for fine), wheel to nudge, double click to reset, right click to automate"
+                };
+                let note = why
+                    .map(|w| format!("\nNot heard now: {w}"))
+                    .unwrap_or_default();
                 r.on_hover_text(format!(
-                    "{}: {}\n{range}, default {}\nDrag to set (shift for fine), double click to reset, right click to automate",
+                    "{}: {}\n{range}, default {}{note}\n{how}",
                     ps.name,
                     shown,
                     value_text(n.kind, ps, ps.default)
@@ -651,32 +1047,78 @@ impl App {
                 }
             }
         }
+        // the value of the control being turned, over it
+        if let Some((at, text)) = bubble {
+            let g = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), text_col);
+            let r = Rect::from_center_size(
+                at - vec2(0.0, g.size().y * 0.5 + 6.0),
+                g.size() + vec2(10.0, 4.0),
+            );
+            painter.rect_filled(r, 4.0, skin.map_or(p.panel2, |s| s.section));
+            painter.rect_stroke(
+                r,
+                4.0,
+                Stroke::new(1.0, p.accent_strong),
+                egui::StrokeKind::Inside,
+            );
+            painter.galley(r.min + vec2(5.0, 2.0), g, text_col);
+        }
         if let Some(id) = remove {
             remove_node(&mut patch, id);
             ed.selected = None;
+            ed.node = None;
+            discrete = true;
         }
         if let Some(id) = duplicate {
-            duplicate_node(&mut patch, id);
+            ed.node = duplicate_node(&mut patch, id);
+            discrete = true;
+        }
+        // a plugged input dragged: its newest cable comes out and is drawn again
+        if let Some((to, k)) = unplug {
+            let input = patch.node(to).map(|n| input_name(n.kind, k));
+            if let Some(ci) = input.and_then(|inp| {
+                patch
+                    .cables
+                    .iter()
+                    .rposition(|c| c.to == to && c.input == inp)
+            }) {
+                let c = patch.cables.remove(ci);
+                let o = patch
+                    .node(c.from)
+                    .and_then(|n| n.kind.output_index(&c.output));
+                ed.dragging = o.map(|o| (c.from, o));
+                ed.selected = None;
+                discrete = true;
+            }
         }
 
         // the cable being drawn
         if let Some((from, o)) = ed.dragging {
             if let (Some(n), Some(q)) = (patch.node(from), pointer) {
+                let end = drop_on
+                    .and_then(|(to, k)| patch.node(to).map(|t| in_pos(t, origin, k, z)))
+                    .unwrap_or(q);
                 painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                    bezier(out_pos(n, origin, o, z), q, z),
+                    bezier(out_pos(n, origin, o, z), end, z),
                     false,
                     Color32::TRANSPARENT,
-                    Stroke::new(2.0, p.accent_strong),
+                    Stroke::new(2.5, p.accent_strong),
                 ));
             }
-            if ui.input(|i| i.pointer.any_released()) {
+            let (released, escape) =
+                ui.input(|i| (i.pointer.any_released(), i.key_pressed(egui::Key::Escape)));
+            if released {
                 if let (Some((to, k)), Some(n)) = (drop_on, patch.node(from)) {
                     let output = n.kind.spec().outputs[o];
                     if let Some(target) = patch.node(to) {
                         let input = input_name(target.kind, k);
-                        connect(&mut patch, from, output, to, input);
+                        if connect(&mut patch, from, output, to, input) {
+                            discrete = true;
+                        }
                     }
                 }
+                ed.dragging = None;
+            } else if escape {
                 ed.dragging = None;
             }
             ui.ctx().request_repaint();
@@ -690,16 +1132,37 @@ impl App {
             });
         }
         if patch != before {
+            // one undo step for each drag (or each wheel turn, a second apart)
+            let begin = discrete
+                || if down {
+                    !ed.gesture
+                } else {
+                    now - ed.last_edit > 1.0
+                };
+            ed.gesture = down;
+            ed.last_edit = now;
+            // values only: the player takes them as they change, without being built
+            // again; new modules or cables need a new player (built once let go)
+            let live = before.same_shape(&patch) && self.project.takes_live_edits();
+            if live {
+                self.send_weave_live(channel, &patch);
+            }
             let value = patch.to_json();
-            self.project.modify_coalesced("weave", move |p| {
+            let f = move |p: &mut las_project::Project| {
                 if let Some(c) = p.channels.get_mut(channel) {
                     if !c.state.is_object() {
                         c.state = json!({});
                     }
                     c.state["patch"] = value;
                 }
-            });
+            };
+            if live {
+                self.project.modify_live(begin, f);
+            } else {
+                self.project.modify(begin, f);
+            }
         }
+        self.weave.last = Some(patch);
     }
 }
 

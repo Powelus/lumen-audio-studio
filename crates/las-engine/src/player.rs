@@ -235,6 +235,19 @@ impl Player {
         self.engine.note_off(channel, key, t);
     }
 
+    /// A Weave channel's patch, changed only in its values (the same modules and
+    /// cables), taken while it plays: its sound changes at once and the notes
+    /// sounding carry on. Safe on the audio thread (nothing is allocated or freed);
+    /// the patch replaced comes back (or the one given, for a channel that is not
+    /// Weave or a patch of another shape) to be freed elsewhere.
+    pub fn weave_patch(
+        &mut self,
+        channel: usize,
+        patch: Box<las_dsp::modular::Patch>,
+    ) -> Box<las_dsp::modular::Patch> {
+        self.engine.weave_patch(channel, patch)
+    }
+
     /// A performance controller (mod wheel, pitch bend, aftertouch) moved on a channel.
     pub fn controller(&mut self, channel: usize, cc: las_dsp::engine::Cc, value: f64) {
         let t = self.now();

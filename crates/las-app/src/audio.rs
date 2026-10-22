@@ -36,6 +36,7 @@ pub enum Garbage {
     Chain(Box<Vec<FxSlot>>),
     Params(Box<Params>),
     Player(Box<Player>),
+    WeavePatch(Box<las_dsp::modular::Patch>),
     Preview(Box<Preview>),
     Reference(Box<RefTrack>),
 }
@@ -124,6 +125,12 @@ pub enum Command {
         vel: f64,
         on: bool,
     },
+    /// New values for a Weave channel's patch (the same modules and cables), taken
+    /// while it plays. The patch it replaces comes back as garbage.
+    WeavePatch {
+        channel: usize,
+        patch: Box<las_dsp::modular::Patch>,
+    },
     /// A controller (mod wheel, pitch bend, aftertouch) moved on one of the project's
     /// channels.
     PlayerController {
@@ -139,6 +146,9 @@ pub enum Command {
     ReferenceGain(f32),
     /// The insert the tuner listens to, or none.
     Tuner(Option<usize>),
+    /// Panic on the audio thread (to test that it is caught).
+    #[cfg(test)]
+    Panic,
 }
 
 /// Meters and counters the audio thread publishes.
@@ -149,6 +159,9 @@ pub struct Meters {
     load: AtomicU32,
     voices: AtomicU32,
     dropouts: AtomicU32,
+    /// Times the audio thread caught a panic (it then plays silence and drops the
+    /// project's player, which the app builds again).
+    faults: AtomicU32,
     /// The player's position (ticks, as bits of an `f64`) and whether it is playing.
     position: AtomicU64,
     playing: AtomicU32,
@@ -234,6 +247,10 @@ impl Meters {
     /// Callbacks that took longer than the buffer lasts.
     pub fn dropouts(&self) -> u32 {
         self.dropouts.load(Ordering::Relaxed)
+    }
+    /// Panics the audio thread caught.
+    pub fn faults(&self) -> u32 {
+        self.faults.load(Ordering::Relaxed)
     }
     /// Where the project's player is, in ticks.
     pub fn position(&self) -> f64 {
@@ -1050,6 +1067,15 @@ impl Renderer {
                     }
                 }
             }
+            #[cfg(test)]
+            Command::Panic => panic!("a test panic on the audio thread"),
+            Command::WeavePatch { channel, patch } => {
+                let back = match &mut self.player {
+                    Some(p) => p.weave_patch(channel, patch),
+                    None => patch,
+                };
+                let _ = self.garbage.push(Garbage::WeavePatch(back));
+            }
             Command::PlayerController { channel, cc, value } => {
                 if let Some(p) = &mut self.player {
                     p.controller(channel, cc, value);
@@ -1110,7 +1136,23 @@ impl Renderer {
         }
     }
 
+    /// Fill the device's buffer. A panic while rendering does not take the audio
+    /// thread (or the app) down: this buffer is silent, the project's player is let
+    /// go of (the app sees the fault and builds a new one) and the next buffer plays.
     fn fill<T>(&mut self, out: &mut [T])
+    where
+        T: Sample + FromSample<f32>,
+    {
+        if catch_unwind(AssertUnwindSafe(|| self.fill_inner(out))).is_err() {
+            out.fill(T::EQUILIBRIUM);
+            if let Some(old) = self.player.take() {
+                let _ = self.garbage.push(Garbage::Player(old));
+            }
+            self.meters.faults.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn fill_inner<T>(&mut self, out: &mut [T])
     where
         T: Sample + FromSample<f32>,
     {
@@ -1645,6 +1687,51 @@ mod tests {
             loudest = loudest.max(peak(&buf));
         }
         assert!(loudest > 0.005, "a live key sounds through the mixer");
+    }
+
+    #[test]
+    fn a_panic_on_the_audio_thread_is_silence_not_a_crash() {
+        let (mut r, mut tx, mut garbage) = renderer();
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        tx.push(Command::Panic).ok().unwrap();
+        let mut buf = vec![1f32; 512 * 2];
+        r.fill(&mut buf);
+        assert_eq!(peak(&buf), 0.0, "the buffer is silent");
+        assert_eq!(r.meters.faults(), 1);
+        assert!(r.player.is_none(), "the player is let go of");
+        let mut got_player = false;
+        while let Ok(g) = garbage.pop() {
+            got_player |= matches!(g, Garbage::Player(_));
+        }
+        assert!(got_player, "and freed off the audio thread");
+        // the next buffer plays on
+        tx.push(Command::TestSound).ok().unwrap();
+        r.fill(&mut buf);
+        assert!(peak(&buf) > 0.05);
+    }
+
+    #[test]
+    fn a_weave_patch_is_taken_live_and_the_old_one_comes_back() {
+        let (mut r, mut tx, mut garbage) = renderer();
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        let p = las_dsp::modular::Patch::default();
+        tx.push(Command::WeavePatch {
+            channel: 0,
+            patch: Box::new(p.clone()),
+        })
+        .ok()
+        .unwrap();
+        let mut buf = vec![0f32; 512 * 2];
+        r.fill(&mut buf);
+        let mut back = false;
+        while let Ok(g) = garbage.pop() {
+            back |= matches!(g, Garbage::WeavePatch(_));
+        }
+        assert!(back, "freed off the audio thread");
     }
 
     #[test]

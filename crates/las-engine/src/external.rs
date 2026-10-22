@@ -42,6 +42,13 @@ pub trait Instrument: Send {
     /// A performance controller moved: the mod wheel (0 to 1), pitch bend (-1 to 1) or
     /// aftertouch (0 to 1). Plugins that do not use it ignore it.
     fn controller(&mut self, _cc: las_dsp::engine::Cc, _value: f64) {}
+
+    /// Take a Weave patch live, while playing (see
+    /// [`las_dsp::modular::Modular::apply_live`]); what is not Weave hands it back.
+    /// What comes back is to be freed off the audio thread.
+    fn weave_patch(&mut self, patch: Box<las_dsp::modular::Patch>) -> Box<las_dsp::modular::Patch> {
+        patch
+    }
 }
 
 /// The lines automation draws on a plugin's parameters, read once a block.
@@ -183,6 +190,13 @@ impl Hosted {
         self.plugin.controller(cc, value);
     }
 
+    pub fn weave_patch(
+        &mut self,
+        patch: Box<las_dsp::modular::Patch>,
+    ) -> Box<las_dsp::modular::Patch> {
+        self.plugin.weave_patch(patch)
+    }
+
     pub fn stop(&mut self, time: f64) {
         self.queue.retain(|&(t, _, v)| t < time && v == 0.0);
         let held = std::mem::take(&mut self.held);
@@ -192,7 +206,10 @@ impl Hosted {
     }
 
     pub fn render(&mut self, t0: f64, l: &mut [f32], r: &mut [f32]) {
-        let n = l.len();
+        let n = l.len().min(r.len());
+        if n == 0 {
+            return;
+        }
         let end = t0 + n as f64 / self.sr;
         self.queue.sort_by(|a, b| a.0.total_cmp(&b.0));
         let due = self.queue.partition_point(|e| e.0 < end);
