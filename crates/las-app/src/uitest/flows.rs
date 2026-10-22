@@ -765,3 +765,79 @@ fn the_export_file_follows_the_open_project_until_the_user_picks_one() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn every_window_fits_on_small_and_large_screens() {
+    for (w, hgt) in [(1366.0, 768.0), (1600.0, 1000.0), (1920.0, 1080.0)] {
+        let mut h = Harness::demo_sized(w, hgt);
+        let check = |h: &Harness, what: &str| {
+            let screen = h.ctx.content_rect();
+            for n in h
+                .nodes
+                .iter()
+                .filter(|n| n.role == eframe::egui::accesskit::Role::Window)
+            {
+                assert!(
+                    n.rect.bottom() <= screen.bottom() + 1.0
+                        && n.rect.top() >= screen.top() - 1.0
+                        && n.rect.right() <= screen.right() + 1.0
+                        && n.rect.left() >= -1.0,
+                    "{w}x{hgt} {what}: the window {:?} at {:?} is off the screen {screen:?}",
+                    n.label,
+                    n.rect
+                );
+            }
+        };
+        check(&h, "start");
+        type Open = fn(&mut crate::shell::Windows);
+        let all: [(&str, Open); 9] = [
+            ("settings", |o| o.settings = true),
+            ("keys", |o| o.keys = true),
+            ("about", |o| o.about = true),
+            ("history", |o| o.history = true),
+            ("export", |o| o.export = true),
+            ("analyser", |o| o.analyser = true),
+            ("mixer", |o| o.mixer = true),
+            ("roll", |o| o.roll = true),
+            ("playlist", |o| o.playlist = true),
+        ];
+        for (what, open) in all {
+            open(&mut h.app.shell.open);
+            h.run(6);
+            check(&h, what);
+        }
+        h.app.wf.palette.show("");
+        h.run(4);
+        check(&h, "quick search");
+        for (id, _, _) in las_project::create::INSTRUMENTS {
+            h.app.add_channel(id);
+            let ch = h.project().channels.len() - 1;
+            h.app.open_channel(ch);
+            h.run(6);
+            check(&h, id);
+        }
+    }
+}
+
+#[test]
+fn windows_shrink_to_fit_when_the_interface_is_made_bigger() {
+    let mut h = Harness::demo_sized(1920.0, 1080.0);
+    h.app.shell.open.mixer = true;
+    h.app.shell.open.roll = true;
+    h.run(4);
+    h.app.settings.ui_scale = 150;
+    h.run(10);
+    let screen = h.ctx.content_rect();
+    for n in h
+        .nodes
+        .iter()
+        .filter(|n| n.role == eframe::egui::accesskit::Role::Window)
+    {
+        assert!(
+            screen.expand(1.0).contains_rect(n.rect),
+            "the window {:?} at {:?} is off the screen {screen:?}",
+            n.label,
+            n.rect
+        );
+    }
+}

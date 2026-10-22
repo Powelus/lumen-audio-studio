@@ -1001,7 +1001,9 @@ pub fn draw(
     wheel_zoom(ui, ui.available_rect_before_wrap(), state);
     let (zoom, rowh) = (state.zoom, state.row);
     // the grid runs at least as wide as the window, like FL's
-    let width = (GUTTER + (ticks as f32 + bar as f32) * zoom).max(ui.available_width());
+    // (less the scroll bar beside it, or the window would widen by that every frame)
+    let room = ui.available_width() - ui.spacing().scroll.allocated_width() - 2.0;
+    let width = (GUTTER + (ticks as f32 + bar as f32) * zoom).max(room);
     let height = KEYS as f32 * rowh;
     let mut area = egui::ScrollArea::both()
         .auto_shrink([false, false])
@@ -1641,13 +1643,11 @@ fn lanes(ui: &mut Ui, notes: &[Note], state: &mut RollState, edits: &mut Vec<Edi
             ui.selectable_value(&mut state.lane, lane, name)
                 .on_hover_text(tip);
         }
-        ui.label(
-            egui::RichText::new(
-                "Drag over the bars to set them. Double click a note for all its properties.",
-            )
-            .weak()
-            .size(11.0),
-        );
+        // cut short where the window ends, so it never widens the window
+        const HELP: &str =
+            "Drag over the bars to set them. Double click a note for all its properties.";
+        ui.add(egui::Label::new(egui::RichText::new(HELP).weak().size(11.0)).truncate())
+            .on_hover_text(HELP);
     });
     let lane = state.lane;
     let (rect, lresp) = ui.allocate_exact_size(

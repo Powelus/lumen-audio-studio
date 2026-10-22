@@ -400,6 +400,11 @@ pub const FORMATS: [(&str, &str, u32); 7] = [
 ];
 
 pub struct Shell {
+    /// The size of the screen last frame (to notice it getting smaller).
+    pub last_screen: Option<Rect>,
+    /// The height of the keyboard under the synth panels (from the last frame), so the
+    /// panels scroll in what is left and the window fits the screen.
+    pub synth_footer: f32,
     pub tab: BrowserTab,
     pub browser: bool,
     pub open: Windows,
@@ -497,6 +502,8 @@ impl Shell {
             raise_synth: false,
             notice: None,
             placed: false,
+            synth_footer: 0.0,
+            last_screen: None,
         }
     }
 
@@ -1427,6 +1434,27 @@ impl App {
 
     /// The floating windows. `area` is the workspace they sit in.
     pub(crate) fn windows(&mut self, ctx: &egui::Context, area: Rect) {
+        // the screen got smaller (a smaller window, a larger interface scale): windows
+        // that no longer fit are laid out afresh, at their first places and sizes, so
+        // no edge, title or close button is left out of reach
+        let screen = ctx.content_rect();
+        let shrank = self.shell.last_screen.is_some_and(|s| {
+            screen.width() < s.width() - 1.0 || screen.height() < s.height() - 1.0
+        });
+        self.shell.last_screen = Some(screen);
+        if shrank {
+            let off = ctx.memory(|m| {
+                m.layer_ids()
+                    .filter(|l| l.order == egui::Order::Middle)
+                    .filter_map(|l| m.area_rect(l.id))
+                    .any(|r| !screen.expand(1.0).contains_rect(r))
+            });
+            if off {
+                ctx.memory_mut(|m| m.reset_areas());
+                ctx.data_mut(|d| d.clear());
+                self.shell.placed = false;
+            }
+        }
         let a = area.shrink(6.0);
         self.shell.steps.room_bottom = Some(area.bottom());
         let first = !self.shell.placed;
@@ -1445,9 +1473,13 @@ impl App {
         let mut open = self.shell.open;
         let before = open;
         let win = |title: &str, pos: egui::Pos2, size: egui::Vec2| {
+            // never bigger than the room the windows have: what does not fit scrolls or
+            // is cut, and every edge stays in reach to resize
             let mut w = egui::Window::new(title)
                 .constrain_to(area)
                 .resizable(true)
+                .max_width(area.width() - 16.0)
+                .max_height(area.height() - 12.0)
                 .default_size(size);
             if first {
                 w = w.default_pos(pos);
@@ -1819,13 +1851,13 @@ impl App {
         self.reference_bar(ui);
         let ch = self.project.channel;
         let selected = project.channels.get(ch).map(|c| (ch, c.name.as_str()));
-        let mut edits = mixer::draw(
-            ui,
-            &project,
-            &mut self.project.mixer_state,
-            &peaks,
-            selected,
-        );
+        // the strips scroll up and down when the window is lower than they are (a
+        // small screen, or a large interface scale)
+        let state = &mut self.project.mixer_state;
+        let mut edits = egui::ScrollArea::vertical()
+            .id_salt("mixer-scroll")
+            .show(ui, |ui| mixer::draw(ui, &project, state, &peaks, selected))
+            .inner;
         // the effects chain files
         let mut more = Vec::new();
         edits.retain(|e| match e {
@@ -1935,24 +1967,29 @@ impl App {
             ui.selectable_value(&mut self.view, crate::app::View::Effects, label);
         });
         ui.separator();
-        egui::ScrollArea::both().show(ui, |ui| {
-            if self.view == crate::app::View::Effects {
-                self.effects_view(ui);
-                return;
-            }
-            match self.inst {
-                Instrument::Facet => self.synth(ui),
-                Instrument::Mist => self.mist_panel(ui),
-                Instrument::Polaris => match self.face_id().as_str() {
-                    "monolith" => self.monolith_panel(ui),
-                    "zenith" => self.zenith_panel(ui),
-                    "triosc" => self.triosc_panel(ui),
-                    _ => self.polaris_panel(ui),
-                },
-            }
-        });
+        let footer = self.shell.synth_footer.max(60.0);
+        egui::ScrollArea::both()
+            .max_height((ui.available_height() - footer).max(160.0))
+            .show(ui, |ui| {
+                if self.view == crate::app::View::Effects {
+                    self.effects_view(ui);
+                    return;
+                }
+                match self.inst {
+                    Instrument::Facet => self.synth(ui),
+                    Instrument::Mist => self.mist_panel(ui),
+                    Instrument::Polaris => match self.face_id().as_str() {
+                        "monolith" => self.monolith_panel(ui),
+                        "zenith" => self.zenith_panel(ui),
+                        "triosc" => self.triosc_panel(ui),
+                        _ => self.polaris_panel(ui),
+                    },
+                }
+            });
+        let top = ui.cursor().top();
         ui.separator();
         self.keyboard(ui);
+        self.shell.synth_footer = ui.cursor().top() - top;
     }
 
     fn export_window(&mut self, ui: &mut Ui) {

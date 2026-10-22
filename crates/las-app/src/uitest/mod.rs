@@ -47,6 +47,11 @@ pub struct Harness {
 impl Harness {
     /// The app as it starts, with no sound device.
     pub fn new() -> Self {
+        Self::sized(1600.0, 1000.0)
+    }
+
+    /// The app on a screen of `w` by `h` pixels.
+    pub fn sized(w: f32, height: f32) -> Self {
         isolate();
         // each test (each runs on a thread of its own) has a config folder of its own
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -66,7 +71,7 @@ impl Harness {
             modifiers: Modifiers::NONE,
             nodes: Vec::new(),
             time: 0.0,
-            size: egui::vec2(1600.0, 1000.0),
+            size: egui::vec2(w, height),
             pointer: pos2(-10.0, -10.0),
             copied: Vec::new(),
         };
@@ -76,7 +81,11 @@ impl Harness {
 
     /// The app with the demo song open.
     pub fn demo() -> Self {
-        let mut h = Self::new();
+        Self::demo_sized(1600.0, 1000.0)
+    }
+
+    pub fn demo_sized(w: f32, height: f32) -> Self {
+        let mut h = Self::sized(w, height);
         h.app.open_demo();
         h.run(3);
         h

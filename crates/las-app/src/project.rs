@@ -600,7 +600,7 @@ impl App {
                 self.project.playlist.waves.insert(id, Arc::new(wave));
             }
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.toggle_value(&mut self.project.playlist.show_picker, "Picker")
                 .on_hover_text("Show or hide the list of patterns, audio clips and automation clips");
             ui.separator();
@@ -638,10 +638,11 @@ impl App {
                     }
                 });
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false))
+            // a fixed size, so a wrapped toolbar wraps it like the rest
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false))
                 .on_hover_text("Ctrl+wheel zooms around the pointer");
             ui.label("Height");
-            ui.add(egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
                 .on_hover_text("The height of the playlist's tracks");
             let has_loop = self.project.playlist.song_loop.is_some();
             let mut on = self.project.playlist.loop_on;
@@ -662,11 +663,11 @@ impl App {
                 let w = ui.clip_rect().width().max(400.0);
                 self.project.playlist.zoom = playlist::fit_zoom(&project, w);
             }
-            ui.label(
-                RichText::new("Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Drag along the ruler to loop, right click it for markers; Alt+Left/Right jump between markers. Drop a sound file here for an audio clip.")
-                    .weak()
-                    .size(11.0),
-            );
+            // the help fills what room is left and is cut short there (the whole of it
+            // on hover), so it never makes the window wider than the screen
+            const HELP: &str = "Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Drag along the ruler to loop, right click it for markers; Alt+Left/Right jump between markers. Drop a sound file here for an audio clip.";
+            ui.add(egui::Label::new(RichText::new(HELP).weak().size(11.0)).truncate())
+                .on_hover_text(HELP);
         });
         let edits = playlist::draw(
             ui,
@@ -696,9 +697,22 @@ impl App {
         let project = l.project.clone();
         // the channels to pick from, and the snap and zoom, sit above the roll
         ui.horizontal_wrapped(|ui| {
-            for (i, c) in project.channels.iter().enumerate() {
-                ui.selectable_value(&mut self.project.channel, i, &c.name);
-            }
+            // the channel whose notes show, picked from a list as in FL (a button for
+            // each channel would make the toolbar wider than the screen in a big song)
+            let current = project
+                .channels
+                .get(self.project.channel)
+                .map_or_else(String::new, |c| c.name.clone());
+            egui::ComboBox::from_id_salt("roll-channel")
+                .selected_text(current)
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for (i, c) in project.channels.iter().enumerate() {
+                        ui.selectable_value(&mut self.project.channel, i, &c.name);
+                    }
+                })
+                .response
+                .on_hover_text("The channel whose notes the roll shows and edits");
             ui.separator();
             for (t, name, tip) in [
                 (
@@ -839,7 +853,7 @@ impl App {
             .response
             .on_hover_text("Each click draws this chord on the key clicked");
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false))
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false))
                 .on_hover_text("Ctrl+wheel zooms in time around the pointer, Alt+wheel zooms the keys");
         });
         let edits = roll::draw(
