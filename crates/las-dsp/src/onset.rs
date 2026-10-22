@@ -167,9 +167,9 @@ mod tests {
         let mut out = vec![0f32; n];
         for &(t, level) in hits {
             let a = (t * sr) as usize;
-            for i in a..n {
-                let x = (i - a) as f64 / sr;
-                out[i] +=
+            for (k, o) in out[a.min(n)..].iter_mut().enumerate() {
+                let x = k as f64 / sr;
+                *o +=
                     level * ((x * 330.0 * std::f64::consts::TAU).sin() * (-x * 14.0).exp()) as f32;
             }
         }

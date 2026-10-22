@@ -1518,6 +1518,7 @@ impl App {
                 self.project.open_effect = None;
             }
         }
+        self.sample_editor_window(ctx, area);
         if let Some(id) = self.project.open_auto.clone() {
             let mut keep = true;
             win("Automation", a.min + vec2(220.0, 140.0), vec2(620.0, 380.0))

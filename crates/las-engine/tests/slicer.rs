@@ -17,8 +17,8 @@ fn drum_loop() -> Vec<f32> {
         let a = (f64::from(eighth) * 0.25 * SR) as usize;
         let kick = eighth % 4 == 0;
         let snare = eighth % 4 == 2;
-        for i in a..n {
-            let t = (i - a) as f64 / SR;
+        for (k, o) in out[a..n].iter_mut().enumerate() {
+            let t = k as f64 / SR;
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 * 2.0 - 1.0;
             let v = if kick {
@@ -28,7 +28,7 @@ fn drum_loop() -> Vec<f32> {
             } else {
                 f64::from(noise) * (-t * 60.0).exp() * 0.25
             };
-            out[i] += v as f32;
+            *o += v as f32;
         }
     }
     out
