@@ -2680,10 +2680,7 @@ mod tests {
             );
         }
         let moved = p.playlist.clips.iter().find(|c| c.id == other.id).unwrap();
-        assert!(
-            moved.track >= 1 + used.len(),
-            "the clip in the way moved down"
-        );
+        assert!(moved.track > used.len(), "the clip in the way moved down");
         assert!(p.pattern(&pat.id).is_some(), "the old pattern stays");
         // a clip of a one-channel pattern stays as it is
         let id = made[0].id.clone();

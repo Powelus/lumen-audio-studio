@@ -200,15 +200,27 @@ pub fn lfo_points(from: f64, to: f64, lfo: &Lfo) -> Vec<AutomationPoint> {
         match lfo.shape {
             LfoShape::Sine => {
                 // halves of a cosine from the bottom to the top and back
-                out.push(pt(t, if k % 2 == 0 { lo } else { hi }, CurveKind::Smooth));
+                out.push(pt(
+                    t,
+                    if k.is_multiple_of(2) { lo } else { hi },
+                    CurveKind::Smooth,
+                ));
                 t += half;
             }
             LfoShape::Triangle => {
-                out.push(pt(t, if k % 2 == 0 { lo } else { hi }, CurveKind::Single));
+                out.push(pt(
+                    t,
+                    if k.is_multiple_of(2) { lo } else { hi },
+                    CurveKind::Single,
+                ));
                 t += half;
             }
             LfoShape::Square => {
-                out.push(pt(t, if k % 2 == 0 { hi } else { lo }, CurveKind::Hold));
+                out.push(pt(
+                    t,
+                    if k.is_multiple_of(2) { hi } else { lo },
+                    CurveKind::Hold,
+                ));
                 t += half;
             }
             LfoShape::Saw => {
@@ -511,7 +523,7 @@ pub fn draw(ui: &mut Ui, clip: &AutomationClip, state: &mut AutoState) -> Vec<Au
         .map(|(t, v)| pos2(x_of(t), y_of(v)))
         .collect();
     if line.len() > 1 {
-        for w in line.windows(2) {
+        for w in line.windows(2).filter(|w| w[1].x - w[0].x >= 0.5) {
             painter.add(egui::Shape::convex_polygon(
                 vec![
                     w[0],

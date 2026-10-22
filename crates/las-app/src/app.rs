@@ -317,6 +317,11 @@ impl App {
                 let _ = crate::menus::import_audio_clip(p, samples, "Demo audio", wav, 0.0, track);
             });
         }
+        // `--arrange-demo` adds song markers, a loop, and a curved automation clip with
+        // its editor open (screenshots of the arrangement tools)
+        if std::env::args().any(|a| a == "--arrange-demo") {
+            app.arrange_demo();
+        }
         if std::env::args().any(|a| a == "--analyser-demo") {
             app.analyser_demo();
         }
@@ -326,6 +331,81 @@ impl App {
             app.shell.open.synth = true;
         }
         app
+    }
+
+    /// Markers, a loop over the second four bars and a filter sweep with FL curves.
+    fn arrange_demo(&mut self) {
+        use crate::playlist::PlEdit;
+        let bar = f64::from(las_project::PPQ) * 4.0;
+        let has = self
+            .project
+            .loaded
+            .as_ref()
+            .is_some_and(|l| l.project.markers.as_ref().is_some_and(|m| !m.is_empty()));
+        let mut edits = vec![PlEdit::Begin];
+        if !has {
+            for k in [0.0, 4.0, 8.0, 12.0] {
+                edits.push(PlEdit::AddMarker(k * bar));
+            }
+        }
+        edits.push(PlEdit::SongLoop(Some((4.0 * bar, 8.0 * bar))));
+        self.project.edit_playlist(&edits);
+        if !has {
+            let names = ["Intro", "Verse", "Drop", "Outro"];
+            self.project.modify(false, |p| {
+                for (m, n) in p.markers.iter_mut().flatten().zip(names) {
+                    m.name = n.into();
+                }
+            });
+        }
+        self.shell.open.playlist = true;
+        self.shell.open.rack = false;
+        self.project.playlist.zoom = 0.1;
+        self.project.create_automation(&crate::auto::AutoRequest {
+            target: crate::auto::mixer_target(0, "volume"),
+            name: "Master sweep".into(),
+            start: 0.3,
+        });
+        let Some(id) = self.project.open_auto.clone() else {
+            return;
+        };
+        use crate::auto::AutoEdit;
+        use las_project::CurveKind;
+        let (b, len) = (bar, bar * 4.0);
+        let mut e = vec![AutoEdit::Begin];
+        for (t, v) in [(b * 0.75, 0.9), (b * 1.5, 0.45), (b * 2.0, 0.7)] {
+            e.push(AutoEdit::Add {
+                clip: id.clone(),
+                t,
+                v,
+            });
+        }
+        for (i, c, t) in [
+            (0, CurveKind::Single, 0.7),
+            (1, CurveKind::Double, 0.6),
+            (2, CurveKind::Stairs, 0.0),
+            (3, CurveKind::Hold, 0.0),
+        ] {
+            e.push(AutoEdit::Curve {
+                clip: id.clone(),
+                index: i,
+                curve: c,
+            });
+            e.push(AutoEdit::Tension {
+                clip: id.clone(),
+                index: i,
+                tension: t,
+            });
+        }
+        e.push(AutoEdit::Lfo {
+            clip: id.clone(),
+            from: b * 2.5,
+            to: len,
+            lfo: crate::auto::Lfo::default(),
+        });
+        self.project.edit_auto(&e);
+        self.project.auto_state.lfo_on = true;
+        self.project.auto_state.lfo_range = Some((b * 2.5, len));
     }
 
     pub(crate) fn load_preset(&mut self, inst: Instrument, i: usize) {
