@@ -115,7 +115,11 @@ pub enum Command {
     },
     /// A controller (mod wheel, pitch bend, aftertouch) moved on one of the project's
     /// channels.
-    PlayerController { channel: usize, cc: Cc, value: f64 },
+    PlayerController {
+        channel: usize,
+        cc: Cc,
+        value: f64,
+    },
 }
 
 /// Meters and counters the audio thread publishes.

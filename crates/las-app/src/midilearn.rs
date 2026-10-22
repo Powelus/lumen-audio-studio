@@ -165,8 +165,8 @@ fn set_instrument_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) 
     use las_engine::fxauto::map_automation;
     use las_engine::pluginparams::plugin_param_def;
     const BUILT_IN: [&str; 10] = [
-        "sampler", "nebula", "polaris", "vortex", "monolith", "zenith", "triosc", "facet",
-        "mist", "lumapad",
+        "sampler", "nebula", "polaris", "vortex", "monolith", "zenith", "triosc", "facet", "mist",
+        "lumapad",
     ];
     if path.is_empty() || path.starts_with("p.") || !BUILT_IN.contains(&plugin_id) {
         return false;

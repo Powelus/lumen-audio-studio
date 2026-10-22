@@ -79,7 +79,10 @@ fn the_sample_tab_changes_the_sound() {
     differs(&plain, &play(json!({ "root": 55 })), "the root key");
     differs(&plain, &play(json!({ "reverse": true })), "reverse");
     let late = play(json!({ "start": 0.5 }));
-    assert!(energy(&late) < energy(&plain) * 0.8, "a later start skips the attack");
+    assert!(
+        energy(&late) < energy(&plain) * 0.8,
+        "a later start skips the attack"
+    );
     // a looped sample keeps sounding to the end of the note
     let s = (1.9 * SR) as usize;
     let e = (2.0 * SR) as usize;
@@ -98,7 +101,10 @@ fn the_envelope_tab_changes_the_sound() {
     let plain = play(json!({}));
     let first = (0.1 * SR) as usize;
     let slow = play(json!({ "attack": 1.0 }));
-    assert!(energy(&slow[..first]) < energy(&plain[..first]) * 0.2, "a slow attack");
+    assert!(
+        energy(&slow[..first]) < energy(&plain[..first]) * 0.2,
+        "a slow attack"
+    );
     let low = play(json!({ "sustain": 0.1, "decay": 0.05 }));
     assert!(energy(&low) < energy(&plain) * 0.5, "a low sustain");
     // the filter envelope opens a closed filter
@@ -170,5 +176,8 @@ fn the_arpeggiator_and_chords_change_the_sound() {
     let major = play(json!({ "arp": { "chord": "major" } }));
     differs(&one, &major, "a chord preset");
     let as_chord = render(&project(json!({}), &chord, None));
-    assert!(diff(&major, &as_chord) < 1e-3, "major is the root, a third and a fifth");
+    assert!(
+        diff(&major, &as_chord) < 1e-3,
+        "major is the root, a third and a fifth"
+    );
 }

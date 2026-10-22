@@ -159,7 +159,7 @@ pub fn adsr_editor(
     let p = pal();
     let size = vec2(ui.available_width().clamp(220.0, 420.0), 110.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    let inner = rect.shrink2(vec2(8.0, 10.0));
+    let inner = Rect::from_min_max(rect.min + vec2(10.0, 18.0), rect.max - vec2(10.0, 8.0));
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, p.well_deep);
     // a grid of quarters, as the segments are laid out
@@ -198,7 +198,12 @@ pub fn adsr_editor(
         painter.circle_filled(pts[i], if lit { 6.0 } else { 4.5 }, color);
         painter.circle_stroke(pts[i], 6.5, Stroke::new(1.0, p.text));
         painter.text(
-            pts[i] + vec2(0.0, if i == 1 { 12.0 } else { -12.0 }),
+            pts[i]
+                + if i == 2 {
+                    vec2(12.0, 10.0)
+                } else {
+                    vec2(0.0, -12.0)
+                },
             egui::Align2::CENTER_CENTER,
             label,
             egui::FontId::proportional(10.0),
@@ -246,8 +251,16 @@ pub fn adsr_editor(
 /// The arpeggiator modes: state value (none for off), label, tooltip.
 pub const ARP_MODES: [(&str, &str, &str); 5] = [
     ("", "Off", "Notes play as they are"),
-    ("up", "Up", "Held notes play one after another, lowest first"),
-    ("down", "Down", "Held notes play one after another, highest first"),
+    (
+        "up",
+        "Up",
+        "Held notes play one after another, lowest first",
+    ),
+    (
+        "down",
+        "Down",
+        "Held notes play one after another, highest first",
+    ),
     ("updown", "Up & down", "Up, then back down"),
     ("random", "Random", "Held notes play in a random order"),
 ];
@@ -276,7 +289,10 @@ pub fn arp_tab(ui: &mut Ui, state: &mut Value) -> bool {
     let arp = &mut state["arp"];
     let on = arp.get("on").and_then(Value::as_bool).unwrap_or(false);
     let mode = if on {
-        arp.get("mode").and_then(Value::as_str).unwrap_or("up").to_string()
+        arp.get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("up")
+            .to_string()
     } else {
         String::new()
     };
@@ -310,7 +326,8 @@ pub fn arp_tab(ui: &mut Ui, state: &mut Value) -> bool {
             .num_columns(2)
             .spacing(vec2(12.0, 6.0))
             .show(ui, |ui| {
-                ui.label("Range").on_hover_text("How many octaves the notes climb through");
+                ui.label("Range")
+                    .on_hover_text("How many octaves the notes climb through");
                 let mut oct = num(arp, "octaves", 1.0).round().clamp(1.0, 4.0) as i32;
                 if ui
                     .add(egui::Slider::new(&mut oct, 1..=4).suffix(" oct"))
@@ -321,7 +338,8 @@ pub fn arp_tab(ui: &mut Ui, state: &mut Value) -> bool {
                     changed = true;
                 }
                 ui.end_row();
-                ui.label("Time").on_hover_text("How long each arpeggio note is, in steps");
+                ui.label("Time")
+                    .on_hover_text("How long each arpeggio note is, in steps");
                 let steps = num(arp, "div", 0.25) * 4.0;
                 let shown = ARP_TIMES
                     .iter()
@@ -341,7 +359,8 @@ pub fn arp_tab(ui: &mut Ui, state: &mut Value) -> bool {
                         }
                     });
                 ui.end_row();
-                ui.label("Gate").on_hover_text("How much of each step a note lasts");
+                ui.label("Gate")
+                    .on_hover_text("How much of each step a note lasts");
                 let mut gate = (num(arp, "gate", 0.7) * 100.0).clamp(5.0, 100.0);
                 if ui
                     .add(egui::Slider::new(&mut gate, 5.0..=100.0).suffix(" %"))
@@ -352,7 +371,8 @@ pub fn arp_tab(ui: &mut Ui, state: &mut Value) -> bool {
                     changed = true;
                 }
                 ui.end_row();
-                ui.label("Repeat").on_hover_text("How many times each note plays before the next");
+                ui.label("Repeat")
+                    .on_hover_text("How many times each note plays before the next");
                 let mut rep = num(arp, "repeat", 1.0).round().clamp(1.0, 8.0) as i32;
                 if ui
                     .add(egui::Slider::new(&mut rep, 1..=8).suffix("x"))
@@ -372,7 +392,11 @@ pub fn arp_tab(ui: &mut Ui, state: &mut Value) -> bool {
             .weak()
             .size(11.0),
     );
-    let chord = arp.get("chord").and_then(Value::as_str).unwrap_or("").to_string();
+    let chord = arp
+        .get("chord")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     ui.horizontal_wrapped(|ui| {
         for (id, name, notes) in las_engine::arp::CHORDS {
             let tip = if notes.len() == 1 {
@@ -380,7 +404,11 @@ pub fn arp_tab(ui: &mut Ui, state: &mut Value) -> bool {
             } else {
                 let names: Vec<String> = notes
                     .iter()
-                    .map(|n| note_name((60 + n) as u8).trim_end_matches(char::is_numeric).to_string())
+                    .map(|n| {
+                        note_name((60 + n) as u8)
+                            .trim_end_matches(char::is_numeric)
+                            .to_string()
+                    })
                     .collect();
                 format!("On C: {}", names.join(" "))
             };
@@ -424,9 +452,7 @@ impl App {
         let sample = c.sample_id.clone().unwrap_or_default();
         let p = pal();
         let tab_id = egui::Id::unique(("chan-settings-tab", channel));
-        let mut tab: Tab = ui
-            .data(|m| m.get_temp(tab_id))
-            .unwrap_or_default();
+        let mut tab: Tab = ui.data(|m| m.get_temp(tab_id)).unwrap_or_default();
         if let Some(t) = ASK_TAB.with(std::cell::Cell::take) {
             tab = t;
         }
@@ -454,20 +480,17 @@ impl App {
         ui.separator();
         let mut changes: Vec<(&'static str, Value)> = Vec::new();
         let mut new_state: Option<Value> = None;
-        egui::ScrollArea::vertical()
-            .id_salt(("chan-settings", channel))
-            .auto_shrink([false, true])
-            .show(ui, |ui| match tab {
-                Tab::Sample => self.sample_tab(ui, channel, &state, &sample, &mut changes),
-                Tab::Envelope => envelope_tab(ui, &state, &mut changes),
-                Tab::Misc => misc_tab(ui, &state, &mut changes),
-                Tab::Arp => {
-                    let mut st = state.clone();
-                    if arp_tab(ui, &mut st) {
-                        new_state = Some(st);
-                    }
+        match tab {
+            Tab::Sample => self.sample_tab(ui, channel, &state, &sample, &mut changes),
+            Tab::Envelope => envelope_tab(ui, &state, &mut changes),
+            Tab::Misc => misc_tab(ui, &state, &mut changes),
+            Tab::Arp => {
+                let mut st = state.clone();
+                if arp_tab(ui, &mut st) {
+                    new_state = Some(st);
                 }
-            });
+            }
+        }
         if let Some(st) = new_state {
             self.project.modify_coalesced("sampler", move |pr| {
                 if let Some(ch) = pr.channels.get_mut(channel) {
@@ -663,16 +686,17 @@ impl App {
                 ui.horizontal(|ui| {
                     let root = num(state, "root", 60.0).round().clamp(0.0, 127.0) as i32;
                     let mut r = root;
-                    ui.label("Root key").on_hover_text(
-                        "The key at which the sample plays at its own pitch",
-                    );
+                    ui.label("Root key")
+                        .on_hover_text("The key at which the sample plays at its own pitch");
                     if ui
                         .add(
                             egui::DragValue::new(&mut r)
                                 .range(0..=127)
                                 .custom_formatter(|n, _| note_name(n as u8)),
                         )
-                        .on_hover_text("Drag or type: the key at which the sample plays at its own pitch")
+                        .on_hover_text(
+                            "Drag or type: the key at which the sample plays at its own pitch",
+                        )
                         .changed()
                     {
                         changes.push(("root", json!(r)));
@@ -712,7 +736,13 @@ fn envelope_tab(ui: &mut Ui, state: &Value, changes: &mut Vec<(&'static str, Val
                 ("release", json!(r)),
             ]);
         }
-        env_knobs(ui, state, ["attack", "decay", "sustain", "release"], [0.001, 0.3, 1.0, 0.08], changes);
+        env_knobs(
+            ui,
+            state,
+            ["attack", "decay", "sustain", "release"],
+            [0.001, 0.3, 1.0, 0.08],
+            changes,
+        );
 
         let ui = &mut cols[1];
         ui.horizontal(|ui| {
@@ -800,7 +830,11 @@ fn envelope_tab(ui: &mut Ui, state: &Value, changes: &mut Vec<(&'static str, Val
             for k in knobs {
                 let mut v = k.value;
                 if knob(ui, &mut v, k.lo..=k.hi, k.default, k.label, k.log, &k.show) {
-                    let v = if k.key == "fltEnvAmt" && v.abs() < 0.05 { 0.0 } else { v };
+                    let v = if k.key == "fltEnvAmt" && v.abs() < 0.05 {
+                        0.0
+                    } else {
+                        v
+                    };
                     changes.push((k.key, json!(v)));
                 }
             }
@@ -864,7 +898,9 @@ fn misc_tab(ui: &mut Ui, state: &Value, changes: &mut Vec<(&'static str, Value)>
             changes.push(("velToVol", json!(v)));
         }
         let mut b = num(state, "boost", 0.0);
-        if knob(ui, &mut b, -12.0..=12.0, 0.0, "Boost", false, &|v| format!("{v:+.1} dB")) {
+        if knob(ui, &mut b, -12.0..=12.0, 0.0, "Boost", false, &|v| {
+            format!("{v:+.1} dB")
+        }) {
             changes.push(("boost", json!(b)));
         }
     });

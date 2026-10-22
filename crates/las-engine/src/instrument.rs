@@ -568,15 +568,7 @@ impl Instrument {
     ) {
         self.gate.at(time);
         if let Core::Sampler(s) = &mut self.core {
-            s.play_note(
-                key as i32,
-                vel,
-                time,
-                Some(duration),
-                fine,
-                pan,
-                rel_scale,
-            );
+            s.play_note(key as i32, vel, time, Some(duration), fine, pan, rel_scale);
             return;
         }
         let off = time + duration.max(0.005);
@@ -893,7 +885,8 @@ impl Instrument {
                                 .iter()
                                 .map(|&(t, v)| (t, d0 + v.clamp(0.0, 1.0)))
                                 .collect();
-                            l.engine.ramp(&format!("filters.{fi}.drive"), &values, first);
+                            l.engine
+                                .ramp(&format!("filters.{fi}.drive"), &values, first);
                         }
                     } else if m == "width" || m == "detune" {
                         // width and detune scale each oscillator's spread and detune (0.5
@@ -916,7 +909,9 @@ impl Instrument {
                             let p0 = l.base_pan;
                             let values: Vec<(f64, f64)> = pts
                                 .iter()
-                                .map(|&(t, v)| (t, (p0 * (v * 2.0).clamp(0.0, 2.0)).clamp(-1.0, 1.0)))
+                                .map(|&(t, v)| {
+                                    (t, (p0 * (v * 2.0).clamp(0.0, 2.0)).clamp(-1.0, 1.0))
+                                })
                                 .collect();
                             l.pan.ramp(&values, first);
                         }
@@ -1022,7 +1017,10 @@ mod tests {
     fn hold_automated(state: &Value, path: &str, v: f64, frames: usize) -> (Vec<f32>, Vec<f32>) {
         let mut inst = nebula(state);
         inst.set_bpm(120.0);
-        assert!(inst.automate(path, &[(0.0, v), (10.0, v)], true, 128), "{path}");
+        assert!(
+            inst.automate(path, &[(0.0, v), (10.0, v)], true, 128),
+            "{path}"
+        );
         inst.note_on(60.0, 0.9, 0.0);
         let (mut l, mut r) = (vec![0.0; frames], vec![0.0; frames]);
         for (i, (cl, cr)) in l.chunks_mut(256).zip(r.chunks_mut(256)).enumerate() {

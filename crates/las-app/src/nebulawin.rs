@@ -275,7 +275,8 @@ impl App {
                 });
             });
             ui.vertical(|ui| {
-                ui.set_width(RIGHT);
+                // narrower when the window is (at 720p the pages wrap instead of clipping)
+                ui.set_width(RIGHT.min(ui.available_width() - 4.0).max(560.0));
                 lcd(ui, bank, current, &st, list.len());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -509,7 +510,7 @@ fn main_page(
     crate::skin::group(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new("MACROS").size(10.5).strong());
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             for (k, label, d) in MACROS {
                 let mut v = num(st.get("macros").and_then(|m| m.get(k)), d);

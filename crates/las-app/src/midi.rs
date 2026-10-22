@@ -368,7 +368,7 @@ mod tests {
         hub.feed(&[0xB0, 20, 5]);
         assert!(rx.pop().is_err(), "a plain knob is not for the synth");
         let got = hub.drain();
-        assert_eq!(got.len(), 3);
+        assert_eq!(got.len(), 4, "the keys, the mod wheel and the knob");
         assert!(hub.drain().is_empty());
         assert!(hub.active());
     }

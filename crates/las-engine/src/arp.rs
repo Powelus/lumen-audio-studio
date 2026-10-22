@@ -47,10 +47,7 @@ pub const CHORDS: [(&str, &str, &[i32]); 13] = [
 
 /// The notes above the root of a chord preset (just the root for none or one not known).
 pub fn chord_intervals(id: &str) -> &'static [i32] {
-    CHORDS
-        .iter()
-        .find(|c| c.0 == id)
-        .map_or(&[0], |c| c.2)
+    CHORDS.iter().find(|c| c.0 == id).map_or(&[0], |c| c.2)
 }
 
 impl Default for ArpState {

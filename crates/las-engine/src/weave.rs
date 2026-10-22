@@ -173,15 +173,9 @@ mod tests {
         );
         let state = serde_json::json!({ "patch": patch.to_json() });
         let mut tables = las_dsp::wavetable::TableLibrary::new();
-        let mut inst = crate::instrument::Instrument::new(
-            WEAVE_ID,
-            &state,
-            SR,
-            &mut tables,
-            None,
-            Vec::new(),
-        )
-        .unwrap();
+        let mut inst =
+            crate::instrument::Instrument::new(WEAVE_ID, &state, SR, &mut tables, None, Vec::new())
+                .unwrap();
         inst.note_on(60.0, 1.0, 0.0);
         let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
         inst.render(0.0, &mut l, &mut r);
