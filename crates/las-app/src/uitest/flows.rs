@@ -1092,3 +1092,79 @@ fn mixer_faders_and_knobs_keep_their_clicks_inside_a_strip() {
     h.click_at(pill[2].rect.center());
     assert_eq!(h.app.project.mixer_state.selected, 2);
 }
+
+#[test]
+fn sample_editor_reverse_trim_undo_and_the_edit_is_saved() {
+    let mut h = Harness::demo();
+    let o = &mut h.app.shell.open;
+    o.rack = false;
+    o.playlist = false;
+    o.mixer = false;
+    h.app.add_factory_channel("factory:kick-punch", "Kick Punch");
+    let ch = h.project().channels.len() - 1;
+    let id = h.project().channels[ch].id.clone();
+    crate::sampleedit::request(crate::sampleedit::Request::Edit(id.clone()));
+    h.run(4);
+    assert!(h.app.sample_editor.is_some(), "the editor opens");
+    let sample = |h: &Harness| h.project().channels[ch].sample_id.clone();
+    let s0 = sample(&h);
+    h.click("Reverse");
+    let s1 = sample(&h);
+    assert_ne!(s0, s1, "Reverse makes a new sound for the channel");
+    h.click("Undo");
+    assert_eq!(sample(&h), s0, "the editor's Undo puts the sound back");
+    h.click("Redo");
+    assert_eq!(sample(&h), s1);
+    // select the first half of the waveform and trim to it
+    let win = h.find_prefix("Sample editor:").into_iter().find(|n| n.role == eframe::egui::accesskit::Role::Window).unwrap().rect;
+    let wave = h.find_prefix("Drag across the waveform to select")[0].rect;
+    assert!(win.contains_rect(wave));
+    // below the marker strip at its top
+    let wave = eframe::egui::Rect::from_min_max(wave.min + eframe::egui::vec2(0.0, 40.0), wave.max);
+    let frames = |h: &Harness| h.app.sample_editor.as_ref().unwrap().audio.channels[0].len();
+    let f0 = frames(&h);
+    h.drag(wave.left_center() + eframe::egui::vec2(10.0, 0.0), wave.center());
+    assert!(h.app.sample_editor.as_ref().unwrap().sel.is_some(), "a drag selects");
+    h.click("Trim to selection");
+    let f1 = frames(&h);
+    assert!(f1 < f0 * 3 / 4, "trimmed: {f0} -> {f1}");
+    // the edited sound is in the saved project
+    let dir = std::env::temp_dir().join(format!("las-uitest-se-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("edited.las").to_string_lossy().into_owned();
+    h.app.project.save_to(&path).unwrap();
+    let want = sample(&h);
+    h.app.open_project(&path);
+    h.run(3);
+    assert_eq!(sample(&h), want);
+    let l = h.app.project.loaded.as_ref().unwrap();
+    assert!(l.samples.contains_key(want.as_deref().unwrap()), "the edited sound was saved with the project");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn settings_theme_and_windows_are_kept_after_a_restart() {
+    let mut h = Harness::demo();
+    h.menu(&["Options", "Settings..."]);
+    h.run(3);
+    assert!(!h.app.settings.count_in);
+    let cb = h.get("Count in one bar before recording");
+    h.click_at(cb.rect.center());
+    assert!(h.app.settings.count_in, "the box is ticked");
+    h.app.shell.open.settings = false;
+    // a theme from the menu
+    let themes = crate::theme::themes();
+    let other = themes.iter().find(|t| t.id != h.app.shell.theme).unwrap();
+    let (id, name) = (other.id.to_string(), other.name.to_string());
+    h.menu(&["Options", "Theme", &name]);
+    assert_eq!(h.app.shell.theme, id);
+    // the windows
+    h.key(eframe::egui::Key::F9);
+    h.key(eframe::egui::Key::F6);
+    h.run(2);
+    let (mixer, rack) = (h.app.shell.open.mixer, h.app.shell.open.rack);
+    let h = h.restart();
+    assert!(h.app.settings.count_in, "the setting is kept");
+    assert_eq!(h.app.shell.theme, id, "the theme is kept");
+    assert_eq!((h.app.shell.open.mixer, h.app.shell.open.rack), (mixer, rack), "the windows are kept");
+}

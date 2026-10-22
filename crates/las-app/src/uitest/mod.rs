@@ -59,6 +59,17 @@ impl Harness {
         let dir = std::env::temp_dir().join(format!("las-uitest-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         crate::presets::TEST_CONFIG.with(|c| *c.borrow_mut() = Some(dir));
+        Self::start(w, height)
+    }
+
+    /// Quit and start the app again (with the same settings folder), as a user does.
+    pub fn restart(self) -> Self {
+        let size = self.size;
+        drop(self);
+        Self::start(size.x, size.y)
+    }
+
+    fn start(w: f32, height: f32) -> Self {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
