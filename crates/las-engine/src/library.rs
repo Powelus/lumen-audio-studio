@@ -67,6 +67,7 @@ pub struct Library {
     /// The bytes of the samples not decoded yet (the rest are not copied).
     raw: HashMap<String, Vec<u8>>,
     cache: HashMap<String, Option<Arc<Audio>>>,
+    peaks: HashMap<String, f32>,
     sample_rate: f64,
 }
 
@@ -88,6 +89,7 @@ impl Library {
             keys,
             raw,
             cache: HashMap::new(),
+            peaks: HashMap::new(),
             sample_rate,
         }
     }
@@ -132,6 +134,21 @@ impl Library {
 }
 
 impl Library {
+    /// The loudest sample of a source (any channel), 0 when silent or missing.
+    pub fn peak(&mut self, id: &str) -> f32 {
+        if let Some(&p) = self.peaks.get(id) {
+            return p;
+        }
+        let p = self.get(id).map_or(0.0, |a| {
+            a.channels
+                .iter()
+                .flat_map(|c| c.iter())
+                .fold(0.0f32, |m, v| m.max(v.abs()))
+        });
+        self.peaks.insert(id.to_string(), p);
+        p
+    }
+
     /// A clip's source reversed and/or time stretched (`factor` 1 is no stretch).
     pub fn processed(&mut self, id: &str, reverse: bool, factor: f64) -> Option<Arc<Audio>> {
         let src = self.get(id)?;

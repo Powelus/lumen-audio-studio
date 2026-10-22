@@ -71,9 +71,13 @@ pub enum View {
 
 pub struct App {
     pub(crate) audio: Option<Audio>,
-    pub(crate) _midi: Option<midir::MidiInputConnection<()>>,
+    /// MIDI input: the keyboards and controllers listened to.
+    pub(crate) midi: crate::midi::MidiHub,
     pub(crate) status: String,
-    pub(crate) midi_name: Option<String>,
+    /// The notes of the take being recorded, when recording.
+    pub(crate) take: crate::noterec::NoteTake,
+    /// The device lists Settings shows (read when it opens, and on Refresh).
+    pub(crate) devices: Option<crate::settings::Devices>,
     pub(crate) inst: Instrument,
     /// Defaults and the current patch of each instrument: Facet, Mist, Polaris.
     pub(crate) defaults: [Value; 3],
@@ -146,20 +150,27 @@ fn full_defaults() -> [Value; 3] {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         style(&cc.egui_ctx);
-        let (audio, midi, status, midi_name) = match Audio::start() {
+        let settings = crate::settings::Settings::load();
+        let mut midi = crate::midi::MidiHub::new();
+        midi.set_repaint(&cc.egui_ctx);
+        let (audio, status) = match Audio::start_with(&settings.audio) {
             Ok((audio, tx)) => {
-                let status = format!("{} at {} Hz", audio.device, audio.sample_rate);
-                let m = crate::midi::connect(tx);
-                let name = m.as_ref().map(|(_, n)| n.clone());
-                (Some(audio), m.map(|(c, _)| c), status, name)
+                midi.set_sender(Some(tx));
+                let status = audio
+                    .note
+                    .clone()
+                    .unwrap_or_else(|| format!("{} at {} Hz", audio.device, audio.sample_rate));
+                (Some(audio), status)
             }
-            Err(e) => (None, None, e, None),
+            Err(e) => (None, e),
         };
+        midi.connect(&settings.midi_input);
         let mut app = Self {
             audio,
-            _midi: midi,
+            midi,
             status,
-            midi_name,
+            take: Default::default(),
+            devices: None,
             inst: Instrument::Polaris,
             defaults: full_defaults(),
             patches: full_defaults(),
@@ -187,7 +198,7 @@ impl App {
             bound: None,
             synth_dirty: false,
             quit: false,
-            settings: crate::settings::Settings::load(),
+            settings,
             folders: Default::default(),
             autosaved: Default::default(),
             analyser: None,
@@ -1545,6 +1556,9 @@ impl App {
     /// A key played from the screen or the computer keyboard: the project's selected
     /// channel while its page is open, otherwise the synth on the other pages.
     pub(crate) fn note(&mut self, key: u8, vel: f64, on: bool) {
+        if self.shell.keys_to_project() {
+            self.record_key(key, vel, on);
+        }
         let c = if self.shell.keys_to_project() && self.project.has_player {
             Command::PlayerNote {
                 channel: self.project.channel,
@@ -1640,10 +1654,11 @@ impl App {
                 "Computer keys A to ; play {}. Z and X change octave.",
                 note_name((12 * (self.octave + 1)).clamp(0, 127) as u8)
             ));
-            if let Some(m) = &self.midi_name {
-                ui.label(format!("MIDI: {m}"));
+            if self.midi.names.is_empty() {
+                ui.label("No MIDI keyboard connected")
+                    .on_hover_text("Plug one in, then choose it in Settings > MIDI");
             } else {
-                ui.label("No MIDI keyboard found");
+                ui.label(format!("MIDI: {}", self.midi.names.join(", ")));
             }
         });
         let mut held: Vec<u8> = self.typed.iter().map(|(_, n)| *n).collect();
@@ -1699,6 +1714,7 @@ impl eframe::App for App {
                 .collect()
         });
         self.poll_project(ctx);
+        self.poll_midi();
         self.sync_bound();
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1760,7 +1776,7 @@ impl eframe::App for App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button("\u{2699} Settings")
-                            .on_hover_text("Folders, autosave and the size of everything")
+                            .on_hover_text("Audio and MIDI devices, recording, folders, autosave and the size of everything")
                             .clicked()
                         {
                             self.shell.open.settings = true;
@@ -1798,6 +1814,7 @@ impl eframe::App for App {
             .show(ui, |ui| ui.max_rect())
             .inner;
         self.windows(&ctx, area);
+        self.learn_banner(&ctx);
     }
 }
 

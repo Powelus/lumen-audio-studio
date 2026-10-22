@@ -89,6 +89,8 @@ pub struct ProjectState {
     last_edit: Option<(String, std::time::Instant)>,
     /// The player no longer matches the project and is rebuilt when things are quiet.
     stale: bool,
+    /// Count in (beats, tempo) before the player that is being built starts.
+    pub count_in: Option<(u32, f64)>,
 }
 
 impl ProjectState {
@@ -791,11 +793,27 @@ impl App {
         };
         self.stop_project();
         self.project.looping = matches!(mode, PlayMode::Pattern(_));
+        let rec = self.shell.record;
+        let s = &self.settings;
+        self.project.count_in = None;
+        if rec && s.count_in {
+            if let Some(l) = &self.project.loaded {
+                let p = &l.project;
+                self.project.count_in = Some((p.time_sig.0.clamp(1, 16), p.bpm.max(1.0)));
+            }
+        }
         self.project.start(mode, Start::At(from), rate);
-        if self.shell.record {
+        if rec && self.settings.record_notes {
+            self.begin_note_take(from);
+        }
+        if rec && self.settings.record_audio {
             if self.shell.recorder.is_none() {
-                match crate::record::Recorder::open() {
+                match crate::record::Recorder::open(&self.settings.audio.input) {
                     Ok(r) => self.shell.recorder = Some(r),
+                    // recording notes only is fine: just say so
+                    Err(e) if self.settings.record_notes => {
+                        self.shell.status = format!("Recording notes only ({e})");
+                    }
                     Err(e) => self.project.error = Some(format!("Recording: {e}")),
                 }
             }
@@ -804,6 +822,8 @@ impl App {
                 self.shell.record_from = if self.project.looping { 0.0 } else { from };
                 self.shell.status = "Recording...".into();
             }
+        } else if rec {
+            self.shell.status = "Recording notes: play your MIDI or computer keyboard".into();
         }
     }
 
@@ -811,6 +831,7 @@ impl App {
         if self.project.has_player {
             self.send(Command::PlayerStop);
         }
+        self.end_note_take();
         let take = self
             .shell
             .recorder
@@ -884,7 +905,14 @@ impl App {
                     a.send(Command::Metronome(metro));
                     match from {
                         Start::Ready => {}
-                        Start::At(t) => a.send(Command::PlayerPlay(t)),
+                        Start::At(t) => match self.project.count_in.take() {
+                            Some((beats, bpm)) => a.send(Command::CountIn {
+                                beats,
+                                bpm,
+                                from: t,
+                            }),
+                            None => a.send(Command::PlayerPlay(t)),
+                        },
                         Start::Resume => {
                             if a.meters.playing() {
                                 let t = a.meters.position();

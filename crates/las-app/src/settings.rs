@@ -31,6 +31,17 @@ pub struct Settings {
     pub windows: Vec<String>,
     /// The size of everything, in percent of what suits the screen (100 by default).
     pub ui_scale: u32,
+    /// The audio output and input chosen (empty: the system's default).
+    pub audio: crate::audio::AudioChoice,
+    /// The MIDI input listened to: "" for all of them, "none" for none, or a name.
+    pub midi_input: String,
+    /// What Record records: the notes played, and the audio input.
+    pub record_notes: bool,
+    pub record_audio: bool,
+    /// Move recorded notes to the piano roll's snap.
+    pub quantize_recording: bool,
+    /// Click one bar before recording starts.
+    pub count_in: bool,
 }
 
 impl Default for Settings {
@@ -43,6 +54,12 @@ impl Default for Settings {
             recent: Vec::new(),
             windows: Vec::new(),
             ui_scale: 100,
+            audio: Default::default(),
+            midi_input: String::new(),
+            record_notes: true,
+            record_audio: true,
+            quantize_recording: false,
+            count_in: false,
         }
     }
 }
@@ -102,6 +119,33 @@ impl Settings {
         }
         list.push(dir);
         true
+    }
+}
+
+/// The audio and MIDI devices there are, for the Settings window.
+#[derive(Clone, Debug, Default)]
+pub struct Devices {
+    pub outputs: Vec<String>,
+    pub inputs: Vec<String>,
+    pub midi: Vec<String>,
+}
+
+impl Devices {
+    pub fn read() -> Self {
+        Self {
+            outputs: crate::audio::output_devices(),
+            inputs: crate::audio::input_devices(),
+            midi: crate::midi::ports(),
+        }
+    }
+}
+
+/// What a device choice shows: the name, or what the default is.
+pub fn choice_label(name: &str, default: &str) -> String {
+    if name.is_empty() {
+        default.to_string()
+    } else {
+        name.to_string()
     }
 }
 
@@ -315,76 +359,513 @@ impl App {
         let mut open = self.shell.open.settings;
         let mut changed = false;
         let mut rescan = false;
+        if open && self.devices.is_none() {
+            self.devices = Some(Devices::read());
+        }
+        let mut io = IoOut::default();
         egui::Window::new("Settings")
             .open(&mut open)
-            .default_size([560.0, 460.0])
+            .default_size([600.0, 620.0])
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                let s = &mut self.settings;
-                ui.heading("Sample folders");
-                ui.label(
-                    RichText::new("Shown in the browser's Samples tab, under the factory kit.")
-                        .weak(),
-                );
-                changed |= folder_list(ui, "samples", &mut s.sample_folders, "Add sample folder");
-                ui.add_space(10.0);
-                ui.heading("Plugin folders");
-                changed |= ui
-                    .checkbox(
-                        &mut s.standard_plugin_folders,
-                        "Also scan the standard CLAP and VST3 folders",
-                    )
-                    .changed();
-                changed |= folder_list(ui, "plugins", &mut s.plugin_folders, "Add plugin folder");
-                if ui.button("Rescan plugins now").clicked() {
-                    rescan = true;
-                }
-                ui.add_space(10.0);
-                ui.heading("Display");
-                ui.horizontal(|ui| {
-                    ui.label("Size of everything");
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    io = self.audio_settings(ui);
+                    ui.add_space(10.0);
+                    let s = &mut self.settings;
+                    ui.heading("Sample folders");
+                    ui.label(
+                        RichText::new("Shown in the browser's Samples tab, under the factory kit.")
+                            .weak(),
+                    );
+                    changed |=
+                        folder_list(ui, "samples", &mut s.sample_folders, "Add sample folder");
+                    ui.add_space(10.0);
+                    ui.heading("Plugin folders");
                     changed |= ui
-                        .add(
-                            egui::Slider::new(&mut s.ui_scale, 50..=200)
-                                .suffix("%")
-                                .step_by(5.0),
+                        .checkbox(
+                            &mut s.standard_plugin_folders,
+                            "Also scan the standard CLAP and VST3 folders",
                         )
-                        .on_hover_text("100% fits the layout to the screen")
                         .changed();
-                    if ui.small_button("Reset").clicked() {
-                        s.ui_scale = 100;
+                    changed |=
+                        folder_list(ui, "plugins", &mut s.plugin_folders, "Add plugin folder");
+                    if ui.button("Rescan plugins now").clicked() {
+                        rescan = true;
+                    }
+                    ui.add_space(10.0);
+                    ui.heading("Display");
+                    ui.horizontal(|ui| {
+                        ui.label("Size of everything");
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut s.ui_scale, 50..=200)
+                                    .suffix("%")
+                                    .step_by(5.0),
+                            )
+                            .on_hover_text("100% fits the layout to the screen")
+                            .changed();
+                        if ui.small_button("Reset").clicked() {
+                            s.ui_scale = 100;
+                            changed = true;
+                        }
+                    });
+                    ui.add_space(10.0);
+                    ui.heading("Saving");
+                    ui.horizontal(|ui| {
+                        ui.label("Autosave a copy every");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut s.autosave_minutes).range(0..=60))
+                            .changed();
+                        ui.label("minutes (0 for never)");
+                    });
+                    if let Some(d) = autosave_dir() {
+                        ui.label(
+                            RichText::new(format!("Autosaves go to {}", d.display()))
+                                .size(11.0)
+                                .color(pal().muted),
+                        );
+                    }
+                    if ui.button("Clear the recent projects list").clicked() {
+                        s.recent.clear();
                         changed = true;
                     }
                 });
-                ui.add_space(10.0);
-                ui.heading("Saving");
-                ui.horizontal(|ui| {
-                    ui.label("Autosave a copy every");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut s.autosave_minutes).range(0..=60))
-                        .changed();
-                    ui.label("minutes (0 for never)");
-                });
-                if let Some(d) = autosave_dir() {
-                    ui.label(
-                        RichText::new(format!("Autosaves go to {}", d.display()))
-                            .size(11.0)
-                            .color(pal().muted),
-                    );
-                }
-                if ui.button("Clear the recent projects list").clicked() {
-                    s.recent.clear();
-                    changed = true;
-                }
             });
         self.shell.open.settings = open;
+        changed |= io.changed;
+        if io.refresh {
+            self.devices = Some(Devices::read());
+        }
+        if io.restart {
+            self.settings.save();
+            self.restart_audio();
+        }
+        if io.reconnect {
+            let choice = self.settings.midi_input.clone();
+            self.midi.connect(&choice);
+        }
+        if io.test {
+            self.send(crate::audio::Command::TestSound);
+        }
+        if let Some(id) = io.unlink {
+            self.project
+                .modify(true, |p| crate::midilearn::unlink(p, &id));
+        }
+        if !open {
+            // read the devices again next time it opens
+            self.devices = None;
+        }
         if changed || rescan {
             self.settings.save();
             self.folders.clear();
         }
         if rescan {
             self.rescan_plugins();
+        }
+    }
+}
+
+/// What the audio and MIDI part of Settings asks for.
+#[derive(Default)]
+struct IoOut {
+    changed: bool,
+    restart: bool,
+    reconnect: bool,
+    refresh: bool,
+    test: bool,
+    unlink: Option<String>,
+}
+
+/// A row of a device list: a combo box of "the default" and the names there are.
+/// Returns whether the choice changed.
+fn device_combo(
+    ui: &mut Ui,
+    id: &str,
+    choice: &mut String,
+    names: &[String],
+    default: &str,
+) -> bool {
+    let mut changed = false;
+    let shown = choice_label(choice, default);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .width(300.0)
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(choice, String::new(), default)
+                .changed();
+            for n in names {
+                changed |= ui.selectable_value(choice, n.clone(), n).changed();
+            }
+            // a device chosen before that is not plugged in now
+            if !choice.is_empty() && !names.contains(choice) {
+                ui.label(RichText::new(format!("{choice} (not connected)")).weak());
+            }
+        });
+    changed
+}
+
+impl App {
+    /// The Audio, MIDI and Recording sections of Settings.
+    fn audio_settings(&mut self, ui: &mut Ui) -> IoOut {
+        let mut out = IoOut::default();
+        let p = pal();
+        let dev = self.devices.clone().unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.heading("Audio");
+            if ui
+                .small_button("Refresh")
+                .on_hover_text("Look for devices again (after plugging one in)")
+                .clicked()
+            {
+                out.refresh = true;
+            }
+        });
+        // what is playing now
+        match &self.audio {
+            Some(a) => {
+                let lat = a
+                    .buffer
+                    .map(|b| {
+                        format!(
+                            ", {:.1} ms buffer",
+                            crate::audio::latency_ms(b, a.sample_rate)
+                        )
+                    })
+                    .unwrap_or_default();
+                ui.label(
+                    RichText::new(format!(
+                        "Playing through {} at {} Hz{lat}",
+                        a.device, a.sample_rate
+                    ))
+                    .color(p.ok),
+                );
+                if let Some(n) = &a.note {
+                    ui.label(RichText::new(n).color(p.muted).size(11.5));
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new(
+                        "No sound: the audio output could not be opened. Check that speakers or headphones are connected and not in use by another program, then choose a device below or click Restart audio.",
+                    )
+                    .color(p.hot),
+                );
+                ui.label(
+                    RichText::new(format!("Details: {}", self.status))
+                        .color(p.muted)
+                        .size(11.0),
+                );
+            }
+        }
+        let a = &mut self.settings.audio;
+        let default_out = if dev.outputs.is_empty() {
+            "System default (no devices found)".to_string()
+        } else {
+            "System default".to_string()
+        };
+        egui::Grid::new("audio-settings")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Output device").on_hover_text(
+                    "Where the sound goes: speakers, headphones or an audio interface",
+                );
+                if device_combo(ui, "audio-out", &mut a.output, &dev.outputs, &default_out) {
+                    out.restart = true;
+                }
+                ui.end_row();
+                ui.label("Sample rate")
+                    .on_hover_text("Frames per second. 44100 or 48000 suit almost everything");
+                let rate_text = |r: u32| {
+                    if r == 0 {
+                        "Device default".to_string()
+                    } else {
+                        format!("{r} Hz")
+                    }
+                };
+                egui::ComboBox::from_id_salt("audio-rate")
+                    .selected_text(rate_text(a.sample_rate))
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        for r in std::iter::once(0).chain(crate::audio::RATES) {
+                            if ui
+                                .selectable_value(&mut a.sample_rate, r, rate_text(r))
+                                .changed()
+                            {
+                                out.restart = true;
+                            }
+                        }
+                    });
+                ui.end_row();
+                ui.label("Buffer size").on_hover_text(
+                    "Smaller is quicker to respond when you play, larger is safer from crackles",
+                );
+                let rate = if a.sample_rate > 0 {
+                    a.sample_rate
+                } else {
+                    self.audio.as_ref().map_or(44100, |x| x.sample_rate)
+                };
+                let buf_text = |b: u32| {
+                    if b == 0 {
+                        "Device default".to_string()
+                    } else {
+                        format!("{b} frames ({:.1} ms)", crate::audio::latency_ms(b, rate))
+                    }
+                };
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("audio-buffer")
+                        .selected_text(buf_text(a.buffer))
+                        .width(300.0)
+                        .show_ui(ui, |ui| {
+                            for b in std::iter::once(0).chain(crate::audio::BUFFERS) {
+                                if ui.selectable_value(&mut a.buffer, b, buf_text(b)).changed() {
+                                    out.restart = true;
+                                }
+                            }
+                        });
+                });
+                ui.end_row();
+                ui.label("Latency");
+                ui.label(
+                    RichText::new(if a.buffer == 0 {
+                        "Set by the device".to_string()
+                    } else {
+                        format!(
+                            "{:.1} ms from a key to the sound (one buffer)",
+                            crate::audio::latency_ms(a.buffer, rate)
+                        )
+                    })
+                    .color(p.muted),
+                );
+                ui.end_row();
+                ui.label("Input (recording)")
+                    .on_hover_text("The microphone or line input that Record captures");
+                let default_in = if dev.inputs.is_empty() {
+                    "System default (no devices found)".to_string()
+                } else {
+                    "System default".to_string()
+                };
+                if device_combo(ui, "audio-in", &mut a.input, &dev.inputs, &default_in) {
+                    out.changed = true;
+                    // the recorder opens the new input next time
+                    self.shell.recorder = None;
+                }
+                ui.end_row();
+            });
+        if dev.outputs.is_empty() && dev.inputs.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No audio devices were found. Plug in speakers, headphones or an audio interface, then click Refresh.",
+                )
+                .color(p.muted)
+                .size(11.5),
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    self.audio.is_some(),
+                    egui::Button::new("\u{25B6} Test sound"),
+                )
+                .on_hover_text("Play a short chime to check that you can hear the output")
+                .clicked()
+            {
+                out.test = true;
+            }
+            if ui
+                .button("Restart audio")
+                .on_hover_text("Open the output again with these settings")
+                .clicked()
+            {
+                out.restart = true;
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.heading("MIDI");
+            // the activity light
+            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            let on = self.midi.active();
+            ui.painter()
+                .circle_filled(r.center(), 5.0, if on { p.ok } else { p.led_off });
+            ui.label(
+                RichText::new(if on { "receiving" } else { "activity" })
+                    .size(11.0)
+                    .color(p.muted),
+            )
+            .on_hover_text("Lights up when a MIDI message comes in");
+        });
+        ui.horizontal(|ui| {
+            ui.label("MIDI input")
+                .on_hover_text("The keyboards and controllers listened to");
+            let m = &mut self.settings.midi_input;
+            let label = |c: &str| match c {
+                "" => "All inputs".to_string(),
+                "none" => "None".to_string(),
+                n => n.to_string(),
+            };
+            egui::ComboBox::from_id_salt("midi-in")
+                .selected_text(label(m))
+                .width(300.0)
+                .show_ui(ui, |ui| {
+                    out.reconnect |= ui
+                        .selectable_value(m, String::new(), "All inputs")
+                        .changed();
+                    for n in &dev.midi {
+                        out.reconnect |= ui.selectable_value(m, n.clone(), n).changed();
+                    }
+                    out.reconnect |= ui.selectable_value(m, "none".to_string(), "None").changed();
+                });
+        });
+        if out.reconnect {
+            out.changed = true;
+        }
+        if dev.midi.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No MIDI inputs found. Plug in a MIDI keyboard, then click Refresh above.",
+                )
+                .color(p.muted)
+                .size(11.5),
+            );
+        } else if self.midi.names.is_empty() {
+            ui.label(
+                RichText::new(
+                    self.midi
+                        .problem
+                        .clone()
+                        .unwrap_or_else(|| "Not connected".into()),
+                )
+                .color(p.muted)
+                .size(11.5),
+            );
+        } else {
+            ui.label(
+                RichText::new(format!("Listening to {}", self.midi.names.join(", ")))
+                    .color(p.ok)
+                    .size(11.5),
+            );
+        }
+        ui.label(
+            RichText::new("Keys play the selected channel. Notes are recorded when Record is on.")
+                .weak()
+                .size(11.0),
+        );
+        ui.add_space(4.0);
+        ui.label(RichText::new("Linked controls (this project)").strong())
+            .on_hover_text("Right click a knob or fader and choose Link to MIDI controller, then move a knob on your MIDI keyboard");
+        let links: Vec<(String, String)> = self
+            .project
+            .loaded
+            .as_ref()
+            .map(|l| {
+                l.project
+                    .midi_map
+                    .iter()
+                    .flatten()
+                    .map(|m| {
+                        (
+                            m.id.clone(),
+                            format!(
+                                "CC {} (channel {})  \u{2192}  {}",
+                                m.cc,
+                                m.channel + 1,
+                                crate::auto::describe_target(&l.project, &m.target)
+                            ),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if links.is_empty() {
+            ui.label(
+                RichText::new(
+                    "None yet. Right click a knob or fader and choose \"Link to MIDI controller\", then move a knob on your MIDI keyboard.",
+                )
+                .weak()
+                .size(11.5),
+            );
+        }
+        egui::Grid::new("midi-links").num_columns(2).show(ui, |ui| {
+            for (id, text) in &links {
+                ui.label(text);
+                if ui.small_button("Remove").clicked() {
+                    out.unlink = Some(id.clone());
+                }
+                ui.end_row();
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.heading("Recording");
+        let s = &mut self.settings;
+        ui.horizontal(|ui| {
+            out.changed |= ui
+                .checkbox(&mut s.record_notes, "Record notes")
+                .on_hover_text(
+                    "Notes played on a MIDI or the computer keyboard go into the current pattern",
+                )
+                .changed();
+            out.changed |= ui
+                .checkbox(&mut s.record_audio, "Record audio input")
+                .on_hover_text("The input device is captured into an audio clip")
+                .changed();
+        });
+        out.changed |= ui
+            .checkbox(
+                &mut s.quantize_recording,
+                "Quantize recorded notes to the piano roll's snap",
+            )
+            .changed();
+        out.changed |= ui
+            .checkbox(&mut s.count_in, "Count in one bar before recording")
+            .on_hover_text("The metronome clicks one bar, then playing and recording start")
+            .changed();
+        if out.restart {
+            out.changed = true;
+        }
+        out
+    }
+
+    /// Open the output again with the settings chosen; everything the audio thread had
+    /// (the synth's patches and effects, the project's player) is given to the new one.
+    pub(crate) fn restart_audio(&mut self) {
+        self.stop_project();
+        // the old stream lets go of the device first
+        self.audio = None;
+        self.midi.set_sender(None);
+        self.shell.recorder = None;
+        match crate::audio::Audio::start_with(&self.settings.audio) {
+            Ok((a, tx)) => {
+                self.midi.set_sender(Some(tx));
+                self.status = a
+                    .note
+                    .clone()
+                    .unwrap_or_else(|| format!("{} at {} Hz", a.device, a.sample_rate));
+                self.audio = Some(a);
+                for inst in [
+                    crate::audio::Instrument::Facet,
+                    crate::audio::Instrument::Mist,
+                    crate::audio::Instrument::Polaris,
+                ] {
+                    self.push_patch(inst);
+                    self.rebuild_chain(inst);
+                }
+                let (inst, vol, bpm, metro) =
+                    (self.inst, self.volume, self.bpm, self.shell.metronome);
+                self.send(crate::audio::Command::Instrument(inst));
+                self.send(crate::audio::Command::Volume(vol as f32));
+                self.send(crate::audio::Command::Tempo(bpm));
+                self.send(crate::audio::Command::Metronome(metro));
+                self.project.has_player = false;
+                if self.project.loaded.is_some() {
+                    self.ready_project();
+                }
+            }
+            Err(e) => self.status = e,
         }
     }
 }
@@ -568,6 +1049,11 @@ mod tests {
         assert_eq!(back, s);
         let old: Settings = serde_json::from_str(r#"{"recent": ["y.las"]}"#).unwrap();
         assert!(old.standard_plugin_folders);
+        // the audio settings of an old file are the system's defaults
+        assert_eq!(old.audio, crate::audio::AudioChoice::default());
+        assert!(old.midi_input.is_empty(), "all MIDI inputs");
+        assert!(old.record_notes && old.record_audio);
+        assert!(!old.count_in && !old.quantize_recording);
         assert_eq!(old.autosave_minutes, 5);
         assert_eq!(old.recent, vec!["y.las"]);
     }

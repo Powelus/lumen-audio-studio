@@ -373,6 +373,8 @@ pub struct Export {
     pub pattern_only: bool,
     /// Render only the song loop (when there is one).
     pub loop_only: bool,
+    /// Each mixer track as its own file (stems), in the folder of `path`.
+    pub stems: bool,
     working: Option<Receiver<Result<String, String>>>,
     pub message: Option<Result<String, String>>,
     /// How far the render has come, when it started, and the song's tempo and beats
@@ -474,6 +476,7 @@ impl Shell {
                 normalize: false,
                 pattern_only: false,
                 loop_only: false,
+                stems: false,
                 working: None,
                 message: None,
                 progress: None,
@@ -802,15 +805,40 @@ impl App {
                 self.send(Command::PreviewStop);
             }
             let rec = self.shell.record;
-            if icon_button(
+            let what = match (self.settings.record_notes, self.settings.record_audio) {
+                (true, true) => "notes and audio",
+                (true, false) => "notes",
+                (false, true) => "audio",
+                (false, false) => "nothing (right click to choose)",
+            };
+            let r = icon_button(
                 ui,
                 Icon::Record,
                 rec,
-                "Record: play to capture the audio input",
-            )
-            .clicked()
-            {
+                &format!(
+                    "Record {what}: switch on, then press Play. Notes go into the current pattern on the selected channel.\nRight click for recording options."
+                ),
+            );
+            if r.clicked() {
                 self.shell.record = !rec;
+            }
+            let mut changed = false;
+            r.context_menu(|ui| {
+                let s = &mut self.settings;
+                ui.label(RichText::new("Recording").strong());
+                changed |= ui.checkbox(&mut s.record_notes, "Notes (MIDI and computer keyboard)").changed();
+                changed |= ui.checkbox(&mut s.record_audio, "Audio input").changed();
+                ui.separator();
+                changed |= ui
+                    .checkbox(&mut s.quantize_recording, "Quantize notes to the piano roll's snap")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut s.count_in, "Count in one bar")
+                    .on_hover_text("The metronome clicks one bar before recording starts")
+                    .changed();
+            });
+            if changed {
+                self.settings.save();
             }
             let metro = self.shell.metronome;
             if icon_button(ui, Icon::Metronome, metro, "Metronome").clicked() {
@@ -989,11 +1017,36 @@ impl App {
                         ))
                         .color(if load > 0.7 { p.hot } else { p.muted })
                     }
-                    None => {
-                        RichText::new(format!("No sound: {}", self.status_audio())).color(p.hot)
-                    }
+                    None => RichText::new("No sound: click to set up audio").color(p.hot),
                 };
-                ui.label(audio.size(12.0));
+                let tip = if self.audio.is_some() {
+                    "Click to choose the audio device in Settings".to_string()
+                } else {
+                    format!(
+                        "The audio output could not be opened: {}\nClick to choose a device in Settings.",
+                        self.status_audio()
+                    )
+                };
+                let r = ui
+                    .add(egui::Label::new(audio.size(12.0)).sense(Sense::click()))
+                    .on_hover_text(tip);
+                if r.clicked() {
+                    self.shell.open.settings = true;
+                }
+                if let Some(c) = self
+                    .audio
+                    .as_ref()
+                    .map(|a| a.meters.counting())
+                    .filter(|c| *c > 0)
+                {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Count-in {c}"))
+                            .size(12.0)
+                            .strong()
+                            .color(p.hot),
+                    );
+                }
                 ui.separator();
                 ui.label(
                     RichText::new(format!("Keys oct {}", self.octave))
@@ -1797,12 +1850,57 @@ impl App {
         }
         let busy = self.shell.export.working.is_some();
         ui.horizontal(|ui| {
+            ui.label("Render");
+            ui.selectable_value(&mut self.shell.export.stems, false, "Mix (one file)")
+                .on_hover_text("Everything you hear, in one file");
+            ui.selectable_value(
+                &mut self.shell.export.stems,
+                true,
+                "Each mixer track as its own file",
+            )
+            .on_hover_text(
+                "Stems: the master and every mixer track that plays something, each in its own file, for mixing elsewhere",
+            );
+        });
+        if self.shell.export.stems {
+            let (_, kind, _) = FORMATS[self.shell.export.format];
+            let dir = stem_dir(&self.shell.export.path);
+            let name = self.export_name();
+            ui.label(
+                RichText::new(format!(
+                    "Files go in {} as \"{name} - <track name>.{kind}\".",
+                    dir.display()
+                ))
+                .weak()
+                .size(11.5),
+            );
+        }
+        ui.horizontal(|ui| {
             ui.label("Save to");
             ui.add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0));
-            if ui
-                .add_enabled(!busy, egui::Button::new("Choose..."))
-                .on_hover_text("Pick the folder and file name")
-                .clicked()
+            let stems = self.shell.export.stems;
+            if stems
+                && ui
+                    .add_enabled(!busy, egui::Button::new("Choose folder..."))
+                    .on_hover_text("Pick the folder the files go in")
+                    .clicked()
+            {
+                let (_, kind, _) = FORMATS[self.shell.export.format];
+                let mut dialog = rfd::FileDialog::new().set_title("Export stems to a folder");
+                let dir = stem_dir(&self.shell.export.path);
+                if dir.is_dir() {
+                    dialog = dialog.set_directory(&dir);
+                }
+                if let Some(d) = dialog.pick_folder() {
+                    let file = format!("{}.{kind}", self.export_name());
+                    self.shell.export.path = d.join(file).to_string_lossy().into_owned();
+                }
+            }
+            if !stems
+                && ui
+                    .add_enabled(!busy, egui::Button::new("Choose..."))
+                    .on_hover_text("Pick the folder and file name")
+                    .clicked()
             {
                 let (name, kind, _) = FORMATS[self.shell.export.format];
                 let now = std::path::PathBuf::from(&self.shell.export.path);
@@ -1841,7 +1939,13 @@ impl App {
                         }
                     }
                 });
-            ui.checkbox(&mut self.shell.export.normalize, "Normalize to -0.3 dB");
+            let label = if self.shell.export.stems {
+                "Normalize each file to -0.3 dB"
+            } else {
+                "Normalize to -0.3 dB"
+            };
+            ui.checkbox(&mut self.shell.export.normalize, label)
+                .on_hover_text("Make the loudest moment reach -0.3 dB");
         });
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.shell.export.pattern_only, false, "Song");
@@ -1901,7 +2005,12 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(m).color(pal().ok));
                     if ui.button("Show in folder").clicked() {
-                        show_in_folder(&self.shell.export.path);
+                        if self.shell.export.stems {
+                            let dir = stem_dir(&self.shell.export.path);
+                            show_in_folder(&dir.join("x").to_string_lossy());
+                        } else {
+                            show_in_folder(&self.shell.export.path);
+                        }
                     }
                 });
             }
@@ -1917,8 +2026,9 @@ impl App {
             return;
         };
         let (project, samples) = (l.project.clone(), l.samples.clone());
+        let name = self.export_name();
         let e = &self.shell.export;
-        let (path, normalize) = (e.path.trim().to_string(), e.normalize);
+        let (path, normalize, stems) = (e.path.trim().to_string(), e.normalize, e.stems);
         let (_, kind, bits) = FORMATS[e.format];
         let mode = if e.pattern_only {
             Mode::Pattern {
@@ -1953,24 +2063,26 @@ impl App {
                     mode,
                     ..Default::default()
                 };
+                if stems {
+                    let dir = stem_dir(&path);
+                    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                    let all = las_engine::render_stems(&project, &samples, &opts)?;
+                    let files = stem_files(&name, &project, kind);
+                    let mut secs = 0.0;
+                    for (stem, file) in all.iter().zip(&files) {
+                        let to = dir.join(file);
+                        let bytes = encode(&stem.audio, normalize, kind, bits)?;
+                        std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+                        secs = stem.audio.seconds();
+                    }
+                    return Ok(format!(
+                        "{} files ({secs:.1} s each) in {}",
+                        all.len().min(files.len()),
+                        dir.display()
+                    ));
+                }
                 let r = las_engine::render_mix_with(&project, &samples, &opts)?;
-                let chans = [&r.left[..], &r.right[..]];
-                let scaled;
-                let chans: [&[f32]; 2] = if normalize {
-                    scaled = las_engine::export::normalize(&chans, -0.3);
-                    [&scaled[0], &scaled[1]]
-                } else {
-                    chans
-                };
-                let rate = r.sample_rate as u32;
-                let bytes = if kind == "flac" {
-                    las_engine::export::encode_flac(&chans, rate, bits)?
-                } else if kind == "mp3" {
-                    las_engine::export::encode_mp3(&chans, rate, bits)?
-                } else {
-                    let depth = las_engine::export::BitDepth::from_bits(bits).ok_or("bad depth")?;
-                    las_engine::export::encode_wav(&chans, rate, depth, bits == 16)
-                };
+                let bytes = encode(&r, normalize, kind, bits)?;
                 std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
                 Ok(format!("{path}: {:.1} s", r.seconds()))
             };
@@ -1979,6 +2091,100 @@ impl App {
         self.shell.export.working = Some(rx);
         self.shell.export.message = None;
     }
+}
+
+impl App {
+    /// The name exports are called by: the project's file name, or "Untitled".
+    pub(crate) fn export_name(&self) -> String {
+        let from_file = std::path::Path::new(&self.project.path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty());
+        from_file.unwrap_or_else(|| "Untitled".into())
+    }
+}
+
+/// A render as the bytes of a file of the chosen format.
+fn encode(
+    r: &las_engine::Rendered,
+    normalize: bool,
+    kind: &str,
+    bits: u32,
+) -> Result<Vec<u8>, String> {
+    let chans = [&r.left[..], &r.right[..]];
+    let scaled;
+    let chans: [&[f32]; 2] = if normalize {
+        scaled = las_engine::export::normalize(&chans, -0.3);
+        [&scaled[0], &scaled[1]]
+    } else {
+        chans
+    };
+    let rate = r.sample_rate as u32;
+    Ok(if kind == "flac" {
+        las_engine::export::encode_flac(&chans, rate, bits)?
+    } else if kind == "mp3" {
+        las_engine::export::encode_mp3(&chans, rate, bits)?
+    } else {
+        let depth = las_engine::export::BitDepth::from_bits(bits).ok_or("bad depth")?;
+        las_engine::export::encode_wav(&chans, rate, depth, bits == 16)
+    })
+}
+
+/// The folder stems go in: the folder of the export path (or the path itself when it
+/// is a folder).
+pub fn stem_dir(path: &str) -> std::path::PathBuf {
+    let p = std::path::PathBuf::from(path.trim());
+    if p.is_dir() {
+        return p;
+    }
+    p.parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map_or_else(|| std::path::PathBuf::from("."), |d| d.to_path_buf())
+}
+
+/// A name that is safe as a file name on every system.
+fn safe_name(s: &str) -> String {
+    let t: String = s
+        .chars()
+        .map(|c| {
+            if "/\\:*?\"<>|".contains(c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let t = t.trim().trim_end_matches('.').to_string();
+    if t.is_empty() {
+        "_".into()
+    } else {
+        t
+    }
+}
+
+/// The file names of the stems `render_stems` makes, in its order (the master, then each
+/// mixer track that plays): "<project> - <track name>.<ext>". Tracks with the same name
+/// get their number added.
+pub fn stem_files(project_name: &str, project: &las_project::Project, ext: &str) -> Vec<String> {
+    let inserts = las_engine::used_inserts(project);
+    let name_of = |i: usize| {
+        project
+            .mixer
+            .get(i)
+            .map(|t| t.name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("Insert {i}"))
+    };
+    let mut names = vec!["Master".to_string()];
+    for &i in &inserts {
+        let n = name_of(i);
+        let twice = n == "Master" || inserts.iter().filter(|&&j| name_of(j) == n).count() > 1;
+        names.push(if twice { format!("{n} ({i})") } else { n });
+    }
+    names
+        .iter()
+        .map(|n| format!("{} - {}.{ext}", safe_name(project_name), safe_name(n)))
+        .collect()
 }
 
 /// Minutes and seconds.
@@ -2045,6 +2251,34 @@ mod tests {
         assert_eq!(clock(195.4), "3:15");
         assert_eq!(default_export_path("/a/song.las", "mp3"), "/a/song.mp3");
         assert!(default_export_path("", "wav").ends_with("Untitled.wav"));
+    }
+
+    #[test]
+    fn stems_are_named_after_the_project_and_their_tracks() {
+        let mut p = las_project::create::empty_project("x");
+        for name in ["Kick", "Bass", "Kick"] {
+            let i = las_project::create::add_channel(&mut p, "sampler");
+            let t = p.channels[i].mixer_track;
+            p.mixer[t].name = name.into();
+        }
+        let files = stem_files("My Song", &p, "wav");
+        assert_eq!(
+            files,
+            vec![
+                "My Song - Master.wav",
+                "My Song - Kick (1).wav",
+                "My Song - Bass.wav",
+                "My Song - Kick (3).wav",
+            ]
+        );
+        // one file for each stem the engine renders
+        let stems = las_engine::used_inserts(&p).len() + 1;
+        assert_eq!(files.len(), stems);
+        assert_eq!(safe_name("a/b:c?"), "a_b_c_");
+        assert_eq!(
+            stem_dir("/tmp/x/song.wav"),
+            std::path::PathBuf::from("/tmp/x")
+        );
     }
 
     #[test]

@@ -253,14 +253,14 @@ pub enum StretchMode {
     Resample,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stretch {
     pub bpm: f64,
     pub mode: StretchMode,
 }
 
 /// Non-destructive edits of one audio clip.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioClipEdit {
     /// dB.
@@ -283,6 +283,9 @@ pub struct AudioClipEdit {
     pub pitch: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stretch: Option<Stretch>,
+    /// Bring the loudest peak of the source to 0 dB (before the clip gain).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalize: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
