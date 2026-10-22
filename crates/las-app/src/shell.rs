@@ -1282,7 +1282,7 @@ impl App {
     }
 
     fn status_audio(&self) -> String {
-        self.status.clone()
+        self.audio_error.clone()
     }
 
     pub(crate) fn browser(&mut self, ui: &mut Ui) {

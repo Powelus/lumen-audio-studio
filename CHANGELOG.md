@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.61
+
+Sound works again on Windows.
+
+- Fixed "No sound: the audio output could not be opened" on Windows. If the driver you chose does not open, Lumen now tries Windows audio on the default device and then every other output, so you get sound whenever any output works.
+- Audio now runs on its own thread: opening the output, listing devices, recording and closing never happen on the window's thread, and a driver that crashes or hangs can no longer stop the app from finding another output.
+- Automatic falls back to Windows audio when no ASIO driver is installed, and leaves the onboard Realtek ASIO driver alone.
+- When there is no sound, Settings shows what went wrong for each output it tried, with a Copy details button for bug reports. Other messages no longer replace it.
+
 ## 0.2.0-alpha.60
 
 Quick search, capturing what you played, rendering, and safer projects.

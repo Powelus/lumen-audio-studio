@@ -903,10 +903,13 @@ impl App {
         }
         if rec && self.settings.record_audio {
             if self.shell.recorder.is_none() {
-                match crate::record::Recorder::open(
-                    &self.settings.audio.input,
-                    &self.settings.audio.driver,
-                ) {
+                // under Automatic, the driver the output opened on (one ASIO driver
+                // serves both ways)
+                let driver = match (&self.audio, self.settings.audio.driver.as_str()) {
+                    (Some(a), "") if a.driver.eq_ignore_ascii_case("asio") => a.driver.clone(),
+                    _ => self.settings.audio.driver.clone(),
+                };
+                match crate::record::Recorder::open(&self.settings.audio.input, &driver) {
                     Ok(r) => self.shell.recorder = Some(r),
                     // recording notes only is fine: just say so
                     Err(e) if self.settings.record_notes => {

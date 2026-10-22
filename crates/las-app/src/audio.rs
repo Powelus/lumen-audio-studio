@@ -3,6 +3,7 @@
 //! MIDI thread talk to it through lock-free queues, and read the meters from
 //! atomics, so neither side ever waits for the other.
 
+use crate::audioctl::StreamHandle;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, StreamConfig};
 use las_dsp::engine::{prepare_patch, Cc, Event, PreparedPatch};
@@ -14,6 +15,7 @@ use las_dsp::synth::{prepare_synth_patch, synth_engine, PreparedSynthPatch, Synt
 use las_dsp::wavetable::TableLibrary;
 use las_engine::Player;
 use rtrb::{Consumer, Producer, RingBuffer};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc as Shared;
 use std::sync::Arc;
@@ -295,8 +297,9 @@ pub fn device_name(d: &cpal::Device) -> String {
         .unwrap_or_else(|_| "Unknown device".into())
 }
 
-/// The audio drivers this build can use, by name, the system's default first.
-pub fn drivers() -> Vec<String> {
+/// The audio drivers this build can use, by name, the system's default first. Only on
+/// the audio-control thread (see [`device_lists`]).
+fn drivers() -> Vec<String> {
     let default = cpal::default_host().id();
     let mut v = vec![default.name().to_string()];
     for id in cpal::available_hosts() {
@@ -325,6 +328,9 @@ fn generic_asio(name: &str) -> bool {
         "flexasio",
         "voicemeeter",
         "asio4all v2",
+        // the onboard sound's ASIO driver: it holds the device and often will not
+        // start, so Automatic leaves it to Windows audio
+        "realtek asio",
     ]
     .iter()
     .any(|g| n.contains(g))
@@ -376,8 +382,30 @@ fn host(driver: &str) -> cpal::Host {
     cpal::default_host()
 }
 
-/// The output devices the driver has, by name.
-pub fn output_devices(driver: &str) -> Vec<String> {
+/// The drivers, and the output and input devices of one driver, by name, read on the
+/// audio-control thread. A driver that fails or crashes while listing gives no devices.
+pub fn device_lists(driver: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let driver = driver.to_string();
+    crate::audioctl::run(move || {
+        let list = |f: fn(&str) -> Vec<String>| {
+            catch_unwind(AssertUnwindSafe(|| f(&driver))).unwrap_or_else(|p| {
+                eprintln!(
+                    "audio: listing {driver} devices: {}",
+                    crate::audioctl::panic_text(p)
+                );
+                Vec::new()
+            })
+        };
+        (drivers(), list(output_devices), list(input_devices))
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("audio: listing devices: {e}");
+        Default::default()
+    })
+}
+
+/// The output devices the driver has, by name. Only on the audio-control thread.
+fn output_devices(driver: &str) -> Vec<String> {
     let mut v: Vec<String> = host(driver)
         .output_devices()
         .map(|it| it.map(|d| device_name(&d)).collect())
@@ -386,8 +414,8 @@ pub fn output_devices(driver: &str) -> Vec<String> {
     v
 }
 
-/// The input devices the driver has, by name.
-pub fn input_devices(driver: &str) -> Vec<String> {
+/// The input devices the driver has, by name. Only on the audio-control thread.
+fn input_devices(driver: &str) -> Vec<String> {
     let mut v: Vec<String> = host(driver)
         .input_devices()
         .map(|it| it.map(|d| device_name(&d)).collect())
@@ -419,7 +447,7 @@ fn first_output(host: &cpal::Host) -> Option<cpal::Device> {
         .or_else(|| host.output_devices().ok().and_then(|mut it| it.next()))
 }
 
-/// The chosen input device, or the default one.
+/// The chosen input device, or the default one. Only on the audio-control thread.
 pub fn pick_input(name: &str, driver: &str) -> Option<cpal::Device> {
     let host = host(driver);
     if !name.is_empty() {
@@ -436,7 +464,8 @@ pub fn pick_input(name: &str, driver: &str) -> Option<cpal::Device> {
 }
 
 pub struct Audio {
-    _stream: cpal::Stream,
+    /// The output stream, kept on the audio-control thread.
+    _stream: StreamHandle,
     commands: Producer<Command>,
     garbage: Consumer<Garbage>,
     pub meters: Arc<Meters>,
@@ -468,42 +497,116 @@ impl Audio {
     }
 
     /// Open the output chosen in Settings. What cannot be had as chosen falls back to the
-    /// device's defaults (and says so in `note`).
+    /// device's defaults, then to the system's driver and any output it has (and says
+    /// so in `note`). All of it runs on the audio-control thread.
     pub fn start_with(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
-        if !choice.driver.is_empty() {
-            return Self::open_with(choice);
-        }
-        // Automatic: the best ASIO device there is, else the system's default driver
-        let mut failed = None;
-        if HAS_ASIO {
-            if let Some(dev) = auto_asio(&output_devices("ASIO")) {
+        let choice = choice.clone();
+        crate::audioctl::run(move || Self::start_here(&choice))?
+    }
+
+    /// One try at opening, with a driver that crashes turned into an error.
+    fn attempt(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
+        catch_unwind(AssertUnwindSafe(|| Self::open_with(choice))).unwrap_or_else(|p| {
+            Err(format!(
+                "the driver crashed: {}",
+                crate::audioctl::panic_text(p)
+            ))
+        })
+    }
+
+    /// [`Audio::start_with`], on the audio-control thread.
+    fn start_here(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
+        let auto = choice.driver.is_empty();
+        let shown = |output: &str| {
+            if output.is_empty() {
+                "the default output".to_string()
+            } else {
+                output.to_string()
+            }
+        };
+        // what did not open, to say why
+        let mut tried: Vec<String> = Vec::new();
+        let done = |got: (Self, MidiSender), tried: &[String]| {
+            let (mut a, tx) = got;
+            a.auto = auto;
+            if !tried.is_empty() {
+                let mut n = format!(
+                    "{} did not open, using {} ({})",
+                    tried.join("; "),
+                    a.device,
+                    a.driver
+                );
+                if let Some(old) = a.note.take() {
+                    n = format!("{n}. {old}");
+                }
+                a.note = Some(n);
+            }
+            Ok((a, tx))
+        };
+        if !auto {
+            match Self::attempt(choice) {
+                Ok(got) => return Ok(got),
+                Err(e) => tried.push(format!(
+                    "{} ({}): {e}",
+                    shown(&choice.output),
+                    choice.driver
+                )),
+            }
+        } else if HAS_ASIO {
+            // Automatic: the best ASIO device there is, if there is any ASIO driver
+            let devices = catch_unwind(|| output_devices("ASIO")).unwrap_or_else(|p| {
+                tried.push(format!(
+                    "listing ASIO drivers: {}",
+                    crate::audioctl::panic_text(p)
+                ));
+                Vec::new()
+            });
+            if let Some(dev) = auto_asio(&devices) {
                 let asio = AudioChoice {
                     driver: "ASIO".into(),
                     output: dev.clone(),
                     ..choice.clone()
                 };
-                match Self::open_with(&asio) {
-                    Ok((mut a, tx)) => {
-                        a.auto = true;
-                        return Ok((a, tx));
-                    }
-                    Err(e) => {
-                        failed = Some(format!(
-                            "{dev} (ASIO) did not open ({e}), using Windows audio instead"
-                        ))
-                    }
+                match Self::attempt(&asio) {
+                    Ok(got) => return done(got, &tried),
+                    Err(e) => tried.push(format!("{dev} (ASIO): {e}")),
                 }
             }
         }
-        let (mut a, tx) = Self::open_with(choice)?;
-        a.auto = true;
-        if let Some(f) = failed {
-            a.note = Some(match a.note.take() {
-                Some(n) => format!("{f}. {n}"),
-                None => f,
-            });
+        // the system's own driver (WASAPI on Windows): the chosen device under
+        // Automatic, else its default device
+        let system = cpal::default_host().id().name().to_string();
+        let sys = AudioChoice {
+            driver: String::new(),
+            output: if auto {
+                choice.output.clone()
+            } else {
+                String::new()
+            },
+            ..choice.clone()
+        };
+        match Self::attempt(&sys) {
+            Ok(got) => return done(got, &tried),
+            Err(e) => tried.push(format!("{} ({system}): {e}", shown(&sys.output))),
         }
-        Ok((a, tx))
+        // then every output it has, with the device's own rate and buffer
+        for output in output_devices("") {
+            if output == sys.output {
+                continue;
+            }
+            let any = AudioChoice {
+                driver: String::new(),
+                output: output.clone(),
+                sample_rate: 0,
+                buffer: 0,
+                ..choice.clone()
+            };
+            match Self::attempt(&any) {
+                Ok(got) => return done(got, &tried),
+                Err(e) => tried.push(format!("{output} ({system}): {e}")),
+            }
+        }
+        Err(format!("No output would open. {}", tried.join("; ")))
     }
 
     /// Open the output on the chosen driver ("" is the system's default).
@@ -580,7 +683,7 @@ impl Audio {
                 .map_err(|e| format!("cannot start the output: {e}"))?;
             Ok((
                 Self {
-                    _stream: stream,
+                    _stream: StreamHandle::keep(stream),
                     commands: ui_tx,
                     garbage: garbage_rx,
                     meters,
@@ -1634,6 +1737,7 @@ mod tests {
         );
         assert_eq!(pick(&["ASIO4ALL v2"]).as_deref(), Some("ASIO4ALL v2"));
         assert_eq!(pick(&["Generic Low Latency ASIO Driver", "FlexASIO"]), None);
+        assert_eq!(pick(&["Realtek ASIO"]), None);
         assert_eq!(pick(&[]), None);
     }
 

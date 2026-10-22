@@ -7,6 +7,7 @@
 mod analyser;
 mod app;
 mod audio;
+mod audioctl;
 mod auto;
 mod clipedit;
 mod faces;

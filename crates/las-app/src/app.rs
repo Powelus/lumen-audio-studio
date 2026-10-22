@@ -74,6 +74,9 @@ pub struct App {
     /// MIDI input: the keyboards and controllers listened to.
     pub(crate) midi: crate::midi::MidiHub,
     pub(crate) status: String,
+    /// Why the audio output did not open (empty while it plays). Kept apart from
+    /// `status`, which other messages overwrite.
+    pub(crate) audio_error: String,
     /// The notes of the take being recorded, when recording.
     pub(crate) take: crate::noterec::NoteTake,
     /// The device lists Settings shows (read when it opens, and on Refresh).
@@ -170,22 +173,26 @@ impl App {
         } else {
             Err("no sound device (test)".to_string())
         };
-        let (audio, status) = match started {
+        let (audio, status, audio_error) = match started {
             Ok((audio, tx)) => {
                 midi.set_sender(Some(tx));
                 let status = audio
                     .note
                     .clone()
                     .unwrap_or_else(|| format!("{} at {} Hz", audio.device, audio.sample_rate));
-                (Some(audio), status)
+                (Some(audio), status, String::new())
             }
-            Err(e) => (None, e),
+            Err(e) => {
+                eprintln!("audio: {e}");
+                (None, e.clone(), e)
+            }
         };
         midi.connect(&settings.midi_input);
         let mut app = Self {
             audio,
             midi,
             status,
+            audio_error,
             take: Default::default(),
             devices: None,
             inst: Instrument::Polaris,

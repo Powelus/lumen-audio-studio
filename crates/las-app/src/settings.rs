@@ -133,11 +133,14 @@ pub struct Devices {
 }
 
 impl Devices {
+    /// Read the lists (on the audio-control thread). Only when Settings opens or
+    /// Refresh is clicked: listing ASIO drivers loads each one.
     pub fn read(driver: &str) -> Self {
+        let (drivers, outputs, inputs) = crate::audio::device_lists(driver);
         Self {
-            drivers: crate::audio::drivers(),
-            outputs: crate::audio::output_devices(driver),
-            inputs: crate::audio::input_devices(driver),
+            drivers,
+            outputs,
+            inputs,
             midi: crate::midi::ports(),
         }
     }
@@ -572,11 +575,26 @@ impl App {
                     )
                     .color(p.hot),
                 );
-                ui.label(
-                    RichText::new(format!("Details: {}", self.status))
-                        .color(p.muted)
-                        .size(11.0),
-                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Details: {}", self.audio_error))
+                            .color(p.muted)
+                            .size(11.0),
+                    );
+                    if ui
+                        .small_button("Copy details")
+                        .on_hover_text("Copy what went wrong, to paste in a bug report")
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(format!(
+                            "Lumen Audio Studio {}: no sound. Driver setting: {}. Output: {}. {}",
+                            env!("CARGO_PKG_VERSION"),
+                            choice_label(&self.settings.audio.driver, "Automatic"),
+                            choice_label(&self.settings.audio.output, "System default"),
+                            self.audio_error
+                        ));
+                    }
+                });
             }
         }
         let a = &mut self.settings.audio;
@@ -922,6 +940,7 @@ impl App {
         self.shell.recorder = None;
         match crate::audio::Audio::start_with(&self.settings.audio) {
             Ok((a, tx)) => {
+                self.audio_error.clear();
                 self.midi.set_sender(Some(tx));
                 self.status = a
                     .note
@@ -947,7 +966,11 @@ impl App {
                     self.ready_project();
                 }
             }
-            Err(e) => self.status = e,
+            Err(e) => {
+                eprintln!("audio: {e}");
+                self.status = e.clone();
+                self.audio_error = e;
+            }
         }
     }
 }
