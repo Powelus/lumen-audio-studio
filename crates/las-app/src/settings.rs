@@ -548,10 +548,17 @@ impl App {
                     })
                     .unwrap_or_default();
                 ui.label(
-                    RichText::new(format!(
-                        "Playing through {} ({}) at {} Hz{lat}",
-                        a.device, a.driver, a.sample_rate
-                    ))
+                    RichText::new(if a.auto {
+                        format!(
+                            "Playing through Automatic: {}, {} at {} Hz{lat}",
+                            a.driver, a.device, a.sample_rate
+                        )
+                    } else {
+                        format!(
+                            "Playing through {} ({}) at {} Hz{lat}",
+                            a.device, a.driver, a.sample_rate
+                        )
+                    })
                     .color(p.ok),
                 );
                 if let Some(n) = &a.note {
@@ -583,12 +590,11 @@ impl App {
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 ui.label("Audio driver").on_hover_text(
-                    "How the sound reaches the device. ASIO gives the lowest latency; install ASIO4ALL if your sound card has no ASIO driver",
+                    "How the sound reaches the device. Automatic picks the best one for you. ASIO gives the lowest latency; install ASIO4ALL if your sound card has no ASIO driver",
                 );
-                let default_driver = dev.drivers.first().cloned().unwrap_or_default();
                 let driver_text = |d: &str| {
                     if d.is_empty() {
-                        format!("System default ({default_driver})")
+                        "Automatic (recommended)".to_string()
                     } else {
                         d.to_string()
                     }
@@ -599,7 +605,8 @@ impl App {
                         .width(300.0)
                         .show_ui(ui, |ui| {
                             let mut pick = a.driver.clone();
-                            ui.selectable_value(&mut pick, String::new(), driver_text(""));
+                            ui.selectable_value(&mut pick, String::new(), driver_text(""))
+                                .on_hover_text(crate::audio::AUTO_HELP);
                             for d in &dev.drivers {
                                 ui.selectable_value(&mut pick, d.clone(), d.as_str())
                                     .on_hover_text(crate::audio::driver_help(d));
@@ -613,13 +620,12 @@ impl App {
                                 out.refresh = true;
                             }
                         });
-                    let shown = if a.driver.is_empty() {
-                        default_driver.as_str()
+                    let help = if a.driver.is_empty() {
+                        crate::audio::AUTO_HELP
                     } else {
-                        a.driver.as_str()
+                        crate::audio::driver_help(&a.driver)
                     };
-                    ui.label(RichText::new("?").color(p.muted))
-                        .on_hover_text(crate::audio::driver_help(shown));
+                    ui.label(RichText::new("?").color(p.muted)).on_hover_text(help);
                 });
                 ui.end_row();
                 if cfg!(windows) && !crate::audio::HAS_ASIO {

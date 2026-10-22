@@ -261,7 +261,7 @@ impl Meters {
 #[serde(default)]
 pub struct AudioChoice {
     /// The audio driver (cpal host) by name: "WASAPI" or "ASIO" on Windows, "ALSA" or
-    /// "JACK" on Linux, "CoreAudio" on macOS. Empty is the system's default.
+    /// "JACK" on Linux, "CoreAudio" on macOS. Empty is Automatic (see [`auto_asio`]).
     pub driver: String,
     /// The output device, by name.
     pub output: String,
@@ -309,6 +309,45 @@ pub fn drivers() -> Vec<String> {
 
 /// Whether this build can talk to ASIO drivers (Windows builds made with the ASIO SDK).
 pub const HAS_ASIO: bool = cfg!(all(windows, feature = "asio"));
+
+/// What Automatic does, for Settings.
+pub const AUTO_HELP: &str = "Picks the best driver for you: your audio interface's ASIO driver, then FL Studio ASIO or ASIO4ALL, then Windows audio.";
+
+/// ASIO drivers that wrap other drivers rather than belong to an audio interface.
+fn generic_asio(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "asio4all",
+        "fl studio asio",
+        "flstudio asio",
+        "generic low latency",
+        "asio2wasapi",
+        "flexasio",
+        "voicemeeter",
+        "asio4all v2",
+    ]
+    .iter()
+    .any(|g| n.contains(g))
+}
+
+/// Which ASIO device Automatic opens, from the ASIO devices there are: the audio
+/// interface's own driver, else FL Studio ASIO, else ASIO4ALL. None: use the system's
+/// default driver (WASAPI on Windows).
+pub fn auto_asio(devices: &[String]) -> Option<String> {
+    let has = |key: &str| {
+        devices
+            .iter()
+            .find(|d| d.to_ascii_lowercase().contains(key))
+            .cloned()
+    };
+    devices
+        .iter()
+        .find(|d| !generic_asio(d))
+        .cloned()
+        .or_else(|| has("fl studio asio"))
+        .or_else(|| has("flstudio asio"))
+        .or_else(|| has("asio4all"))
+}
 
 /// What a driver is, in a few words, for Settings.
 pub fn driver_help(name: &str) -> &'static str {
@@ -405,6 +444,8 @@ pub struct Audio {
     pub device: String,
     /// The driver the output is open on ("WASAPI", "ASIO", ...).
     pub driver: String,
+    /// Whether Automatic chose the driver.
+    pub auto: bool,
     /// The frames per buffer asked for (None: the device's own choice).
     pub buffer: Option<u32>,
     /// What did not go as chosen (a missing device, a rate it does not take).
@@ -429,6 +470,44 @@ impl Audio {
     /// Open the output chosen in Settings. What cannot be had as chosen falls back to the
     /// device's defaults (and says so in `note`).
     pub fn start_with(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
+        if !choice.driver.is_empty() {
+            return Self::open_with(choice);
+        }
+        // Automatic: the best ASIO device there is, else the system's default driver
+        let mut failed = None;
+        if HAS_ASIO {
+            if let Some(dev) = auto_asio(&output_devices("ASIO")) {
+                let asio = AudioChoice {
+                    driver: "ASIO".into(),
+                    output: dev.clone(),
+                    ..choice.clone()
+                };
+                match Self::open_with(&asio) {
+                    Ok((mut a, tx)) => {
+                        a.auto = true;
+                        return Ok((a, tx));
+                    }
+                    Err(e) => {
+                        failed = Some(format!(
+                            "{dev} (ASIO) did not open ({e}), using Windows audio instead"
+                        ))
+                    }
+                }
+            }
+        }
+        let (mut a, tx) = Self::open_with(choice)?;
+        a.auto = true;
+        if let Some(f) = failed {
+            a.note = Some(match a.note.take() {
+                Some(n) => format!("{f}. {n}"),
+                None => f,
+            });
+        }
+        Ok((a, tx))
+    }
+
+    /// Open the output on the chosen driver ("" is the system's default).
+    fn open_with(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
         let driver = host(&choice.driver).id().name().to_string();
         let (device, missing) = pick_output(&choice.output, &choice.driver);
         let device = device.ok_or("No audio output device found")?;
@@ -508,6 +587,7 @@ impl Audio {
                     sample_rate,
                     device: name.clone(),
                     driver: driver.clone(),
+                    auto: false,
                     buffer,
                     note: None,
                     tuner: tuner_rx,
@@ -1537,7 +1617,24 @@ mod tests {
         assert_eq!(host("").id(), cpal::default_host().id());
         assert!(driver_help("ASIO").contains("ASIO4ALL"));
         let c: AudioChoice = serde_json::from_str(r#"{"output": "x"}"#).unwrap();
-        assert!(c.driver.is_empty(), "old settings keep the system's driver");
+        assert!(c.driver.is_empty(), "old settings get Automatic");
+    }
+
+    #[test]
+    fn automatic_ranks_the_interface_driver_then_fl_then_asio4all() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let pick = |x: &[&str]| auto_asio(&v(x));
+        assert_eq!(
+            pick(&["ASIO4ALL v2", "FL Studio ASIO", "Focusrite USB ASIO"]).as_deref(),
+            Some("Focusrite USB ASIO")
+        );
+        assert_eq!(
+            pick(&["ASIO4ALL v2", "FL Studio ASIO"]).as_deref(),
+            Some("FL Studio ASIO")
+        );
+        assert_eq!(pick(&["ASIO4ALL v2"]).as_deref(), Some("ASIO4ALL v2"));
+        assert_eq!(pick(&["Generic Low Latency ASIO Driver", "FlexASIO"]), None);
+        assert_eq!(pick(&[]), None);
     }
 
     #[test]

@@ -67,3 +67,6 @@ To publish a release, raise `version` under `[workspace.package]` in
 GPL-3.0-or-later. See [LICENSE](LICENSE). Anyone may use, change and share this
 software; anyone who distributes a modified version must share its source under
 the same licence.
+
+Windows builds include ASIO support made with Steinberg's ASIO SDK
+(github.com/audiosdk/asio), used under its GPLv3 licence option.

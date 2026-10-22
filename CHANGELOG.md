@@ -6,6 +6,7 @@ Each version that lands on `main` is published as a GitHub Release. Versions wit
 
 Quick search, capturing what you played, rendering, and safer projects.
 
+- Audio driver: the new Automatic setting, now the default, picks your audio interface's ASIO driver, then FL Studio ASIO or ASIO4ALL, then Windows audio, and the status line shows what it chose. Windows builds now get the ASIO SDK from Steinberg's GitHub repository.
 - Quick search: press Ctrl+K and type to find actions, windows, instruments, effects, presets, samples, recent projects and themes, then press Enter to use it.
 - Capture MIDI: press Ctrl+Shift+C or the Capture button to turn what you just played into notes, even when you were not recording. Lumen remembers what you play on a MIDI keyboard, the computer keyboard or the on-screen piano.
 - Rendering: Render to audio clip turns a channel or a mixer insert into an audio clip on the playlist, for the whole song or only the current pattern. Consolidate turns the selected clips into one audio clip.
