@@ -138,6 +138,76 @@ pub enum MixEdit {
         channel: usize,
         insert: usize,
     },
+    /// Make `insert` duck when `source` plays: its compressor (one is added when there
+    /// is none) listens to the source.
+    Sidechain {
+        insert: usize,
+        source: usize,
+    },
+    /// Not a change: render the insert to an audio clip (`pattern`: only the current
+    /// pattern), or show the tuner for it. Handled by the workflow tools.
+    Render {
+        insert: usize,
+        pattern: bool,
+    },
+    Tuner {
+        insert: usize,
+    },
+}
+
+/// Settings of the compressor that "Sidechain to this track" adds: deep, quick ducking
+/// that lets go within a beat, as a kick-to-bass pump is usually set up.
+pub fn ducking_state(source: usize) -> serde_json::Value {
+    let mut st = las_dsp::fx::registry::descriptor("las-comp")
+        .map(|d| d.default_state.clone())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(o) = st.as_object_mut() {
+        o.insert("threshold".into(), (-30.0).into());
+        o.insert("ratio".into(), 10.0.into());
+        o.insert("attack".into(), 1.0.into());
+        o.insert("release".into(), 150.0.into());
+        o.insert("sidechain".into(), source.into());
+    }
+    st
+}
+
+/// One-click sidechain: the first compressor on `insert` listens to `source`, or a
+/// ducking compressor is put in the first free slot. Returns the slot, or `None` when
+/// nothing could be done (same insert, the master, no room).
+pub fn sidechain_to(project: &mut Project, insert: usize, source: usize) -> Option<usize> {
+    if insert == source
+        || insert == 0
+        || insert >= project.mixer.len()
+        || source >= project.mixer.len()
+    {
+        return None;
+    }
+    let t = &mut project.mixer[insert];
+    if let Some(i) = t.slots.iter().position(|s| {
+        s.as_ref()
+            .is_some_and(|s| s.plugin_id == "las-comp" || s.plugin_id == "las-ducker")
+    }) {
+        let s = t.slots[i].as_mut()?;
+        if !s.state.is_object() {
+            s.state = serde_json::json!({});
+        }
+        s.state["sidechain"] = source.into();
+        s.enabled = true;
+        return Some(i);
+    }
+    if t.slots.len() < las_project::MIXER_SLOTS {
+        t.slots.resize(las_project::MIXER_SLOTS, None);
+    }
+    let free = t.slots.iter().position(Option::is_none)?;
+    t.slots[free] = Some(las_project::EffectSlot {
+        id: las_project::create::uid("fx"),
+        plugin_id: "las-comp".into(),
+        enabled: true,
+        mix: 1.0,
+        state: ducking_state(source),
+        ..Default::default()
+    });
+    Some(free)
 }
 
 /// The file an insert's effects chain is saved as.
@@ -291,7 +361,12 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
         MixEdit::OpenEffect { .. }
         | MixEdit::Automate(_)
         | MixEdit::SaveChain(_)
-        | MixEdit::LoadChain(_) => {}
+        | MixEdit::LoadChain(_)
+        | MixEdit::Render { .. }
+        | MixEdit::Tuner { .. } => {}
+        MixEdit::Sidechain { insert, source } => {
+            sidechain_to(project, *insert, *source);
+        }
         MixEdit::Eq { insert, band, gain } => {
             if let Some(t) = project.mixer.get_mut(*insert) {
                 let g = if gain.is_finite() {
@@ -609,13 +684,16 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
     for n in 0..las_project::MIXER_SLOTS {
         let row = ui.horizontal(|ui| match t.slots.get(n).and_then(Option::as_ref) {
             Some(s) => {
-                let led = ui
-                    .add(
-                        egui::Button::new(if s.enabled { "\u{25cf}" } else { "\u{25cb}" })
-                            .small()
-                            .frame(false),
-                    )
-                    .on_hover_text("Switch on or off");
+                // the light is painted: the fonts have no filled circle
+                let (lr, led) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+                let c = lr.center();
+                if s.enabled {
+                    ui.painter().circle_filled(c, 4.5, crate::theme::pal().ok);
+                } else {
+                    ui.painter()
+                        .circle_stroke(c, 4.0, egui::Stroke::new(1.2, crate::theme::pal().muted));
+                }
+                let led = led.on_hover_text("Switch on or off");
                 if led.clicked() {
                     edits.push(MixEdit::Begin);
                     edits.push(MixEdit::SlotOn {
@@ -798,6 +876,15 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
 /// The menu of effects to put in a slot: the built-in ones by category, then the
 /// plugins found on the computer. Returns the pick (and whether it is a plugin).
 fn effect_menu(ui: &mut Ui) -> Option<(String, bool)> {
+    // the list is long: it scrolls, so no effect is left off a small screen
+    let room = (ui.ctx().content_rect().height() * 0.55).clamp(160.0, 480.0);
+    egui::ScrollArea::vertical()
+        .max_height(room)
+        .show(ui, effect_list)
+        .inner
+}
+
+fn effect_list(ui: &mut Ui) -> Option<(String, bool)> {
     let p = crate::theme::pal();
     let mut pick = None;
     let mut shown = "";
@@ -948,192 +1035,206 @@ fn strip(
     let p = crate::theme::pal();
     let col = channel_colour_of(&t.color);
     let selected = state.selected == i;
-    let frame = egui::Frame::new()
-        .fill(p.panel)
-        .stroke(egui::Stroke::new(
-            if selected { 1.5 } else { 1.0 },
-            if selected { p.accent } else { p.border },
-        ))
-        .corner_radius(6.0)
-        .inner_margin(4.0)
-        .show(ui, |ui| {
-            ui.set_width(58.0);
-            ui.set_min_height(420.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new(if i == 0 {
-                        "M".to_string()
+    // the strip takes clicks where none of its controls is: a sense given to the
+    // scope is checked before its contents, so a fader, knob or button inside keeps
+    // its own clicks and right-click menu (the strip's own menu used to steal them)
+    let scope = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        egui::Frame::new()
+            .fill(p.panel)
+            .stroke(egui::Stroke::new(
+                if selected { 1.5 } else { 1.0 },
+                if selected { p.accent } else { p.border },
+            ))
+            .corner_radius(6.0)
+            .inner_margin(4.0)
+            .show(ui, |ui| {
+                ui.set_width(58.0);
+                ui.set_min_height(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(if i == 0 {
+                            "M".to_string()
+                        } else {
+                            i.to_string()
+                        })
+                        .size(10.0)
+                        .color(p.muted),
+                    );
+                    // the name on a pill in the insert's colour
+                    let name = if t.name.is_empty() {
+                        format!("Insert {i}")
                     } else {
-                        i.to_string()
-                    })
-                    .size(10.0)
-                    .color(p.muted),
-                );
-                // the name on a pill in the insert's colour
-                let name = if t.name.is_empty() {
-                    format!("Insert {i}")
-                } else {
-                    t.name.clone()
-                };
-                let (r, resp) =
-                    ui.allocate_exact_size(egui::vec2(54.0, 17.0), egui::Sense::click());
-                ui.painter().rect_filled(r, 4.0, col.gamma_multiply(0.55));
-                ui.painter().with_clip_rect(r).text(
-                    r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    name,
-                    egui::FontId::proportional(10.5),
-                    p.text,
-                );
-                if resp.clicked() {
-                    state.selected = i;
-                }
-                let mut pan = t.pan;
-                let (ch, start, pr) =
-                    crate::steps::mini_knob_resp(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.text2);
-                pr.context_menu(|ui| {
-                    let req = || crate::auto::AutoRequest {
-                        target: crate::auto::mixer_target(i, "pan"),
-                        name: format!("{} pan", insert_name(project, i)),
-                        start: (t.pan + 1.0) / 2.0,
+                        t.name.clone()
                     };
-                    if ui.button("Create automation clip").clicked() {
-                        edits.push(MixEdit::Automate(req()));
-                        ui.close();
+                    let (r, resp) =
+                        ui.allocate_exact_size(egui::vec2(54.0, 17.0), egui::Sense::click());
+                    ui.painter().rect_filled(r, 4.0, col.gamma_multiply(0.55));
+                    ui.painter().with_clip_rect(r).text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        name,
+                        egui::FontId::proportional(10.5),
+                        p.text,
+                    );
+                    if resp.clicked() {
+                        state.selected = i;
                     }
-                    crate::midilearn::menu_item(ui, req);
-                });
-                if start {
-                    edits.push(MixEdit::Begin);
-                }
-                if ch {
-                    edits.push(MixEdit::Pan {
-                        insert: i,
-                        value: pan,
+                    resp.on_hover_text(
+                        "Click to select, right-click for render, sidechain and tuner",
+                    )
+                    .context_menu(|ui| insert_menu(ui, project, i, edits));
+                    let mut pan = t.pan;
+                    let (ch, start, pr) = crate::steps::mini_knob_resp(
+                        ui,
+                        &mut pan,
+                        (-1.0, 1.0),
+                        0.0,
+                        "Pan",
+                        p.text2,
+                    );
+                    pr.context_menu(|ui| {
+                        let req = || crate::auto::AutoRequest {
+                            target: crate::auto::mixer_target(i, "pan"),
+                            name: format!("{} pan", insert_name(project, i)),
+                            start: (t.pan + 1.0) / 2.0,
+                        };
+                        if ui.button("Create automation clip").clicked() {
+                            edits.push(MixEdit::Automate(req()));
+                            ui.close();
+                        }
+                        crate::midilearn::menu_item(ui, req);
                     });
-                }
-                eq_strip(ui, t, i, edits);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let m = ui.selectable_label(t.mute, "M");
-                    if m.clicked() {
+                    if start {
                         edits.push(MixEdit::Begin);
-                        edits.push(MixEdit::Mute {
+                    }
+                    if ch {
+                        edits.push(MixEdit::Pan {
                             insert: i,
-                            on: !t.mute,
+                            value: pan,
                         });
                     }
-                    let s = ui.selectable_label(t.solo, "S");
-                    if s.clicked() {
-                        edits.push(MixEdit::Begin);
-                        edits.push(MixEdit::Solo {
-                            insert: i,
-                            on: !t.solo,
-                        });
-                    }
-                });
-                // the clip light: lit once the strip went over 0 dB; click to reset
-                let meter = state.meters.get(i).copied().unwrap_or_default();
-                let (cr, cresp) =
-                    ui.allocate_exact_size(egui::vec2(44.0, 9.0), egui::Sense::click());
-                ui.painter().rect_filled(
-                    cr,
-                    2.0,
-                    if meter.clip {
-                        egui::Color32::from_rgb(240, 60, 50)
+                    eq_strip(ui, t, i, edits);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let m = ui.selectable_label(t.mute, "M");
+                        if m.clicked() {
+                            edits.push(MixEdit::Begin);
+                            edits.push(MixEdit::Mute {
+                                insert: i,
+                                on: !t.mute,
+                            });
+                        }
+                        let s = ui.selectable_label(t.solo, "S");
+                        if s.clicked() {
+                            edits.push(MixEdit::Begin);
+                            edits.push(MixEdit::Solo {
+                                insert: i,
+                                on: !t.solo,
+                            });
+                        }
+                    });
+                    // the clip light: lit once the strip went over 0 dB; click to reset
+                    let meter = state.meters.get(i).copied().unwrap_or_default();
+                    let (cr, cresp) =
+                        ui.allocate_exact_size(egui::vec2(44.0, 9.0), egui::Sense::click());
+                    ui.painter().rect_filled(
+                        cr,
+                        2.0,
+                        if meter.clip {
+                            egui::Color32::from_rgb(240, 60, 50)
+                        } else {
+                            p.well_deep
+                        },
+                    );
+                    ui.painter().text(
+                        cr.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "CLIP",
+                        egui::FontId::proportional(7.5),
+                        if meter.clip {
+                            egui::Color32::WHITE
+                        } else {
+                            p.muted
+                        },
+                    );
+                    let peak_db = if meter.hold > 0.0 {
+                        format!("{:.1} dB", 20.0 * meter.hold.log10())
                     } else {
-                        p.well_deep
-                    },
-                );
-                ui.painter().text(
-                    cr.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "CLIP",
-                    egui::FontId::proportional(7.5),
-                    if meter.clip {
-                        egui::Color32::WHITE
-                    } else {
-                        p.muted
-                    },
-                );
-                let peak_db = if meter.hold > 0.0 {
-                    format!("{:.1} dB", 20.0 * meter.hold.log10())
-                } else {
-                    "-\u{221e} dB".into()
-                };
-                if cresp
-                    .on_hover_text(format!(
+                        "-\u{221e} dB".into()
+                    };
+                    if cresp
+                        .on_hover_text(format!(
                         "Peak {peak_db}. Lights red when the level goes over 0 dB. Click to reset."
                     ))
-                    .clicked()
-                {
-                    if let Some(m) = state.meters.get_mut(i) {
-                        m.reset();
-                    }
-                }
-                let mut vol = t.volume;
-                let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, 190.0);
-                // the peak hold line over the fader's meter
-                if meter.hold > 0.0 {
-                    let fr = r.rect;
-                    let m = egui::Rect::from_min_max(
-                        egui::pos2(fr.right() - 12.0, fr.top() + 8.0),
-                        egui::pos2(fr.right() - 4.0, fr.bottom() - 8.0),
-                    );
-                    let pos = crate::widgets::fader_pos(f64::from(meter.hold), 1.25) as f32;
-                    let y = m.bottom() - pos * m.height();
-                    let col = if meter.hold > 1.0 {
-                        egui::Color32::from_rgb(240, 70, 60)
-                    } else {
-                        egui::Color32::from_gray(230)
-                    };
-                    ui.painter().line_segment(
-                        [egui::pos2(m.left(), y), egui::pos2(m.right(), y)],
-                        egui::Stroke::new(1.5, col),
-                    );
-                }
-                if r.changed() {
-                    if r.drag_started() || !r.dragged() {
-                        edits.push(MixEdit::Begin);
-                    }
-                    edits.push(MixEdit::Volume {
-                        insert: i,
-                        value: vol,
-                    });
-                }
-                r.context_menu(|ui| {
-                    let req = || {
-                        // the master's volume is the project's own, not its strip's
-                        let (target, start) = if i == 0 {
-                            (
-                                crate::auto::master_target("volume"),
-                                project.master_volume / 1.25,
-                            )
-                        } else {
-                            (crate::auto::mixer_target(i, "volume"), t.volume / 1.25)
-                        };
-                        crate::auto::AutoRequest {
-                            target,
-                            name: format!("{} volume", insert_name(project, i)),
-                            start,
+                        .clicked()
+                    {
+                        if let Some(m) = state.meters.get_mut(i) {
+                            m.reset();
                         }
-                    };
-                    crate::midilearn::menu_item(ui, req);
-                    if ui.button("Create automation clip").clicked() {
-                        edits.push(MixEdit::Automate(req()));
-                        ui.close();
                     }
+                    let mut vol = t.volume;
+                    let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, 190.0);
+                    // the peak hold line over the fader's meter
+                    if meter.hold > 0.0 {
+                        let fr = r.rect;
+                        let m = egui::Rect::from_min_max(
+                            egui::pos2(fr.right() - 12.0, fr.top() + 8.0),
+                            egui::pos2(fr.right() - 4.0, fr.bottom() - 8.0),
+                        );
+                        let pos = crate::widgets::fader_pos(f64::from(meter.hold), 1.25) as f32;
+                        let y = m.bottom() - pos * m.height();
+                        let col = if meter.hold > 1.0 {
+                            egui::Color32::from_rgb(240, 70, 60)
+                        } else {
+                            egui::Color32::from_gray(230)
+                        };
+                        ui.painter().line_segment(
+                            [egui::pos2(m.left(), y), egui::pos2(m.right(), y)],
+                            egui::Stroke::new(1.5, col),
+                        );
+                    }
+                    if r.changed() {
+                        if r.drag_started() || !r.dragged() {
+                            edits.push(MixEdit::Begin);
+                        }
+                        edits.push(MixEdit::Volume {
+                            insert: i,
+                            value: vol,
+                        });
+                    }
+                    r.context_menu(|ui| {
+                        let req = || {
+                            // the master's volume is the project's own, not its strip's
+                            let (target, start) = if i == 0 {
+                                (
+                                    crate::auto::master_target("volume"),
+                                    project.master_volume / 1.25,
+                                )
+                            } else {
+                                (crate::auto::mixer_target(i, "volume"), t.volume / 1.25)
+                            };
+                            crate::auto::AutoRequest {
+                                target,
+                                name: format!("{} volume", insert_name(project, i)),
+                                start,
+                            }
+                        };
+                        crate::midilearn::menu_item(ui, req);
+                        if ui.button("Create automation clip").clicked() {
+                            edits.push(MixEdit::Automate(req()));
+                            ui.close();
+                        }
+                    });
+                    let label = if t.volume <= 0.0 {
+                        "-\u{221e}".to_string()
+                    } else {
+                        format!("{:.1}", db(vol))
+                    };
+                    ui.label(RichText::new(label).weak().size(10.0));
                 });
-                r.on_hover_text(format!("{} ({:.1} dB)", pct(vol), db(vol)));
-                let label = if t.volume <= 0.0 {
-                    "-\u{221e}".to_string()
-                } else {
-                    format!("{:.1}", db(vol))
-                };
-                ui.label(RichText::new(label).weak().size(10.0));
             });
-        });
-    let fr = frame.response.interact(egui::Sense::click());
+    });
+    let fr = scope.response;
     if fr.clicked() {
         state.selected = i;
     }
@@ -1291,16 +1392,66 @@ fn eq_strip(ui: &mut Ui, t: &las_project::MixerTrack, i: usize, edits: &mut Vec<
     });
 }
 
+/// The right-click menu of an insert's name: render it, sidechain it, tune it.
+fn insert_menu(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
+    if ui
+        .button("Render to audio clip (song)")
+        .on_hover_text("Bounce what this insert plays in the song to a WAV in the project and put it on the playlist")
+        .clicked()
+    {
+        edits.push(MixEdit::Render { insert: i, pattern: false });
+        ui.close();
+    }
+    if ui
+        .button("Render to audio clip (pattern)")
+        .on_hover_text("Bounce what this insert plays in the current pattern")
+        .clicked()
+    {
+        edits.push(MixEdit::Render {
+            insert: i,
+            pattern: true,
+        });
+        ui.close();
+    }
+    if i > 0 {
+        ui.menu_button("Sidechain to this track...", |ui| {
+            ui.label(RichText::new("Duck this insert when the source plays").weak());
+            for (s, t) in project.mixer.iter().enumerate().skip(1) {
+                if s == i {
+                    continue;
+                }
+                let name = if t.name.is_empty() {
+                    format!("Insert {s}")
+                } else {
+                    format!("{s} {}", t.name)
+                };
+                if ui.button(name).clicked() {
+                    edits.push(MixEdit::Begin);
+                    edits.push(MixEdit::Sidechain {
+                        insert: i,
+                        source: s,
+                    });
+                    ui.close();
+                }
+            }
+        });
+    }
+    if ui
+        .button("Tuner")
+        .on_hover_text("Show the pitch of what this insert plays")
+        .clicked()
+    {
+        edits.push(MixEdit::Tuner { insert: i });
+        ui.close();
+    }
+}
+
 fn db(v: f64) -> f64 {
     if v <= 0.0 {
         -99.0
     } else {
         20.0 * v.log10()
     }
-}
-
-fn pct(v: f64) -> String {
-    format!("{:.0}%", v * 100.0)
 }
 
 /// An effect's id without its `las-` prefix.
@@ -1593,6 +1744,72 @@ mod tests {
             p.mixer[2].slots[free].as_ref().unwrap().state["id"],
             "vendor.plugin"
         );
+    }
+
+    #[test]
+    fn sidechain_to_this_track_ducks_the_target_when_the_kick_hits() {
+        use las_project::create::{add_channel, step_note};
+        let mut p = las_project::create::empty_project("sc");
+        p.bpm = 120.0;
+        p.patterns = vec![las_project::create::pattern(0, None)];
+        let kick = add_channel(&mut p, "sampler");
+        p.channels[kick].sample_id = Some("factory:kick-deep".into());
+        p.samples.push(las_project::SampleRef {
+            id: "factory:kick-deep".into(),
+            name: "Kick".into(),
+            factory: Some(true),
+            ..Default::default()
+        });
+        let pad = add_channel(&mut p, "polaris");
+        let (ki, pi) = (p.channels[kick].mixer_track, p.channels[pad].mixer_track);
+        assert_ne!(ki, pi);
+        let (kid, pid) = (p.channels[kick].id.clone(), p.channels[pad].id.clone());
+        // a kick on every beat of a bar, a held chord under it
+        let pat = &mut p.patterns[0];
+        pat.notes.clear();
+        pat.notes
+            .insert(kid, (0..4).map(|b| step_note(b * 4, 60, 1.0)).collect());
+        let mut held = step_note(0, 48, 0.9);
+        held.len = f64::from(las_project::PPQ) * 4.0;
+        pat.notes.insert(pid, vec![held]);
+        let opts = las_engine::RenderOptions {
+            sample_rate: 24000.0,
+            tail: 0.0,
+            mode: las_engine::Mode::Pattern { id: None, loops: 1 },
+        };
+        let level = |p: &Project| {
+            let r = las_engine::render_tap(p, &Default::default(), &opts, Some(pi)).unwrap();
+            // just after the second kick (0.5 s at 120 BPM) and just before the third
+            let rms = |a: f64, b: f64| {
+                let s = &r.left[(a * 24000.0) as usize..(b * 24000.0) as usize];
+                (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt()
+            };
+            (rms(0.52, 0.58), rms(0.88, 0.98))
+        };
+        let (hit0, gap0) = level(&p);
+        assert!(hit0 > 0.0 && gap0 > 0.0);
+        let mut q = p.clone();
+        apply(
+            &mut q,
+            &MixEdit::Sidechain {
+                insert: pi,
+                source: ki,
+            },
+        );
+        let slot = q.mixer[pi].slots.iter().flatten().next().unwrap();
+        assert_eq!(slot.plugin_id, "las-comp");
+        assert_eq!(slot.state["sidechain"], serde_json::json!(ki));
+        let (hit, gap) = level(&q);
+        assert!(hit < hit0 * 0.6, "ducks on the kick: {hit} against {hit0}");
+        assert!(
+            gap > hit * 1.5,
+            "comes back between kicks: {gap} against {hit}"
+        );
+        // a second click reuses the compressor; the master and itself are refused
+        assert_eq!(sidechain_to(&mut q, pi, ki), Some(0));
+        assert_eq!(q.mixer[pi].slots.iter().flatten().count(), 1);
+        assert_eq!(sidechain_to(&mut q, pi, pi), None);
+        assert_eq!(sidechain_to(&mut q, 0, ki), None);
     }
 
     #[test]

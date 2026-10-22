@@ -506,6 +506,9 @@ pub fn apply(ctx: &egui::Context, id: &str) {
     v.selection.bg_fill = p.accent;
     v.selection.stroke = egui::Stroke::new(1.0, p.on_accent);
     v.hyperlink_color = p.accent_text;
+    // a slider's rail is the colour of a button, which on a window is hard to see: the
+    // part up to the handle is filled, so where it is set always shows
+    v.slider_trailing_fill = true;
     let r = egui::CornerRadius::same(5);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = p.panel;

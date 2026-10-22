@@ -6,6 +6,7 @@
 use crate::app::App;
 use crate::audio::{Command, Instrument, Preview};
 use crate::mixer::{self, MixEdit};
+use crate::raise::Win;
 use crate::steps::{self, StepState};
 use crate::theme::{self, pal};
 use crate::widgets::{knob, meter};
@@ -39,6 +40,66 @@ pub struct Windows {
     pub history: bool,
     pub settings: bool,
     pub analyser: bool,
+}
+
+/// The system's mouse cursor in the window's points, where the system reports it
+/// (Windows, where no pointer moves come during a drag from Explorer).
+pub fn os_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
+    let (x, y) = las_window::cursor_pos()?;
+    let (inner, native) = ctx.input(|i| {
+        (
+            i.viewport().inner_rect,
+            i.viewport().native_pixels_per_point,
+        )
+    });
+    let (inner, native) = (inner?, native?);
+    let ppp = ctx.pixels_per_point();
+    let pos = egui::pos2(
+        (x as f32 - inner.min.x * native) / ppp,
+        (y as f32 - inner.min.y * native) / ppp,
+    );
+    ctx.content_rect().contains(pos).then_some(pos)
+}
+
+/// The window on top where something is let go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Over {
+    Playlist,
+    Rack,
+    /// Another window: the drop does not reach the playlist or the rack under it.
+    Other,
+    /// No window, or not known (no pointer position).
+    Unknown,
+}
+
+impl Over {
+    /// The window on top at `pos`.
+    pub fn at(ctx: &egui::Context, pos: Option<egui::Pos2>) -> Over {
+        let Some(layer) = pos.and_then(|p| ctx.layer_id_at(p)) else {
+            return Over::Unknown;
+        };
+        if layer.order != egui::Order::Middle {
+            return Over::Unknown;
+        }
+        if layer.id == Win::Playlist.id() {
+            Over::Playlist
+        } else if layer.id == Win::Rack.id() {
+            Over::Rack
+        } else {
+            Over::Other
+        }
+    }
+}
+
+/// What was open when the windows were last drawn.
+#[derive(Clone, Default)]
+struct Seen {
+    open: Option<Windows>,
+    effect: Option<(usize, usize)>,
+    auto: Option<String>,
+    chan: Option<usize>,
+    sample: Option<String>,
+    bound: Option<usize>,
 }
 
 /// Something being dragged from the browser: a file of the user's, or a sample of
@@ -92,13 +153,75 @@ fn mixer_file_name(t: &las_project::MixerTrack, i: usize) -> String {
 impl App {
     /// Something let go over the window: on a playlist track it becomes an audio clip
     /// there (as in FL Studio), anywhere else a new sampler channel.
-    pub(crate) fn drop_item(&mut self, item: Dragged, at: Option<egui::Pos2>) {
+    pub(crate) fn drop_item(&mut self, item: Dragged, at: Option<egui::Pos2>, over: Over) {
+        let place = self.drop_place(at, over);
+        self.drop_item_at(item, at, over, place);
+    }
+
+    /// Where on the playlist a drop at `at` lands: the snapped tick and the track under
+    /// the pointer, when the playlist is the window there (or no window is on top of it).
+    pub(crate) fn drop_place(&self, at: Option<egui::Pos2>, over: Over) -> Option<(f64, usize)> {
+        if !self.shell.open.playlist || !matches!(over, Over::Playlist | Over::Unknown) {
+            return None;
+        }
+        self.project
+            .playlist
+            .area
+            .zip(at)
+            .and_then(|(a, pos)| a.place(pos))
+    }
+
+    /// Files dropped from the system: a project opens; sounds become audio clips on
+    /// the playlist at the drop (each further file on the next track down, as in FL
+    /// Studio), or channels when they are not let go over the playlist.
+    pub(crate) fn drop_files(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        at: Option<egui::Pos2>,
+        over: Over,
+    ) {
+        let mut sounds = Vec::new();
+        for path in paths {
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("las"))
+            {
+                self.open_project(&path.to_string_lossy());
+            } else {
+                sounds.push(path);
+            }
+        }
+        if sounds.is_empty() || self.project.loaded.is_none() {
+            return;
+        }
+        let place = self.drop_place(at, over).or_else(|| {
+            // no pointer position came with the drop: over the playlist it still lands,
+            // at the start marker on the first empty track
+            (self.shell.open.playlist && at.is_none() && over == Over::Unknown)
+                .then_some(self.project.loaded.as_ref())
+                .flatten()
+                .map(|l| crate::playlist::free_track(&l.project, self.project.start_tick))
+        });
+        let spots = crate::playlist::drop_spots(place, sounds.len());
+        for (path, spot) in sounds.into_iter().zip(spots) {
+            self.drop_item_at(Dragged::File(path), at, over, spot);
+        }
+    }
+
+    fn drop_item_at(
+        &mut self,
+        item: Dragged,
+        at: Option<egui::Pos2>,
+        over: Over,
+        place: Option<(f64, usize)>,
+    ) {
         if self.project.loaded.is_none() {
             return;
         }
         // on a channel of the rack: a preset loads into it, a sample replaces a sampler's
         let row = at
-            .filter(|_| self.shell.open.rack)
+            .filter(|_| self.shell.open.rack && matches!(over, Over::Rack | Over::Unknown))
+            .filter(|_| place.is_none())
             .and_then(|pos| self.shell.steps.row_at(pos));
         if let Dragged::Preset(inst, name) = &item {
             match row {
@@ -125,14 +248,6 @@ impl App {
                 return;
             }
         }
-        let place = self
-            .shell
-            .open
-            .playlist
-            .then_some(())
-            .and(self.project.playlist.area)
-            .zip(at)
-            .and_then(|(a, pos)| a.place(pos));
         match (item, place) {
             (Dragged::File(p), Some((tick, track))) => self.import_clip_path(&p, tick, track),
             (Dragged::File(p), None) => self.import_path(&p),
@@ -174,9 +289,17 @@ impl App {
         else {
             return;
         };
-        let Some(pos) = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos())) else {
+        let pos = if from_os {
+            self.shell.file_hover
+        } else {
+            ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()))
+        };
+        let Some(pos) = pos else {
             return;
         };
+        if !matches!(Over::at(ctx, Some(pos)), Over::Playlist | Over::Unknown) {
+            return;
+        }
         let Some((tick, track)) = area.place(pos) else {
             return;
         };
@@ -375,6 +498,9 @@ pub struct Export {
     pub loop_only: bool,
     /// Each mixer track as its own file (stems), in the folder of `path`.
     pub stems: bool,
+    /// The project (its file, and its name) the path was made for, while the user has
+    /// not typed or chosen one: another project gets a path of its own.
+    pub made_for: Option<(String, String)>,
     working: Option<Receiver<Result<String, String>>>,
     pub message: Option<Result<String, String>>,
     /// How far the render has come, when it started, and the song's tempo and beats
@@ -397,6 +523,11 @@ pub const FORMATS: [(&str, &str, u32); 7] = [
 ];
 
 pub struct Shell {
+    /// The size of the screen last frame (to notice it getting smaller).
+    pub last_screen: Option<Rect>,
+    /// The height of the keyboard under the synth panels (from the last frame), so the
+    /// panels scroll in what is left and the window fits the screen.
+    pub synth_footer: f32,
     pub tab: BrowserTab,
     pub browser: bool,
     pub open: Windows,
@@ -415,6 +546,9 @@ pub struct Shell {
     pub nebula_page: usize,
     pub nebula_cat: String,
     pub nebula_find: String,
+    /// The channel whose shared Channel settings (Arp and chords) window is open; a
+    /// sampler shows them as tabs of its own window instead.
+    pub chan_settings: Option<usize>,
     /// The memory the app uses, megabytes, and when it was last read.
     ram: (Option<Instant>, f64),
     pub search: String,
@@ -428,8 +562,13 @@ pub struct Shell {
     /// An action waiting for an answer about unsaved changes.
     pub pending: Option<crate::menus::Action>,
     /// The project File > Open recent is to open.
-    /// Bring the instrument window to the front on the next frame.
-    pub raise_synth: bool,
+    /// What was open when the windows were last drawn: a window that has opened
+    /// since comes to the front, whatever opened it.
+    seen: Seen,
+    /// Where files dragged from the system were last seen over the window.
+    pub file_hover: Option<egui::Pos2>,
+    /// The egui id of the instrument window (each face has its own).
+    pub synth_id: Option<egui::Id>,
     /// A message shown in a window until the user closes it.
     pub notice: Option<String>,
     pub recent_target: Option<String>,
@@ -464,6 +603,7 @@ impl Shell {
             nebula_page: 0,
             nebula_cat: String::new(),
             nebula_find: String::new(),
+            chan_settings: None,
             ram: (None, 0.0),
             search: String::new(),
             theme: theme::saved_choice(),
@@ -477,6 +617,7 @@ impl Shell {
                 pattern_only: false,
                 loop_only: false,
                 stems: false,
+                made_for: None,
                 working: None,
                 message: None,
                 progress: None,
@@ -486,15 +627,14 @@ impl Shell {
             status: "Ready".into(),
             pending: None,
             recent_target: None,
-            raise_synth: false,
+            seen: Seen::default(),
+            synth_id: None,
+            file_hover: None,
             notice: None,
             placed: false,
+            synth_footer: 0.0,
+            last_screen: None,
         }
-    }
-
-    /// Whether keys played on the computer keyboard go to the project's channel.
-    pub fn keys_to_project(&self) -> bool {
-        !self.open.synth
     }
 }
 
@@ -845,8 +985,13 @@ impl App {
                 self.shell.metronome = !metro;
                 self.send(Command::Metronome(!metro));
             }
-            // tempo
-            let r = lcd(ui, &format!("{bpm:.2}"), "BPM", 86.0);
+            // tempo: while a tempo automation clip plays the song, the tempo there
+            let live = self.project.loaded.as_ref().and_then(|l| {
+                let song = playing && self.shell.song_mode && !self.project.looping;
+                las_engine::timeline::has_tempo_automation(&l.project, song)
+                    .then(|| las_engine::timeline::tempo_at(&l.project, pos, true))
+            });
+            let r = lcd(ui, &format!("{:.2}", live.unwrap_or(bpm)), "BPM", 86.0);
             if r.drag_started() {
                 self.project.modify(true, |_| {});
             }
@@ -857,7 +1002,24 @@ impl App {
                         .modify(false, |pr| pr.bpm = (pr.bpm + d).clamp(30.0, 300.0));
                 }
             }
-            r.on_hover_text("Drag up and down to change the tempo");
+            let r = r.on_hover_text(
+                "Drag up and down to change the tempo. Right click: Create automation clip (the tempo then follows it in the song)",
+            );
+            let mut automate = None;
+            r.context_menu(|ui| {
+                if ui.button("Create automation clip").clicked() {
+                    let (lo, hi) = las_engine::timeline::TEMPO_RANGE;
+                    automate = Some(crate::auto::AutoRequest {
+                        target: crate::auto::master_target("tempo"),
+                        name: "Tempo".into(),
+                        start: ((bpm - lo) / (hi - lo)).clamp(0.0, 1.0),
+                    });
+                    ui.close();
+                }
+            });
+            if let Some(r) = automate {
+                self.project.create_automation(&r);
+            }
             if ui
                 .add(
                     egui::Button::new(RichText::new("TAP").size(11.0).strong())
@@ -914,6 +1076,40 @@ impl App {
                     });
                     self.project.pattern = n - 1;
                 }
+                ui.menu_button("...", |ui| {
+                    let i = self.project.pattern;
+                    if ui
+                        .button("Clone pattern")
+                        .on_hover_text("A copy of this pattern, to change without changing it")
+                        .clicked()
+                    {
+                        self.project.modify(true, |p| {
+                            crate::menus::clone_pattern(p, i);
+                        });
+                        self.project.pattern = i + 1;
+                        ui.close();
+                    }
+                    if ui.button("Rename pattern...").clicked() {
+                        if let Some(x) = project.patterns.get(i) {
+                            self.project.rename =
+                                Some((crate::project::RenameTarget::Pattern(i), x.name.clone()));
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(project.patterns.len() > 1, egui::Button::new("Delete pattern"))
+                        .on_hover_text("Remove this pattern and its clips in the playlist")
+                        .clicked()
+                    {
+                        self.project.modify(true, |p| {
+                            crate::menus::delete_pattern(p, i);
+                        });
+                        self.project.pattern = i.saturating_sub(1);
+                        ui.close();
+                    }
+                })
+                .response
+                .on_hover_text("Clone, rename or delete the pattern");
             }
             // windows
             let o = self.shell.open;
@@ -931,12 +1127,30 @@ impl App {
             ];
             if let Some(i) = segmented(ui, &labels, &act) {
                 match i {
-                    0 => self.shell.open.rack = !o.rack,
-                    1 => self.shell.open.playlist = !o.playlist,
-                    2 => self.shell.open.roll = !o.roll,
-                    3 => self.shell.open.mixer = !o.mixer,
-                    4 => self.shell.open.synth = !o.synth,
-                    5 => self.shell.open.analyser = !o.analyser,
+                    0 => {
+                        let c = self.covered(ui.ctx(), Win::Rack);
+                        self.shell.open.toggle(Win::Rack, c);
+                    }
+                    1 => {
+                        let c = self.covered(ui.ctx(), Win::Playlist);
+                        self.shell.open.toggle(Win::Playlist, c);
+                    }
+                    2 => {
+                        let c = self.covered(ui.ctx(), Win::Roll);
+                        self.shell.open.toggle(Win::Roll, c);
+                    }
+                    3 => {
+                        let c = self.covered(ui.ctx(), Win::Mixer);
+                        self.shell.open.toggle(Win::Mixer, c);
+                    }
+                    4 => {
+                        let c = self.covered(ui.ctx(), Win::Synth);
+                        self.shell.open.toggle(Win::Synth, c);
+                    }
+                    5 => {
+                        let c = self.covered(ui.ctx(), Win::Analyser);
+                        self.shell.open.toggle(Win::Analyser, c);
+                    }
                     _ => self.shell.browser = !self.shell.browser,
                 }
             }
@@ -957,7 +1171,7 @@ impl App {
                 )
                 .clicked()
             {
-                self.shell.open.export = true;
+                self.shell.open.show(crate::raise::Win::Export);
             }
             // master
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1000,7 +1214,7 @@ impl App {
             } else if self.project.is_building() {
                 RichText::new("Loading the sounds...").color(p.muted)
             } else {
-                RichText::new(&self.shell.status).color(p.muted)
+                RichText::new(self.wf.note.as_deref().unwrap_or(&self.shell.status)).color(p.muted)
             };
             ui.label(msg.size(12.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1031,7 +1245,7 @@ impl App {
                     .add(egui::Label::new(audio.size(12.0)).sense(Sense::click()))
                     .on_hover_text(tip);
                 if r.clicked() {
-                    self.shell.open.settings = true;
+                    self.shell.open.show(crate::raise::Win::Settings);
                 }
                 if let Some(c) = self
                     .audio
@@ -1361,9 +1575,84 @@ impl App {
         }
     }
 
+    /// Whether window `w` is open behind another one.
+    pub(crate) fn covered(&self, ctx: &egui::Context, w: Win) -> bool {
+        let id = match w {
+            Win::Synth => match self.shell.synth_id {
+                Some(id) => id,
+                None => return false,
+            },
+            _ => w.id(),
+        };
+        crate::raise::covered(ctx, id)
+    }
+
+    /// Bring to the front every window opened since the last frame, by whatever
+    /// path: its flag, or a new effect, automation clip, channel or sample.
+    fn raise_newly_opened(&mut self) {
+        let now = Seen {
+            open: Some(self.shell.open),
+            effect: self.project.open_effect,
+            auto: self.project.open_auto.clone(),
+            chan: self.shell.chan_settings,
+            sample: self.sample_editor.as_ref().map(|e| e.channel.clone()),
+            bound: self.bound.map(|b| b.channel()),
+        };
+        let was = std::mem::replace(&mut self.shell.seen, now.clone());
+        if let Some(before) = was.open {
+            crate::raise::newly_opened(&before, &self.shell.open)
+                .into_iter()
+                .for_each(crate::raise::raise);
+        }
+        let changed = |a: bool, w: Win| {
+            if a {
+                crate::raise::raise(w);
+            }
+        };
+        changed(
+            now.effect.is_some() && now.effect != was.effect,
+            Win::Effect,
+        );
+        changed(now.auto.is_some() && now.auto != was.auto, Win::Automation);
+        changed(
+            now.chan.is_some() && now.chan != was.chan,
+            Win::ChanSettings,
+        );
+        changed(
+            now.sample.is_some() && now.sample != was.sample,
+            Win::SampleEditor,
+        );
+        changed(
+            self.shell.open.synth && now.bound.is_some() && now.bound != was.bound,
+            Win::Synth,
+        );
+    }
+
     /// The floating windows. `area` is the workspace they sit in.
     pub(crate) fn windows(&mut self, ctx: &egui::Context, area: Rect) {
+        // the screen got smaller (a smaller window, a larger interface scale): windows
+        // that no longer fit are laid out afresh, at their first places and sizes, so
+        // no edge, title or close button is left out of reach
+        let screen = ctx.content_rect();
+        let shrank = self.shell.last_screen.is_some_and(|s| {
+            screen.width() < s.width() - 1.0 || screen.height() < s.height() - 1.0
+        });
+        self.shell.last_screen = Some(screen);
+        if shrank {
+            let off = ctx.memory(|m| {
+                m.layer_ids()
+                    .filter(|l| l.order == egui::Order::Middle)
+                    .filter_map(|l| m.area_rect(l.id))
+                    .any(|r| !screen.expand(1.0).contains_rect(r))
+            });
+            if off {
+                ctx.memory_mut(|m| m.reset_areas());
+                ctx.data_mut(|d| d.clear());
+                self.shell.placed = false;
+            }
+        }
         let a = area.shrink(6.0);
+        self.shell.steps.room_bottom = Some(area.bottom());
         let first = !self.shell.placed;
         self.shell.placed = true;
         let (song_head, pat_head) = match self.audio.as_ref() {
@@ -1377,12 +1666,17 @@ impl App {
             }
             _ => (None, None),
         };
+        self.raise_newly_opened();
         let mut open = self.shell.open;
         let before = open;
         let win = |title: &str, pos: egui::Pos2, size: egui::Vec2| {
+            // never bigger than the room the windows have: what does not fit scrolls or
+            // is cut, and every edge stays in reach to resize
             let mut w = egui::Window::new(title)
                 .constrain_to(area)
                 .resizable(true)
+                .max_width(area.width() - 16.0)
+                .max_height(area.height() - 12.0)
                 .default_size(size);
             if first {
                 w = w.default_pos(pos);
@@ -1391,7 +1685,9 @@ impl App {
         };
         let have = self.project.loaded.is_some();
         if open.playlist {
+            crate::raise::front(ctx, Win::Playlist, Win::Playlist.id());
             win("Playlist - Arrangement", a.min, vec2(a.width(), a.height()))
+                .id(Win::Playlist.id())
                 .open(&mut open.playlist)
                 .show(ctx, |ui| {
                     if have {
@@ -1402,11 +1698,14 @@ impl App {
                 });
         }
         if open.rack {
+            crate::raise::front(ctx, Win::Rack, Win::Rack.id());
             win(
                 "Channel Rack",
                 a.min + vec2(170.0, 80.0),
-                vec2(740.0, 300.0),
+                // tall enough for a song's channels; more scroll
+                vec2(740.0, (a.height() - 120.0).clamp(300.0, 560.0)),
             )
+            .id(Win::Rack.id())
             .open(&mut open.rack)
             .show(ctx, |ui| {
                 if have {
@@ -1417,11 +1716,13 @@ impl App {
             });
         }
         if open.roll {
+            crate::raise::front(ctx, Win::Roll, Win::Roll.id());
             win(
                 "Piano Roll",
                 a.min + vec2(60.0, 40.0),
                 vec2(a.width() - 120.0, a.height() - 80.0),
             )
+            .id(Win::Roll.id())
             .open(&mut open.roll)
             .show(ctx, |ui| {
                 if have {
@@ -1432,11 +1733,13 @@ impl App {
             });
         }
         if open.mixer {
+            crate::raise::front(ctx, Win::Mixer, Win::Mixer.id());
             win(
                 "Mixer",
                 a.min + vec2(30.0, (a.height() - 470.0).max(10.0)),
                 vec2(a.width() - 60.0, 450.0),
             )
+            .id(Win::Mixer.id())
             .open(&mut open.mixer)
             .show(ctx, |ui| {
                 if have {
@@ -1450,15 +1753,27 @@ impl App {
             // each face has its own window size (TriOsc is a small one)
             let face = match self.bound {
                 None | Some(crate::inst::Bound::Synth(_)) => self.face_id(),
+                Some(crate::inst::Bound::Nebula(_)) => "nebula".into(),
                 _ => String::new(),
             };
             let size = match face.as_str() {
                 "triosc" => vec2(640.0, 560.0),
                 "monolith" => vec2(1060.0, 740.0),
                 "zenith" => vec2(1000.0, 790.0),
+                "nebula" => vec2(1100.0, 660.0),
                 _ => vec2(900.0, 680.0),
             };
             let first_pos = a.min + vec2(160.0, 30.0);
+            // never taller or wider than the screen leaves room for (720p, 900 px): what
+            // does not fit scrolls
+            let size = vec2(
+                size.x.min((a.width() - 20.0).max(320.0)),
+                size.y.min((a.height() - 40.0).max(240.0)),
+            );
+            let first_pos = pos2(
+                first_pos.x.min((a.right() - size.x).max(a.left())),
+                first_pos.y,
+            );
             // the window is named after the channel it shows
             let title = self
                 .bound
@@ -1473,41 +1788,51 @@ impl App {
                 })
                 .unwrap_or_else(|| "Instrument".into());
             let id = egui::Id::unique(("synth-window", face));
-            if std::mem::take(&mut self.shell.raise_synth) {
-                ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
-            }
+            crate::raise::front(ctx, Win::Synth, id);
+            self.shell.synth_id = Some(id);
             win(&title, first_pos, size)
                 .id(id)
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
-                    Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
-                    Some(crate::inst::Bound::Hosted(c)) => self.hosted_channel(ui, c),
-                    Some(crate::inst::Bound::Nebula(c)) => {
-                        crate::skin::face(ui, crate::skin::skin_for("nebula"), |ui| {
-                            self.nebula_window(ui, c)
-                        })
-                    }
-                    Some(crate::inst::Bound::Weave(c)) => {
-                        crate::skin::face(ui, crate::skin::skin_for("weave"), |ui| {
-                            self.weave_window(ui, c)
-                        })
-                    }
-                    Some(crate::inst::Bound::Pads(c)) => {
-                        crate::skin::face(ui, crate::skin::skin_for("lumapad"), |ui| {
-                            self.pads_window(ui, c)
-                        })
-                    }
-                    Some(crate::inst::Bound::Sampler(c)) => {
-                        crate::skin::face(ui, crate::skin::skin_for("sampler"), |ui| {
-                            self.sampler_window(ui, c)
-                        })
+                    Some(b) if !matches!(b, crate::inst::Bound::Synth(_)) => {
+                        egui::ScrollArea::both()
+                            .id_salt("instrument-scroll")
+                            .show(ui, |ui| self.bound_window(ui, b));
                     }
                     _ => self.synth_window(ui),
                 });
         }
+        if let Some(c) = self.shell.chan_settings {
+            let mut keep = true;
+            let name = self
+                .project
+                .loaded
+                .as_ref()
+                .and_then(|l| l.project.channels.get(c))
+                .map(|ch| ch.name.clone());
+            match name {
+                Some(name) => {
+                    crate::raise::front(ctx, Win::ChanSettings, Win::ChanSettings.id());
+                    win(
+                        &format!("Channel settings: {name}"),
+                        a.min + vec2(300.0, 110.0),
+                        vec2(460.0, 420.0),
+                    )
+                    .id(Win::ChanSettings.id())
+                    .open(&mut keep)
+                    .show(ctx, |ui| self.shared_settings(ui, c));
+                }
+                None => keep = false,
+            }
+            if !keep {
+                self.shell.chan_settings = None;
+            }
+        }
         if let Some((insert, slot)) = self.project.open_effect {
             let mut keep = true;
+            crate::raise::front(ctx, Win::Effect, Win::Effect.id());
             win("Effect", a.min + vec2(260.0, 120.0), vec2(620.0, 420.0))
+                .id(Win::Effect.id())
                 .open(&mut keep)
                 .show(ctx, |ui| {
                     let mut skin = crate::skin::skin_for("fx");
@@ -1518,9 +1843,12 @@ impl App {
                 self.project.open_effect = None;
             }
         }
+        self.sample_editor_window(ctx, area);
         if let Some(id) = self.project.open_auto.clone() {
             let mut keep = true;
+            crate::raise::front(ctx, Win::Automation, Win::Automation.id());
             win("Automation", a.min + vec2(220.0, 140.0), vec2(620.0, 380.0))
+                .id(Win::Automation.id())
                 .open(&mut keep)
                 .show(ctx, |ui| self.auto_window(ui, &id));
             if !keep {
@@ -1528,7 +1856,9 @@ impl App {
             }
         }
         if open.export {
+            crate::raise::front(ctx, Win::Export, Win::Export.id());
             egui::Window::new("Export audio")
+                .id(Win::Export.id())
                 .pivot(egui::Align2::CENTER_CENTER)
                 .default_pos(ctx.content_rect().center())
                 .open(&mut open.export)
@@ -1548,6 +1878,7 @@ impl App {
         self.analyser_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
+        self.workflow_windows(ctx);
     }
 
     fn no_project(&self, ui: &mut Ui) {
@@ -1572,6 +1903,7 @@ impl App {
             &mut self.shell.steps,
             playhead,
         );
+        let footer_top = ui.cursor().top();
         ui.separator();
         ui.horizontal(|ui| {
             ui.menu_button("+ Add channel", |ui| {
@@ -1582,6 +1914,7 @@ impl App {
                     }
                 }
             });
+            self.capture_button(ui);
             ui.label(
                 RichText::new(
                     project
@@ -1604,6 +1937,8 @@ impl App {
                 }
             });
         });
+        // how tall the buttons under the rows are, so the rows leave them room
+        self.shell.steps.footer = ui.cursor().top() - footer_top;
         drop(project);
         self.project.channel = selected;
         if let Some(n) = out.steps {
@@ -1616,10 +1951,16 @@ impl App {
         }
         if let Some(c) = out.open_roll {
             self.project.channel = c;
-            self.shell.open.roll = true;
+            self.shell.open.show(crate::raise::Win::Roll);
         }
         if let Some(c) = out.open_synth {
             self.open_channel(c);
+        }
+        if let Some(c) = out.open_settings {
+            self.open_channel_settings(c);
+        }
+        if let Some((c, pat)) = out.render {
+            self.rack_render(c, pat);
         }
         for (ch, e) in &out.notes {
             self.project.edit_channel(*ch, std::slice::from_ref(e));
@@ -1687,11 +2028,12 @@ impl App {
             });
         });
         ui.label(
-            RichText::new("Click to add a point, drag to move it, right click to remove it.")
+            RichText::new("Click to add a point and drag to move it. Right click a point for its curve (single, double, hold, stairs, smooth) or to delete it. Drag the small ring between two points up or down to bend the curve, double click it to straighten.")
                 .weak()
                 .size(11.0),
         );
-        let edits = crate::auto::draw(ui, clip, &mut self.project.auto_state);
+        let mut edits = crate::auto::lfo_row(ui, clip, &mut self.project.auto_state);
+        edits.extend(crate::auto::draw(ui, clip, &mut self.project.auto_state));
         let cid = clip.id.clone();
         drop(project);
         self.project.edit_auto(&edits);
@@ -1717,15 +2059,16 @@ impl App {
                 .collect(),
             _ => Vec::new(),
         };
+        self.reference_bar(ui);
         let ch = self.project.channel;
         let selected = project.channels.get(ch).map(|c| (ch, c.name.as_str()));
-        let mut edits = mixer::draw(
-            ui,
-            &project,
-            &mut self.project.mixer_state,
-            &peaks,
-            selected,
-        );
+        // the strips scroll up and down when the window is lower than they are (a
+        // small screen, or a large interface scale)
+        let state = &mut self.project.mixer_state;
+        let mut edits = egui::ScrollArea::vertical()
+            .id_salt("mixer-scroll")
+            .show(ui, |ui| mixer::draw(ui, &project, state, &peaks, selected))
+            .inner;
         // the effects chain files
         let mut more = Vec::new();
         edits.retain(|e| match e {
@@ -1766,8 +2109,31 @@ impl App {
             _ => true,
         });
         edits.extend(more);
+        let edits = self.workflow_mix_edits(edits);
         drop(project);
         self.project.edit_mixer(&edits);
+    }
+
+    /// The window of a channel whose instrument has its own face (not the synth panels).
+    fn bound_window(&mut self, ui: &mut Ui, b: crate::inst::Bound) {
+        use crate::inst::Bound;
+        match b {
+            Bound::Basic(c) => self.basic_editor(ui, c),
+            Bound::Hosted(c) => self.hosted_channel(ui, c),
+            Bound::Nebula(c) => crate::skin::face(ui, crate::skin::skin_for("nebula"), |ui| {
+                self.nebula_window(ui, c)
+            }),
+            Bound::Weave(c) => crate::skin::face(ui, crate::skin::skin_for("weave"), |ui| {
+                self.weave_window(ui, c)
+            }),
+            Bound::Pads(c) => crate::skin::face(ui, crate::skin::skin_for("lumapad"), |ui| {
+                self.pads_window(ui, c)
+            }),
+            Bound::Sampler(c) => crate::skin::face(ui, crate::skin::skin_for("sampler"), |ui| {
+                self.sampler_window(ui, c)
+            }),
+            Bound::Synth(_) => self.synth_window(ui),
+        }
     }
 
     fn synth_window(&mut self, ui: &mut Ui) {
@@ -1812,31 +2178,40 @@ impl App {
             ui.selectable_value(&mut self.view, crate::app::View::Effects, label);
         });
         ui.separator();
-        egui::ScrollArea::both().show(ui, |ui| {
-            if self.view == crate::app::View::Effects {
-                self.effects_view(ui);
-                return;
-            }
-            match self.inst {
-                Instrument::Facet => self.synth(ui),
-                Instrument::Mist => self.mist_panel(ui),
-                Instrument::Polaris => match self.face_id().as_str() {
-                    "monolith" => self.monolith_panel(ui),
-                    "zenith" => self.zenith_panel(ui),
-                    "triosc" => self.triosc_panel(ui),
-                    _ => self.polaris_panel(ui),
-                },
-            }
-        });
+        let footer = self.shell.synth_footer.max(60.0);
+        egui::ScrollArea::both()
+            .max_height((ui.available_height() - footer).max(160.0))
+            .show(ui, |ui| {
+                if self.view == crate::app::View::Effects {
+                    self.effects_view(ui);
+                    return;
+                }
+                match self.inst {
+                    Instrument::Facet => self.synth(ui),
+                    Instrument::Mist => self.mist_panel(ui),
+                    Instrument::Polaris => match self.face_id().as_str() {
+                        "monolith" => self.monolith_panel(ui),
+                        "zenith" => self.zenith_panel(ui),
+                        "triosc" => self.triosc_panel(ui),
+                        _ => self.polaris_panel(ui),
+                    },
+                }
+            });
+        let top = ui.cursor().top();
         ui.separator();
         self.keyboard(ui);
+        self.shell.synth_footer = ui.cursor().top() - top;
     }
 
     fn export_window(&mut self, ui: &mut Ui) {
-        if self.shell.export.path.is_empty() {
-            if let Some(l) = &self.project.loaded {
-                let (_, kind, _) = FORMATS[self.shell.export.format];
-                self.shell.export.path = default_export_path(&l.path, kind);
+        if let Some(l) = &self.project.loaded {
+            let now = (l.path.clone(), l.project.name.clone());
+            let e = &mut self.shell.export;
+            let stale = e.made_for.as_ref().is_some_and(|m| *m != now);
+            if e.path.is_empty() || stale {
+                let (_, kind, _) = FORMATS[e.format];
+                e.path = default_export_path(&now.0, &now.1, kind);
+                e.made_for = Some(now);
             }
         }
         // a render that has finished
@@ -1877,7 +2252,12 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label("Save to");
-            ui.add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0));
+            if ui
+                .add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0))
+                .changed()
+            {
+                self.shell.export.made_for = None;
+            }
             let stems = self.shell.export.stems;
             if stems
                 && ui
@@ -1894,6 +2274,7 @@ impl App {
                 if let Some(d) = dialog.pick_folder() {
                     let file = format!("{}.{kind}", self.export_name());
                     self.shell.export.path = d.join(file).to_string_lossy().into_owned();
+                    self.shell.export.made_for = None;
                 }
             }
             if !stems
@@ -1918,6 +2299,7 @@ impl App {
                         p.set_extension(kind);
                     }
                     self.shell.export.path = p.to_string_lossy().into_owned();
+                    self.shell.export.made_for = None;
                 }
             }
         });
@@ -2100,7 +2482,26 @@ impl App {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty());
-        from_file.unwrap_or_else(|| "Untitled".into())
+        let from_name = self
+            .project
+            .loaded
+            .as_ref()
+            .map(|l| {
+                l.project
+                    .name
+                    .trim()
+                    .chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || " -_()".contains(c) {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .filter(|s| !s.trim().is_empty());
+        from_file.or(from_name).unwrap_or_else(|| "Untitled".into())
     }
 }
 
@@ -2194,18 +2595,34 @@ fn clock(s: f64) -> String {
 }
 
 /// Where an export goes when the user has not chosen: next to the project, or in the
-/// Music folder for a project not yet saved.
-fn default_export_path(project: &str, kind: &str) -> String {
+/// Music folder for a project not yet saved (named after the song).
+fn default_export_path(project: &str, name: &str, kind: &str) -> String {
     if !project.is_empty() {
         return format!("{}.{kind}", project.trim_end_matches(".las"));
     }
+    let name: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || " -_()".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = if name.trim().is_empty() {
+        "Untitled".to_string()
+    } else {
+        name.trim().to_string()
+    };
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
         .unwrap_or_default();
     let music = home.join("Music");
     let dir = if music.is_dir() { music } else { home };
-    dir.join(format!("Untitled.{kind}"))
+    dir.join(format!("{name}.{kind}"))
         .to_string_lossy()
         .into_owned()
 }
@@ -2249,8 +2666,14 @@ mod tests {
     fn export_paths_and_clocks_read_well() {
         assert_eq!(clock(0.0), "0:00");
         assert_eq!(clock(195.4), "3:15");
-        assert_eq!(default_export_path("/a/song.las", "mp3"), "/a/song.mp3");
-        assert!(default_export_path("", "wav").ends_with("Untitled.wav"));
+        assert_eq!(
+            default_export_path("/a/song.las", "x", "mp3"),
+            "/a/song.mp3"
+        );
+        assert!(default_export_path("", "", "wav").ends_with("Untitled.wav"));
+        assert!(default_export_path("", "Lumen Nights (demo)", "wav")
+            .ends_with("Lumen Nights (demo).wav"));
+        assert!(default_export_path("", "a/b:c", "wav").ends_with("a_b_c.wav"));
     }
 
     #[test]

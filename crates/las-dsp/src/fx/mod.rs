@@ -103,24 +103,37 @@ impl DelayLine {
         }
     }
 
+    #[inline]
     pub fn write(&mut self, x: f64) {
         self.buf[self.pos] = x as f32;
-        self.pos = (self.pos + 1) % self.size;
+        self.pos += 1;
+        if self.pos == self.size {
+            self.pos = 0;
+        }
     }
 
     /// Read `delay` samples behind the last written sample (fractional).
+    #[inline]
     pub fn read(&self, delay: f64) -> f64 {
         let d = (self.size as f64 - 3.0).min(delay.max(1.0));
         let p = self.pos as f64 - 1.0 - d;
-        let i = p.floor();
+        let i = crate::floor(p);
         let f = p - i;
-        let i = i as i64;
-        let s = self.size as i64;
-        let at = |k: i64| f64::from(self.buf[(((i + k) % s) + s) as usize % self.size]);
-        let xm1 = at(-1);
-        let x0 = at(0);
-        let x1 = at(1);
-        let x2 = at(2);
+        // `p` is at least 2 - size, so one wrap brings the first tap into the buffer
+        let size = self.size;
+        let mut k = i as i64 - 1;
+        if k < 0 {
+            k += size as i64;
+        }
+        let k = k as usize;
+        let (xm1, x0, x1, x2) = if k + 3 < size {
+            let w = &self.buf[k..k + 4];
+            (w[0], w[1], w[2], w[3])
+        } else {
+            let at = |j: usize| self.buf[(k + j) % size];
+            (at(0), at(1), at(2), at(3))
+        };
+        let (xm1, x0, x1, x2) = (f64::from(xm1), f64::from(x0), f64::from(x1), f64::from(x2));
         let c1 = 0.5 * (x1 - xm1);
         let c2 = xm1 - 2.5 * x0 + 2.0 * x1 - 0.5 * x2;
         let c3 = 0.5 * (x2 - xm1) + 1.5 * (x0 - x1);
@@ -135,7 +148,7 @@ impl DelayLine {
         let d = delay.clamp(0.0, size - 2.0);
         let p = self.pos as f64 - 1.0 - d;
         let p = if p < 0.0 { p + size } else { p };
-        let i = p.floor();
+        let i = crate::floor(p);
         let f = p - i;
         let i1 = i as usize % self.size;
         let i2 = (i1 + 1) % self.size;

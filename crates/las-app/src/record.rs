@@ -23,8 +23,8 @@ pub struct Recorder {
 impl Recorder {
     /// Open the input device of that name (or the default one, for "" or one that is
     /// not there).
-    pub fn open(name: &str) -> Result<Self, String> {
-        let device = crate::audio::pick_input(name).ok_or("no audio input device found")?;
+    pub fn open(name: &str, driver: &str) -> Result<Self, String> {
+        let device = crate::audio::pick_input(name, driver).ok_or("no audio input device found")?;
         let supported = device
             .default_input_config()
             .map_err(|e| format!("cannot read the input format: {e}"))?;

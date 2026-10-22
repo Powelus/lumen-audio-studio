@@ -5,7 +5,8 @@
 //! [`las_dsp::modular::param_id`].
 
 use crate::external::{Instrument, Note, ParamLines};
-use las_dsp::modular::{split_param_id, Modular, Patch};
+use las_dsp::engine::Cc;
+use las_dsp::modular::{split_param_id, Controls, Modular, Patch};
 use serde_json::Value;
 
 /// The `pluginId` of a Weave channel.
@@ -23,6 +24,7 @@ pub fn patch_of(state: &Value) -> Patch {
 pub(crate) struct Weave {
     synth: Modular,
     lines: ParamLines,
+    controls: Controls,
 }
 
 impl Weave {
@@ -30,6 +32,7 @@ impl Weave {
         Self {
             synth: Modular::new(&patch_of(state), sr),
             lines: ParamLines::default(),
+            controls: Controls::default(),
         }
     }
 
@@ -82,6 +85,16 @@ impl Instrument for Weave {
             self.lines.automate(id, points, first);
         }
         known
+    }
+
+    fn controller(&mut self, cc: Cc, value: f64) {
+        let v = value as f32;
+        match cc {
+            Cc::Mw => self.controls.wheel = v.clamp(0.0, 1.0),
+            Cc::Pb => self.controls.bend = v.clamp(-1.0, 1.0),
+            Cc::At => self.controls.pressure = v.clamp(0.0, 1.0),
+        }
+        self.synth.set_controls(self.controls);
     }
 }
 
@@ -141,6 +154,38 @@ mod tests {
         assert_eq!(patch_of(&state), Patch::default());
         let state = serde_json::json!({ "patch": Patch::default().to_json() });
         assert_eq!(patch_of(&state), Patch::default());
+    }
+
+    #[test]
+    fn the_mod_wheel_bend_and_pressure_reach_the_keys_module() {
+        use las_dsp::modular::{Cable, Node};
+        // a patch that puts the mod wheel (and the pressure) straight out
+        let patch = Patch::new(
+            vec![
+                Node::new(1, Kind::Keys, [0.0; 2]),
+                Node::new(100, Kind::Output, [0.0; 2]).with("level", 1.0),
+            ],
+            vec![
+                Cable::new(1, "wheel", 100, "left", 1.0),
+                Cable::new(1, "pressure", 100, "right", 1.0),
+            ],
+            4,
+        );
+        let state = serde_json::json!({ "patch": patch.to_json() });
+        let mut tables = las_dsp::wavetable::TableLibrary::new();
+        let mut inst =
+            crate::instrument::Instrument::new(WEAVE_ID, &state, SR, &mut tables, None, Vec::new())
+                .unwrap();
+        inst.note_on(60.0, 1.0, 0.0);
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        inst.render(0.0, &mut l, &mut r);
+        let still = l[200].abs();
+        inst.controller(Cc::Mw, 0.75, 0.0);
+        inst.controller(Cc::At, 0.5, 0.0);
+        inst.render(256.0 / SR, &mut l, &mut r);
+        assert!(still < 1e-6, "{still}");
+        assert!(l[200] > 0.1, "{}", l[200]);
+        assert!(r[200] > 0.05, "{}", r[200]);
     }
 
     #[test]

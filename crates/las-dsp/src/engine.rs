@@ -88,6 +88,13 @@ pub enum Event {
         time: f64,
         key: f64,
     },
+    /// A note off whose release takes `scale` times as long as the patch's (FL's note
+    /// release: 1 leaves it as it is).
+    OffScaled {
+        time: f64,
+        key: f64,
+        scale: f64,
+    },
     AllOff {
         time: f64,
     },
@@ -104,6 +111,7 @@ impl Event {
         match *self {
             Event::On { time, .. }
             | Event::Off { time, .. }
+            | Event::OffScaled { time, .. }
             | Event::AllOff { time }
             | Event::Cc { time, .. } => time,
         }
@@ -148,7 +156,7 @@ fn flush(x: f64) -> f64 {
 
 /// JavaScript's `Math.round`: halves round up.
 pub(crate) fn js_round(x: f64) -> f64 {
-    (x + 0.5).floor()
+    crate::floor(x + 0.5)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +175,11 @@ pub struct Env {
     stage: Stage,
     pub level: f64,
     hold_left: f64,
+    /// How much longer than the patch's this note's release is.
+    rel_scale: f64,
+    /// The last decay or release coefficient, with the step and time it was made for:
+    /// the amplitude envelope steps every sample, and `exp` each time is costly.
+    coef: (f64, f64, f64),
 }
 
 impl Default for Env {
@@ -175,6 +188,8 @@ impl Default for Env {
             stage: Stage::Idle,
             level: 0.0,
             hold_left: 0.0,
+            rel_scale: 1.0,
+            coef: (f64::NAN, f64::NAN, 0.0),
         }
     }
 }
@@ -189,12 +204,31 @@ impl Env {
             self.level = 0.0;
         }
         self.stage = Stage::Attack;
+        self.rel_scale = 1.0;
     }
 
     pub fn release(&mut self) {
+        self.release_scaled(1.0);
+    }
+
+    /// Release, taking `scale` times the patch's release time.
+    pub fn release_scaled(&mut self, scale: f64) {
         if self.stage != Stage::Idle {
             self.stage = Stage::Release;
+            self.rel_scale = if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            };
         }
+    }
+
+    /// `exp(-4.6 * n / time)`, remembered while `n` and `time` stay the same.
+    fn coef(&mut self, n: f64, time: f64) -> f64 {
+        if self.coef.0 != n || self.coef.1 != time {
+            self.coef = (n, time, ((-4.6 * n) / time).exp());
+        }
+        self.coef.2
     }
 
     /// Advance by `n` samples; returns the level.
@@ -215,7 +249,7 @@ impl Env {
                 }
             }
             Stage::Decay => {
-                let coef = ((-4.6 * n) / (p.d * sr).max(1.0)).exp();
+                let coef = self.coef(n, (p.d * sr).max(1.0));
                 self.level = p.s + (self.level - p.s) * coef;
                 if (self.level - p.s).abs() < 0.0005 {
                     self.level = p.s;
@@ -224,7 +258,8 @@ impl Env {
             }
             Stage::Sustain => self.level = p.s,
             Stage::Release => {
-                self.level *= ((-4.6 * n) / (p.r * sr).max(1.0)).exp();
+                let coef = self.coef(n, (p.r * self.rel_scale * sr).max(1.0));
+                self.level *= coef;
                 if self.level < 0.0002 {
                     self.level = 0.0;
                     self.stage = Stage::Idle;
@@ -804,6 +839,11 @@ impl<S: Sound> VoiceEngine<S> {
     }
 
     pub fn note_off(&mut self, key: f64) {
+        self.note_off_scaled(key, 1.0);
+    }
+
+    /// Let go of a key with its release `scale` times as long as the patch's.
+    pub fn note_off_scaled(&mut self, key: f64, scale: f64) {
         self.held_keys.retain(|k| *k != key);
         let voice = self.patch.voice;
         if voice.mono && !self.held_keys.is_empty() {
@@ -824,8 +864,8 @@ impl<S: Sound> VoiceEngine<S> {
         for v in &mut self.voices {
             if v.base.active && !v.base.released && v.base.key == key {
                 v.base.released = true;
-                v.base.amp.release();
-                v.base.mod_env.release();
+                v.base.amp.release_scaled(scale);
+                v.base.mod_env.release_scaled(scale);
             }
         }
     }
@@ -976,6 +1016,7 @@ impl<S: Sound> VoiceEngine<S> {
                         ..
                     } => self.note_on(key, vel, fine, pan, t0 + pos as f64 / sr),
                     Event::Off { key, .. } => self.note_off(key),
+                    Event::OffScaled { key, scale, .. } => self.note_off_scaled(key, scale),
                     Event::AllOff { .. } => self.all_off(),
                     Event::Cc { cc, value, .. } => match cc {
                         Cc::Mw => self.mw = value,

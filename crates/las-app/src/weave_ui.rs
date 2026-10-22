@@ -331,7 +331,7 @@ impl App {
             if let Some(i) = ed.selected.filter(|&i| i < patch.cables.len()) {
                 ui.separator();
                 let c = &mut patch.cables[i];
-                ui.label(format!("{} → {}", c.output, c.input));
+                ui.label(format!("{} ➡ {}", c.output, c.input));
                 ui.add(
                     egui::Slider::new(&mut c.amount, -1.0..=1.0)
                         .text("amount")
@@ -427,7 +427,7 @@ impl App {
                 pull = Some(ci);
             }
             r.on_hover_text(format!(
-                "{} {} → {} {} ({:.2})\nClick to set the amount, right click to pull out",
+                "{} {} ➡ {} {} ({:.2})\nClick to set the amount, right click to pull out",
                 kind_name(a.kind),
                 c.output,
                 kind_name(b.kind),

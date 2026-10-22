@@ -54,8 +54,26 @@ pub enum PlEdit {
         clip: String,
         color: String,
     },
-    /// Give a pattern clip its own copy of the pattern, so editing it leaves the others.
-    MakeUnique(String),
+    /// Give pattern clips (by id) each its own copy of their pattern, so editing one
+    /// leaves the others.
+    MakeUnique(Vec<String>),
+    /// Turn the song loop on or off, keeping its range.
+    LoopOn(bool),
+    /// Move a marker (by id) to a tick.
+    MoveMarker {
+        id: String,
+        tick: f64,
+    },
+    /// Ask for a new name for a pattern (by id).
+    AskRenamePattern(String),
+    /// Replace a pattern clip with one clip per channel of its pattern, each playing a
+    /// new pattern of that channel's notes, stacked on the tracks below (FL's "Split by
+    /// channel").
+    SplitByChannel(String),
+    /// Put a copy of a pattern (by id) after it.
+    ClonePattern(String),
+    /// Remove a pattern (by id) and its clips; the last pattern stays.
+    DeletePattern(String),
     /// Put a song marker at a tick.
     AddMarker(f64),
     DeleteMarker(String),
@@ -173,11 +191,18 @@ enum Drag {
         id: String,
         out: bool,
     },
-    Seek,
     /// The paint tool placing clips.
     Paint,
     /// The selected clips together.
     Group,
+    /// A song marker along the ruler.
+    Marker {
+        id: String,
+    },
+    /// The song loop, dragged out on the ruler from a tick.
+    LoopRange {
+        from: f64,
+    },
     /// A rectangle that selects what it touches.
     Marquee,
 }
@@ -187,8 +212,10 @@ pub struct PlaylistState {
     pub menu_at: Option<(f64, Option<String>)>,
     /// The clip under the last right click, for its colour menu.
     pub menu_clip: Option<String>,
-    /// The stretch of the song that plays over and over (ticks), if any.
+    /// The loop range of the song (ticks), if one is set; it plays over and over while
+    /// `loop_on`.
     pub song_loop: Option<(f64, f64)>,
+    pub loop_on: bool,
     /// Points per tick.
     pub zoom: f32,
     pub row: f32,
@@ -285,6 +312,22 @@ impl Area {
     }
 }
 
+/// Where the files of one drop land: from `first` (the tick and track under the
+/// pointer), one file per track down. None when the drop is not on the playlist.
+pub fn drop_spots(first: Option<(f64, usize)>, n: usize) -> Vec<Option<(f64, usize)>> {
+    (0..n)
+        .map(|i| first.map(|(tick, track)| (tick, track + i)))
+        .collect()
+}
+
+/// The first track with no clips, at tick `at`: where a drop with no pointer
+/// position goes.
+pub fn free_track(p: &las_project::Project, at: f64) -> (f64, usize) {
+    let used: HashSet<usize> = p.playlist.clips.iter().map(|c| c.track).collect();
+    let track = (0..).find(|t| !used.contains(t)).unwrap_or(0);
+    (at, track)
+}
+
 impl Default for PlaylistState {
     fn default() -> Self {
         Self {
@@ -302,6 +345,7 @@ impl Default for PlaylistState {
             menu_at: None,
             menu_clip: None,
             song_loop: None,
+            loop_on: false,
             pick: Source::Pattern,
             just_added: None,
             show_picker: true,
@@ -310,6 +354,111 @@ impl Default for PlaylistState {
             want_x: None,
         }
     }
+}
+
+impl PlaylistState {
+    /// Another project was opened: its loop, selection, waveforms and what was being
+    /// done go; the way the playlist is set up (zoom, snap, tool, the clipboard) stays.
+    pub fn forget_project(&mut self) {
+        let old = std::mem::take(self);
+        *self = Self {
+            zoom: old.zoom,
+            row: old.row,
+            snap: old.snap,
+            tool: old.tool,
+            clipboard: old.clipboard,
+            show_picker: old.show_picker,
+            ..Self::default()
+        };
+    }
+
+    /// The stretch the song loops over now, if any.
+    pub fn active_loop(&self) -> Option<(f64, f64)> {
+        self.song_loop.filter(|_| self.loop_on)
+    }
+}
+
+/// The marker before (or after, with `forward`) a tick: where Alt+Left and Alt+Right
+/// jump.
+pub fn marker_jump(p: &Project, from: f64, forward: bool) -> Option<f64> {
+    let marks = p.markers.iter().flatten().map(|m| m.tick);
+    if forward {
+        marks.filter(|&m| m > from + 0.5).min_by(f64::total_cmp)
+    } else {
+        marks.filter(|&m| m < from - 0.5).max_by(f64::total_cmp)
+    }
+}
+
+/// The ids of the clips that play the same thing as the clip `id`: the same pattern,
+/// sound or automation clip.
+pub fn clips_like(p: &Project, id: &str) -> HashSet<String> {
+    let Some(c) = p.playlist.clips.iter().find(|c| c.id == id) else {
+        return HashSet::new();
+    };
+    p.playlist
+        .clips
+        .iter()
+        .filter(|x| x.kind == c.kind && x.ref_id == c.ref_id)
+        .map(|x| x.id.clone())
+        .collect()
+}
+
+/// Split the pattern clip `clip` by channel; see [`PlEdit::SplitByChannel`]. Returns the
+/// new clips' ids.
+pub fn split_by_channel(project: &mut Project, clip: &str) -> Vec<String> {
+    let Some(ci) = project.playlist.clips.iter().position(|c| c.id == clip) else {
+        return Vec::new();
+    };
+    let c = project.playlist.clips[ci].clone();
+    if c.kind != ClipKind::Pattern {
+        return Vec::new();
+    }
+    let Some(pi) = project.patterns.iter().position(|x| x.id == c.ref_id) else {
+        return Vec::new();
+    };
+    let pat = project.patterns[pi].clone();
+    let length = pattern_length(Some(&pat), project.time_sig);
+    // in the order of the channel rack
+    let chans: Vec<(String, String, Color32)> = project
+        .channels
+        .iter()
+        .filter(|ch| pat.notes.get(&ch.id).is_some_and(|n| !n.is_empty()))
+        .map(|ch| (ch.id.clone(), ch.name.clone(), channel_colour(ch)))
+        .collect();
+    if chans.len() < 2 {
+        return Vec::new();
+    }
+    let mut ids = Vec::new();
+    project.playlist.clips.remove(ci);
+    for (k, (ch, name, col)) in chans.into_iter().enumerate() {
+        let mut np = pat.clone();
+        np.id = uid("pat_");
+        np.name = format!("{} - {name}", pat.name);
+        np.color = format!("#{:02x}{:02x}{:02x}", col.r(), col.g(), col.b());
+        np.length = length;
+        np.notes.retain(|id, _| *id == ch);
+        for n in np.notes.values_mut().flatten() {
+            n.id = uid("n");
+        }
+        let track = c.track + k;
+        // stacked below: a track with a clip in the way makes room with a new track
+        let busy = project.playlist.clips.iter().any(|x| {
+            x.track == track && x.start < c.start + c.length && x.start + x.length > c.start
+        });
+        if k > 0 && busy {
+            apply(project, &PlEdit::InsertTrack(track));
+        }
+        let id = uid("c");
+        project.playlist.clips.push(Clip {
+            id: id.clone(),
+            ref_id: np.id.clone(),
+            track,
+            ..c.clone()
+        });
+        ids.push(id);
+        project.patterns.insert(pi + 1 + k, np);
+    }
+    ids
 }
 
 fn snapped(t: f64, snap: f64) -> f64 {
@@ -527,6 +676,7 @@ fn fade_handle_at(
 /// The audio clip part of the playlist's right click menu: the clip's edits.
 fn audio_clip_menu(ui: &mut Ui, project: &Project, c: &Clip, edits: &mut Vec<PlEdit>) {
     ui.label(egui::RichText::new("Audio clip").strong());
+    crate::sampleedit::menu_items(ui, &c.ref_id);
     let seconds = sample_seconds(project, c);
     let before = c.audio.clone().unwrap_or_default();
     let out = crate::clipedit::panel(ui, &before, seconds, project.bpm, c.length);
@@ -636,7 +786,30 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
         | PlEdit::AskRenameTrack(_)
         | PlEdit::AskRenameMarker(_)
         | PlEdit::ChoosePattern(_)
+        | PlEdit::AskRenamePattern(_)
+        | PlEdit::LoopOn(_)
         | PlEdit::SongLoop(_) => {}
+        PlEdit::ClonePattern(id) => {
+            if let Some(i) = project.patterns.iter().position(|p| &p.id == id) {
+                crate::menus::clone_pattern(project, i);
+            }
+        }
+        PlEdit::DeletePattern(id) => {
+            if let Some(i) = project.patterns.iter().position(|p| &p.id == id) {
+                crate::menus::delete_pattern(project, i);
+            }
+        }
+        PlEdit::SplitByChannel(id) => {
+            split_by_channel(project, id);
+        }
+        PlEdit::MoveMarker { id, tick } => {
+            if let Some(list) = &mut project.markers {
+                if let Some(m) = list.iter_mut().find(|m| &m.id == id) {
+                    m.tick = tick.max(0.0);
+                }
+                list.sort_by(|a, b| a.tick.total_cmp(&b.tick));
+            }
+        }
         PlEdit::Trim { id, start } => {
             if let Some(c) = clips.iter_mut().find(|c| &c.id == id) {
                 let end = c.start + c.length;
@@ -700,20 +873,22 @@ pub fn apply(project: &mut Project, edit: &PlEdit) {
                 ClipKind::Audio => {}
             }
         }
-        PlEdit::MakeUnique(clip) => {
-            let Some(ci) = project.playlist.clips.iter().position(|c| &c.id == clip) else {
-                return;
-            };
-            if project.playlist.clips[ci].kind != ClipKind::Pattern {
-                return;
-            }
-            let of = project.playlist.clips[ci].ref_id.clone();
-            let Some(pi) = project.patterns.iter().position(|x| x.id == of) else {
-                return;
-            };
-            if let Some(ni) = crate::menus::clone_pattern(project, pi) {
-                let id = project.patterns[ni].id.clone();
-                project.playlist.clips[ci].ref_id = id;
+        PlEdit::MakeUnique(ids) => {
+            for clip in ids {
+                let Some(ci) = project.playlist.clips.iter().position(|c| &c.id == clip) else {
+                    continue;
+                };
+                if project.playlist.clips[ci].kind != ClipKind::Pattern {
+                    continue;
+                }
+                let of = project.playlist.clips[ci].ref_id.clone();
+                let Some(pi) = project.patterns.iter().position(|x| x.id == of) else {
+                    continue;
+                };
+                if let Some(ni) = crate::menus::clone_pattern(project, pi) {
+                    let id = project.patterns[ni].id.clone();
+                    project.playlist.clips[ci].ref_id = id;
+                }
             }
         }
         PlEdit::AddMarker(t) => {
@@ -1025,14 +1200,13 @@ pub fn draw(
             }
             if c.kind == ClipKind::Automation {
                 if let Some(a) = project.automation.iter().find(|a| a.id == c.ref_id) {
-                    let len = a.length.max(1.0);
-                    let line: Vec<egui::Pos2> = a
-                        .points
-                        .iter()
-                        .map(|q| {
+                    // the curve as it plays, from where the clip starts in it
+                    let line: Vec<egui::Pos2> = las_engine::timeline::automation_curve(a)
+                        .into_iter()
+                        .map(|(t, v)| {
                             egui::pos2(
-                                r.left() + (q.t / len) as f32 * r.width(),
-                                r.bottom() - 4.0 - q.v as f32 * (r.height() - 18.0),
+                                x_of(c.start + t - c.offset),
+                                r.bottom() - 4.0 - v as f32 * (r.height() - 18.0),
                             )
                         })
                         .collect();
@@ -1263,14 +1437,31 @@ pub fn draw(
             t += bar;
             n += 1;
         }
-        // the song loop: a band over the ruler
+        // the song loop: a band over the ruler, and the stretch shaded below it (dim
+        // while looping is off)
         if let Some((a, b)) = state.song_loop {
-            let band = Rect::from_min_max(
-                egui::pos2(x_of(a).max(vl + HEAD), vt + RULER - 5.0),
-                egui::pos2(x_of(b).min(vr), vt + RULER),
-            );
-            if band.width() > 0.0 {
-                painter.rect_filled(band, 0.0, pl.accent.gamma_multiply(0.7));
+            let on = state.loop_on;
+            let (xa, xb) = (x_of(a).max(vl + HEAD), x_of(b).min(vr));
+            if xb > xa {
+                let band = Rect::from_min_max(egui::pos2(xa, vt + 2.0), egui::pos2(xb, vt + RULER));
+                painter.rect_filled(
+                    band,
+                    2.0,
+                    pl.accent.gamma_multiply(if on { 0.45 } else { 0.15 }),
+                );
+                painter.rect_filled(
+                    Rect::from_min_max(egui::pos2(xa, vt + RULER), egui::pos2(xb, vb)),
+                    0.0,
+                    pl.accent.gamma_multiply(if on { 0.07 } else { 0.03 }),
+                );
+                for x in [x_of(a), x_of(b)] {
+                    if x >= vl + HEAD && x <= vr {
+                        painter.line_segment(
+                            [egui::pos2(x, vt + 2.0), egui::pos2(x, vb)],
+                            Stroke::new(1.0, pl.accent.gamma_multiply(if on { 0.9 } else { 0.35 })),
+                        );
+                    }
+                }
             }
         }
         // song markers: a flag and a name on the ruler; a click jumps to one
@@ -1288,21 +1479,34 @@ pub fn draw(
             if x < vl + HEAD - 80.0 || x > vr {
                 continue;
             }
-            let flag = Rect::from_min_size(egui::pos2(x, vt + 14.0), egui::vec2(6.0, 8.0));
-            painter.line_segment(
-                [egui::pos2(x, vt + 12.0), egui::pos2(x, vt + RULER)],
-                Stroke::new(1.5, pl.accent),
+            let hot = pointer.is_some_and(|p| {
+                p.y >= vt && p.y < vt + RULER && p.x >= x - 6.0 && p.x < x + 12.0 + m.name.len() as f32 * 5.5
+            }) || matches!(&state.drag, Some(Drag::Marker { id }) if *id == m.id);
+            let col = if hot { pl.accent_text } else { pl.accent };
+            let flag = egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(x, vt + 11.0),
+                    egui::pos2(x + 7.0, vt + 14.5),
+                    egui::pos2(x, vt + 18.0),
+                ],
+                col,
+                Stroke::NONE,
             );
-            painter.rect_filled(flag, 0.0, pl.accent);
+            painter.line_segment(
+                [egui::pos2(x, vt + 10.0), egui::pos2(x, vb)],
+                Stroke::new(1.0, col.gamma_multiply(if hot { 0.8 } else { 0.35 })),
+            );
+            painter.add(flag);
             painter.text(
-                egui::pos2(x + 9.0, vt + 13.0),
+                egui::pos2(x + 9.0, vt + 12.0),
                 egui::Align2::LEFT_TOP,
                 &m.name,
-                egui::FontId::proportional(10.0),
-                pl.text,
+                egui::FontId::proportional(10.5),
+                if hot { pl.accent_text } else { pl.text },
             );
-            if pointer.is_some_and(|p| p.y < vt + RULER && (p.x - x).abs() < 8.0) {
+            if hot {
                 near_marker = Some(m.id.clone());
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
         }
         if let Some(p) = resp
@@ -1371,24 +1575,85 @@ pub fn draw(
                             }
                         }
                     });
-                    let pattern = project
-                        .playlist
-                        .clips
-                        .iter()
-                        .find(|c| c.id == id)
-                        .is_some_and(|c| c.kind == ClipKind::Pattern);
-                    if pattern
-                        && ui
-                            .button("Make unique")
-                            .on_hover_text("Give this clip its own copy of the pattern")
+                    let clip = project.playlist.clips.iter().find(|c| c.id == id);
+                    if let Some(c) = clip.filter(|c| c.kind == ClipKind::Pattern) {
+                        // FL: the clip and the other selected pattern clips
+                        let mut ids: Vec<String> = vec![id.clone()];
+                        if state.selected.contains(&id) {
+                            ids.extend(
+                                project
+                                    .playlist
+                                    .clips
+                                    .iter()
+                                    .filter(|x| {
+                                        x.id != id
+                                            && x.kind == ClipKind::Pattern
+                                            && state.selected.contains(&x.id)
+                                    })
+                                    .map(|x| x.id.clone()),
+                            );
+                        }
+                        let n = ids.len();
+                        if ui
+                            .button(if n > 1 {
+                                format!("Make unique ({n} clips)")
+                            } else {
+                                "Make unique".to_string()
+                            })
+                            .on_hover_text(
+                                "Give the clip (and the other selected ones) its own copy of the pattern, so editing it changes only this clip",
+                            )
                             .clicked()
-                    {
-                        edits.push(PlEdit::Begin);
-                        edits.push(PlEdit::MakeUnique(id.clone()));
-                        ui.close();
+                        {
+                            edits.push(PlEdit::Begin);
+                            edits.push(PlEdit::MakeUnique(ids));
+                            ui.close();
+                        }
+                        if ui.button("Rename pattern...").clicked() {
+                            edits.push(PlEdit::AskRenamePattern(c.ref_id.clone()));
+                            ui.close();
+                        }
+                        let chans = project
+                            .pattern(&c.ref_id)
+                            .map_or(0, |p| p.notes.values().filter(|n| !n.is_empty()).count());
+                        if ui
+                            .add_enabled(chans > 1, egui::Button::new("Split by channel"))
+                            .on_hover_text(
+                                "One pattern for each channel that plays in this one, their clips stacked on the tracks below",
+                            )
+                            .on_disabled_hover_text("Only one channel plays in this pattern")
+                            .clicked()
+                        {
+                            edits.push(PlEdit::Begin);
+                            edits.push(PlEdit::SplitByChannel(id.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Open in the piano roll").clicked() {
+                            edits.push(PlEdit::OpenPattern(c.ref_id.clone()));
+                            ui.close();
+                        }
+                    }
+                    if let Some(c) = clip.filter(|c| c.kind == ClipKind::Automation) {
+                        if ui.button("Edit automation...").clicked() {
+                            edits.push(PlEdit::OpenAuto(c.ref_id.clone()));
+                            ui.close();
+                        }
                     }
                     ui.separator();
                 }
+                let what = match project.playlist.clips.iter().find(|c| c.id == id).map(|c| c.kind) {
+                    Some(ClipKind::Pattern) => "pattern",
+                    Some(ClipKind::Audio) => "sound",
+                    _ => "automation",
+                };
+                if ui
+                    .button(format!("Select all clips of this {what}"))
+                    .clicked()
+                {
+                    state.selected = clips_like(project, &id);
+                    ui.close();
+                }
+                ui.separator();
             }
             if ui.button("Add marker here").clicked() {
                 edits.push(PlEdit::Begin);
@@ -1423,9 +1688,20 @@ pub fn draw(
                 edits.push(PlEdit::SongLoop(Some((from, from + bar * 4.0))));
                 ui.close();
             }
-            if state.song_loop.is_some() && ui.button("Stop looping").clicked() {
-                edits.push(PlEdit::SongLoop(None));
-                ui.close();
+            if state.song_loop.is_some() {
+                let on = state.loop_on;
+                if ui
+                    .button(if on { "Turn the loop off" } else { "Turn the loop on" })
+                    .on_hover_text("Ctrl+Shift+L")
+                    .clicked()
+                {
+                    edits.push(PlEdit::LoopOn(!on));
+                    ui.close();
+                }
+                if ui.button("Clear the loop").clicked() {
+                    edits.push(PlEdit::SongLoop(None));
+                    ui.close();
+                }
             }
             ui.separator();
             for m in project.markers.iter().flatten() {
@@ -1477,8 +1753,16 @@ pub fn draw(
                 let (t, tr) = (tick_at(p.x), track_at(p.y));
                 state.just_added = None;
                 if in_ruler(p) {
-                    state.drag = Some(Drag::Seek);
-                    edits.push(PlEdit::Seek(snapped(t, state.snap).max(0.0)));
+                    if let Some(id) = near_marker.clone() {
+                        // a marker's flag: drag it along
+                        edits.push(PlEdit::Begin);
+                        state.drag = Some(Drag::Marker { id });
+                    } else {
+                        // FL: a drag along the ruler sets the song loop
+                        state.drag = Some(Drag::LoopRange {
+                            from: snapped(t, state.snap).max(0.0),
+                        });
+                    }
                 } else if let Some((id, out)) = fade_handle_at(project, p, x_of, top, state.row)
                     .filter(|_| !in_head(p) && matches!(state.tool, Tool::Draw | Tool::Select))
                 {
@@ -1608,8 +1892,22 @@ pub fn draw(
             if let (Some(d), Some(p)) = (state.drag.clone(), resp.interact_pointer_pos()) {
                 let (t, tr) = (tick_at(p.x), track_at(p.y));
                 match d {
-                    Drag::Seek => {
-                        edits.push(PlEdit::Seek(snapped(t, state.snap).max(0.0)));
+                    Drag::Marker { id } => {
+                        let fine = if ui.input(|i| i.modifiers.alt) { 1.0 } else { state.snap };
+                        edits.push(PlEdit::MoveMarker {
+                            id,
+                            tick: snapped(t, fine).max(0.0),
+                        });
+                    }
+                    Drag::LoopRange { from } => {
+                        let g = state.snap.max(1.0);
+                        let to = snapped(t, g).max(0.0);
+                        let (a, b) = if to >= from { (from, to) } else { (to, from) };
+                        // shown as it is dragged; the player hears of it when let go
+                        if b - a >= g.min(f64::from(PPQ)) {
+                            state.song_loop = Some((a, b));
+                            state.loop_on = true;
+                        }
                     }
                     Drag::Paint => {
                         if let Some(tpl) = &template {
@@ -1694,7 +1992,12 @@ pub fn draw(
         } else if resp.clicked_by(egui::PointerButton::Primary) {
             if let Some(p) = resp.interact_pointer_pos() {
                 if in_ruler(p) {
-                    edits.push(PlEdit::Seek(snapped(tick_at(p.x), state.snap).max(0.0)));
+                    // a click on a marker jumps to it, elsewhere moves the start marker
+                    let at = near_marker
+                        .as_ref()
+                        .and_then(|id| project.markers.iter().flatten().find(|m| &m.id == id))
+                        .map_or_else(|| snapped(tick_at(p.x), state.snap).max(0.0), |m| m.tick);
+                    edits.push(PlEdit::Seek(at));
                 } else if !in_head(p) {
                     let (t, tr) = (tick_at(p.x), track_at(p.y));
                     let under = hit(project, t, tr, edge);
@@ -1760,6 +2063,11 @@ pub fn draw(
             }
         }
         if resp.drag_stopped() {
+            if let Some(Drag::LoopRange { .. }) = state.drag {
+                if state.song_loop.is_some() {
+                    edits.push(PlEdit::SongLoop(state.song_loop));
+                }
+            }
             if let Some(Drag::Marquee) = state.drag {
                 if let Some((a, b)) = state.marquee.take() {
                     let area = Rect::from_two_pos(a, b);
@@ -1783,6 +2091,11 @@ pub fn draw(
         }
         if resp.double_clicked_by(egui::PointerButton::Primary) {
             if let Some(p) = resp.interact_pointer_pos() {
+                if in_ruler(p) {
+                    if let Some(id) = near_marker.clone() {
+                        edits.push(PlEdit::AskRenameMarker(id));
+                    }
+                }
                 if !in_head(p) && !in_ruler(p) {
                     let (t, tr) = (tick_at(p.x), track_at(p.y));
                     if let Some((i, _)) = hit(project, t, tr, edge) {
@@ -1973,6 +2286,42 @@ fn picker(
                         if r.double_clicked() {
                             edits.push(PlEdit::OpenPattern(x.id.clone()));
                         }
+                        r.context_menu(|ui| {
+                            ui.label(egui::RichText::new(&x.name).strong());
+                            if ui.button("Open in the piano roll").clicked() {
+                                edits.push(PlEdit::OpenPattern(x.id.clone()));
+                                ui.close();
+                            }
+                            if ui.button("Rename...").clicked() {
+                                edits.push(PlEdit::AskRenamePattern(x.id.clone()));
+                                ui.close();
+                            }
+                            if ui.button("Clone").on_hover_text("A copy to change on its own").clicked() {
+                                edits.push(PlEdit::Begin);
+                                edits.push(PlEdit::ClonePattern(x.id.clone()));
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(project.patterns.len() > 1, egui::Button::new("Delete"))
+                                .on_hover_text("Remove the pattern and its clips")
+                                .clicked()
+                            {
+                                edits.push(PlEdit::Begin);
+                                edits.push(PlEdit::DeletePattern(x.id.clone()));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Select all its clips").clicked() {
+                                state.selected = project
+                                    .playlist
+                                    .clips
+                                    .iter()
+                                    .filter(|c| c.kind == ClipKind::Pattern && c.ref_id == x.id)
+                                    .map(|c| c.id.clone())
+                                    .collect();
+                                ui.close();
+                            }
+                        });
                     }
                     let audio: Vec<_> = project
                         .channels
@@ -2127,6 +2476,31 @@ fn keyboard(
             state.clipboard.len()
         ));
     }
+    let (prev, next, fit, toggle) = ui.input(|i| {
+        let m = i.modifiers;
+        let alt_arrow = |k| m.alt && !m.command && i.key_pressed(k);
+        (
+            alt_arrow(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::PageUp),
+            alt_arrow(egui::Key::ArrowRight) || i.key_pressed(egui::Key::PageDown),
+            m.command && m.shift && i.key_pressed(egui::Key::F),
+            m.command && m.shift && i.key_pressed(egui::Key::L),
+        )
+    });
+    // jump to the marker before or after where the song is
+    let now = playhead.unwrap_or(start);
+    if prev || next {
+        let to = marker_jump(project, now, next).or((prev && !next).then_some(0.0));
+        if let Some(t) = to {
+            edits.push(PlEdit::Seek(t));
+        }
+    }
+    if fit {
+        state.zoom = fit_zoom(project, area.width());
+        state.want_x = Some(0.0);
+    }
+    if toggle && state.song_loop.is_some() {
+        edits.push(PlEdit::LoopOn(!state.loop_on));
+    }
 }
 
 fn mark_ruler(p: &egui::Painter, x: f32, top: f32) {
@@ -2174,6 +2548,21 @@ mod tests {
         assert_eq!(a.place(egui::pos2(50.0, 100.0)), None, "the track names");
         assert_eq!(a.place(egui::pos2(900.0, 100.0)), None, "outside");
         assert_eq!(a.place(egui::pos2(300.0, 399.0)).unwrap().1, 4);
+    }
+
+    #[test]
+    fn several_files_dropped_land_on_tracks_one_after_another() {
+        assert_eq!(
+            drop_spots(Some((1440.0, 2)), 3),
+            vec![Some((1440.0, 2)), Some((1440.0, 3)), Some((1440.0, 4))]
+        );
+        assert_eq!(drop_spots(None, 2), vec![None, None]);
+        let mut p = project();
+        let (at, t) = free_track(&p, 384.0);
+        assert_eq!(at, 384.0);
+        assert!(p.playlist.clips.iter().all(|c| c.track != t));
+        p.playlist.clips.clear();
+        assert_eq!(free_track(&p, 0.0), (0.0, 0));
     }
 
     fn project() -> Project {
@@ -2263,7 +2652,7 @@ mod tests {
             p.playlist.clips[i].ref_id.clone(),
         );
         let n = p.patterns.len();
-        apply(&mut p, &PlEdit::MakeUnique(clip));
+        apply(&mut p, &PlEdit::MakeUnique(vec![clip]));
         assert_eq!(p.patterns.len(), n + 1);
         let now = &p.playlist.clips[i].ref_id;
         assert_ne!(now, &of);
@@ -2275,6 +2664,140 @@ mod tests {
             a.notes.values().map(Vec::len).sum::<usize>(),
             b.notes.values().map(Vec::len).sum::<usize>()
         );
+    }
+
+    #[test]
+    fn make_unique_works_on_the_selected_clips_too() {
+        let mut p = las_project::create::default_project();
+        let a = new_pattern_clip(&p, 0, 0.0, 0).unwrap();
+        let b = new_pattern_clip(&p, 0, 384.0, 0).unwrap();
+        let c = new_pattern_clip(&p, 0, 768.0, 0).unwrap();
+        p.playlist.clips = vec![a.clone(), b.clone(), c.clone()];
+        let n = p.patterns.len();
+        apply(
+            &mut p,
+            &PlEdit::MakeUnique(vec![a.id.clone(), b.id.clone()]),
+        );
+        assert_eq!(p.patterns.len(), n + 2);
+        let refs: Vec<&str> = p.playlist.clips.iter().map(|c| c.ref_id.as_str()).collect();
+        assert!(refs[0] != refs[1] && refs[0] != refs[2] && refs[1] != refs[2]);
+        assert_eq!(
+            refs[2], c.ref_id,
+            "the clip not asked for keeps its pattern"
+        );
+    }
+
+    #[test]
+    fn a_pattern_splits_into_one_per_channel_stacked_below() {
+        let mut p = las_project::create::default_project();
+        let pat = p.patterns[0].clone();
+        let used: Vec<String> = p
+            .channels
+            .iter()
+            .filter(|c| pat.notes.get(&c.id).is_some_and(|n| !n.is_empty()))
+            .map(|c| c.id.clone())
+            .collect();
+        assert!(used.len() >= 2, "the demo pattern plays several channels");
+        let clip = new_pattern_clip(&p, 0, 0.0, 1).unwrap();
+        // a clip in the way on the track below
+        let other = new_pattern_clip(&p, 0, 0.0, 2).unwrap();
+        p.playlist.clips = vec![clip.clone(), other.clone()];
+        let len = pattern_length(Some(&pat), p.time_sig);
+        apply(&mut p, &PlEdit::SplitByChannel(clip.id.clone()));
+        let made: Vec<&Clip> = p
+            .playlist
+            .clips
+            .iter()
+            .filter(|c| c.id != other.id)
+            .collect();
+        assert_eq!(made.len(), used.len());
+        for (k, c) in made.iter().enumerate() {
+            assert_eq!(c.track, 1 + k, "stacked from the clip's track down");
+            assert_eq!((c.start, c.length), (clip.start, clip.length));
+            let np = p.pattern(&c.ref_id).unwrap();
+            assert_eq!(np.notes.len(), 1);
+            assert_eq!(
+                np.notes.get(&used[k]).map(Vec::len),
+                pat.notes.get(&used[k]).map(Vec::len)
+            );
+            assert_eq!(
+                pattern_length(Some(np), p.time_sig),
+                len,
+                "as long as before"
+            );
+        }
+        let moved = p.playlist.clips.iter().find(|c| c.id == other.id).unwrap();
+        assert!(moved.track > used.len(), "the clip in the way moved down");
+        assert!(p.pattern(&pat.id).is_some(), "the old pattern stays");
+        // a clip of a one-channel pattern stays as it is
+        let id = made[0].id.clone();
+        let before = p.playlist.clips.len();
+        apply(&mut p, &PlEdit::SplitByChannel(id));
+        assert_eq!(p.playlist.clips.len(), before);
+    }
+
+    #[test]
+    fn markers_move_and_the_keys_jump_between_them() {
+        let mut p = project();
+        apply(&mut p, &PlEdit::AddMarker(384.0));
+        apply(&mut p, &PlEdit::AddMarker(1536.0));
+        let id = p.markers.as_ref().unwrap()[0].id.clone();
+        apply(
+            &mut p,
+            &PlEdit::MoveMarker {
+                id: id.clone(),
+                tick: 3072.0,
+            },
+        );
+        let m = p.markers.clone().unwrap();
+        assert_eq!(m[1].id, id, "kept in order");
+        assert_eq!((m[0].tick, m[1].tick), (1536.0, 3072.0));
+        assert_eq!(marker_jump(&p, 0.0, true), Some(1536.0));
+        assert_eq!(marker_jump(&p, 1536.0, true), Some(3072.0));
+        assert_eq!(marker_jump(&p, 3072.0, true), None);
+        assert_eq!(marker_jump(&p, 3000.0, false), Some(1536.0));
+        assert_eq!(marker_jump(&p, 1536.0, false), None);
+    }
+
+    #[test]
+    fn the_loop_keeps_its_range_while_off() {
+        let mut s = PlaylistState {
+            song_loop: Some((384.0, 768.0)),
+            loop_on: true,
+            ..Default::default()
+        };
+        assert_eq!(s.active_loop(), Some((384.0, 768.0)));
+        s.loop_on = false;
+        assert_eq!(s.active_loop(), None);
+        assert_eq!(s.song_loop, Some((384.0, 768.0)));
+    }
+
+    #[test]
+    fn all_clips_of_a_pattern_or_sound_are_found() {
+        let mut p = las_project::create::default_project();
+        let a = new_pattern_clip(&p, 0, 0.0, 0).unwrap();
+        let b = new_pattern_clip(&p, 0, 384.0, 3).unwrap();
+        let mut c = new_pattern_clip(&p, 0, 768.0, 0).unwrap();
+        c.kind = ClipKind::Audio;
+        p.playlist.clips = vec![a.clone(), b.clone(), c];
+        assert_eq!(
+            clips_like(&p, &a.id),
+            HashSet::from([a.id.clone(), b.id.clone()])
+        );
+        assert!(clips_like(&p, "nope").is_empty());
+    }
+
+    #[test]
+    fn patterns_are_cloned_and_deleted_from_the_picker() {
+        let mut p = las_project::create::default_project();
+        let id = p.patterns[0].id.clone();
+        let n = p.patterns.len();
+        apply(&mut p, &PlEdit::ClonePattern(id.clone()));
+        assert_eq!(p.patterns.len(), n + 1);
+        assert_eq!(p.patterns[1].notes.len(), p.patterns[0].notes.len());
+        apply(&mut p, &PlEdit::DeletePattern(id.clone()));
+        assert!(p.pattern(&id).is_none());
+        assert!(p.playlist.clips.iter().all(|c| c.ref_id != id));
     }
 
     #[test]

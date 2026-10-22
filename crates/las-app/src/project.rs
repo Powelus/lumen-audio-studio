@@ -54,6 +54,9 @@ pub enum RenameTarget {
 
 #[derive(Default)]
 pub struct ProjectState {
+    /// Counts the projects made the open one (new, opened, from a template), so the
+    /// windows that belonged to the last one can close.
+    pub generation: u64,
     pub path: String,
     pub loaded: Option<Loaded>,
     building: Option<Building>,
@@ -91,6 +94,20 @@ pub struct ProjectState {
     stale: bool,
     /// Count in (beats, tempo) before the player that is being built starts.
     pub count_in: Option<(u32, f64)>,
+}
+
+/// Where a saved project keeps its song loop.
+const LOOP_KEY: &str = "songLoop";
+
+/// The loop a project was saved with: start, end (ticks) and whether it was on.
+fn saved_loop(p: &Project) -> Option<(f64, f64, bool)> {
+    let v = p.extra.get(LOOP_KEY)?;
+    let (a, b) = (v.get("start")?.as_f64()?, v.get("end")?.as_f64()?);
+    let on = v
+        .get("on")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    (a.is_finite() && b.is_finite() && b > a && a >= 0.0).then_some((a, b, on))
 }
 
 impl ProjectState {
@@ -133,6 +150,16 @@ impl ProjectState {
         self.last_edit = None;
         self.open_effect = None;
         self.open_auto = None;
+        self.generation += 1;
+        self.playlist.forget_project();
+        self.roll.forget_project();
+        // the loop the song was saved with
+        if let Some(l) = &self.loaded {
+            if let Some((a, b, on)) = saved_loop(&l.project) {
+                self.playlist.song_loop = Some((a, b));
+                self.playlist.loop_on = on;
+            }
+        }
     }
 
     /// Whether the project has a file to be saved to.
@@ -184,12 +211,26 @@ impl ProjectState {
                     self.redo.clear();
                 }
                 PlEdit::Seek(t) => self.start_tick = *t,
+                PlEdit::LoopOn(on) => {
+                    self.playlist.loop_on = *on && self.playlist.song_loop.is_some();
+                    self.stale = true;
+                }
+                PlEdit::AskRenamePattern(id) => {
+                    if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
+                        let name = l.project.patterns[i].name.clone();
+                        self.rename = Some((RenameTarget::Pattern(i), name));
+                    }
+                }
                 PlEdit::SongLoop(r) => {
                     self.playlist.song_loop = *r;
+                    self.playlist.loop_on = r.is_some();
                     // a playing song picks the loop up from where it is
                     self.stale = true;
                 }
-                PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
+                PlEdit::OpenAuto(id) => {
+                    self.open_auto = Some(id.clone());
+                    crate::raise::raise(crate::raise::Win::Automation);
+                }
                 PlEdit::ChoosePattern(id) => {
                     if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
                         self.pattern = i;
@@ -224,9 +265,17 @@ impl ProjectState {
                     playlist::apply(Arc::make_mut(&mut l.project), e);
                     self.dirty = true;
                     self.stale = true;
+                    if let PlEdit::ClonePattern(id) = e {
+                        // the copy, just after the pattern, becomes the current one
+                        if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
+                            self.pattern = i + 1;
+                        }
+                    }
                 }
             }
         }
+        let n = l.project.patterns.len();
+        self.pattern = self.pattern.min(n.saturating_sub(1));
     }
 
     /// Make an automation clip for a request, at the start marker, and open its editor.
@@ -235,6 +284,7 @@ impl ProjectState {
         let mut id = String::new();
         self.modify(true, |p| id = auto::create_clip(p, req, at));
         self.open_auto = Some(id);
+        crate::raise::raise(crate::raise::Win::Automation);
     }
 
     /// Carry out the edits of an automation clip's curve.
@@ -264,6 +314,7 @@ impl ProjectState {
                 pending.push(req.clone());
             } else if let MixEdit::OpenEffect { insert, slot } = e {
                 self.open_effect = Some((*insert, *slot));
+                crate::raise::raise(crate::raise::Win::Effect);
             } else if *e == MixEdit::Begin {
                 self.undo.push(l.project.clone());
                 if self.undo.len() > 200 {
@@ -422,7 +473,17 @@ impl ProjectState {
         if path.is_empty() {
             return Err("no file to save to".into());
         }
-        let bytes = encode(&l.project, &l.samples, true).map_err(|e| e.to_string())?;
+        // the song's loop goes with it (the playlist keeps it outside the project, as
+        // setting it is no edit)
+        let mut project = (*l.project).clone();
+        project.extra.remove(LOOP_KEY);
+        if let Some((a, b)) = self.playlist.song_loop {
+            project.extra.insert(
+                LOOP_KEY.into(),
+                serde_json::json!({ "start": a, "end": b, "on": self.playlist.loop_on }),
+            );
+        }
+        let bytes = encode(&project, &l.samples, true).map_err(|e| e.to_string())?;
         let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, bytes).map_err(|e| format!("{tmp}: {e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))?;
@@ -436,7 +497,7 @@ impl ProjectState {
     fn start(&mut self, mode: PlayMode, from: Start, sample_rate: f64) {
         let Some(l) = &self.loaded else { return };
         let (project, samples) = (l.project.clone(), l.samples.clone());
-        let song_loop = self.playlist.song_loop;
+        let song_loop = self.playlist.active_loop();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let player = Player::new(project, &samples, sample_rate, mode).map(|mut p| {
@@ -548,7 +609,7 @@ impl App {
                 self.project.playlist.waves.insert(id, Arc::new(wave));
             }
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.toggle_value(&mut self.project.playlist.show_picker, "Picker")
                 .on_hover_text("Show or hide the list of patterns, audio clips and automation clips");
             ui.separator();
@@ -586,24 +647,36 @@ impl App {
                     }
                 });
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false))
+            // a fixed size, so a wrapped toolbar wraps it like the rest
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false))
                 .on_hover_text("Ctrl+wheel zooms around the pointer");
             ui.label("Height");
-            ui.add(egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
                 .on_hover_text("The height of the playlist's tracks");
+            let has_loop = self.project.playlist.song_loop.is_some();
+            let mut on = self.project.playlist.loop_on;
+            if ui
+                .add_enabled(has_loop, egui::Button::selectable(on, "Loop"))
+                .on_hover_text("Loop the song over the range on the ruler (Ctrl+Shift+L)")
+                .on_disabled_hover_text("Drag along the ruler to set a loop range")
+                .clicked()
+            {
+                on = !on;
+                self.project.edit_playlist(&[playlist::PlEdit::LoopOn(on)]);
+            }
             if ui
                 .button("Fit")
-                .on_hover_text("Zoom so that the whole song fits the window")
+                .on_hover_text("Zoom so that the whole song fits the window (Ctrl+Shift+F)")
                 .clicked()
             {
                 let w = ui.clip_rect().width().max(400.0);
                 self.project.playlist.zoom = playlist::fit_zoom(&project, w);
             }
-            ui.label(
-                RichText::new("Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Right click the ruler for markers and loops. Drop a sound file here for an audio clip.")
-                    .weak()
-                    .size(11.0),
-            );
+            // the help fills what room is left and is cut short there (the whole of it
+            // on hover), so it never makes the window wider than the screen
+            const HELP: &str = "Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Drag along the ruler to loop, right click it for markers; Alt+Left/Right jump between markers. Drop a sound file here for an audio clip.";
+            ui.add(egui::Label::new(RichText::new(HELP).weak().size(11.0)).truncate())
+                .on_hover_text(HELP);
         });
         let edits = playlist::draw(
             ui,
@@ -615,6 +688,15 @@ impl App {
         );
         drop(project);
         self.project.edit_playlist(&edits);
+        // a jump while the song plays carries on playing from there, as in FL
+        let playing = self.audio.as_ref().is_some_and(|a| a.meters.playing());
+        let jump = edits.iter().rev().find_map(|e| match e {
+            playlist::PlEdit::Seek(t) => Some(*t),
+            _ => None,
+        });
+        if let Some(t) = jump.filter(|_| playing && self.shell.song_mode && !self.project.looping) {
+            self.play_project(PlayMode::Song, t);
+        }
     }
 
     pub(crate) fn roll(&mut self, ui: &mut Ui, playhead: Option<f64>) {
@@ -624,9 +706,22 @@ impl App {
         let project = l.project.clone();
         // the channels to pick from, and the snap and zoom, sit above the roll
         ui.horizontal_wrapped(|ui| {
-            for (i, c) in project.channels.iter().enumerate() {
-                ui.selectable_value(&mut self.project.channel, i, &c.name);
-            }
+            // the channel whose notes show, picked from a list as in FL (a button for
+            // each channel would make the toolbar wider than the screen in a big song)
+            let current = project
+                .channels
+                .get(self.project.channel)
+                .map_or_else(String::new, |c| c.name.clone());
+            egui::ComboBox::from_id_salt("roll-channel")
+                .selected_text(current)
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for (i, c) in project.channels.iter().enumerate() {
+                        ui.selectable_value(&mut self.project.channel, i, &c.name);
+                    }
+                })
+                .response
+                .on_hover_text("The channel whose notes the roll shows and edits");
             ui.separator();
             for (t, name, tip) in [
                 (
@@ -767,7 +862,7 @@ impl App {
             .response
             .on_hover_text("Each click draws this chord on the key clicked");
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false))
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false))
                 .on_hover_text("Ctrl+wheel zooms in time around the pointer, Alt+wheel zooms the keys");
         });
         let edits = roll::draw(
@@ -808,7 +903,10 @@ impl App {
         }
         if rec && self.settings.record_audio {
             if self.shell.recorder.is_none() {
-                match crate::record::Recorder::open(&self.settings.audio.input) {
+                match crate::record::Recorder::open(
+                    &self.settings.audio.input,
+                    &self.settings.audio.driver,
+                ) {
                     Ok(r) => self.shell.recorder = Some(r),
                     // recording notes only is fine: just say so
                     Err(e) if self.settings.record_notes => {

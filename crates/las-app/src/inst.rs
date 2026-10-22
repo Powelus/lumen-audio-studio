@@ -43,6 +43,23 @@ impl Bound {
     }
 }
 
+/// Whether keys played live (computer keyboard, on-screen piano, MIDI) go to the
+/// project's channel rather than the standalone synth. The standalone synth only
+/// stands in for a channel whose window is a synth panel (it holds that channel's
+/// patch, edited without a rebuild); every other instrument window (Nebula, LumaPad,
+/// Weave, the sampler, ...) plays its channel, so a preset or edit there is heard at
+/// once instead of the standalone synth's old sound.
+pub fn keys_to_project(synth_open: bool, bound: Option<Bound>) -> bool {
+    !synth_open || !matches!(bound, None | Some(Bound::Synth(_)))
+}
+
+impl crate::app::App {
+    /// Whether keys played live go to the project's channel; see [`keys_to_project`].
+    pub(crate) fn keys_to_project(&self) -> bool {
+        keys_to_project(self.shell.open.synth, self.bound)
+    }
+}
+
 /// The synth panel that edits a plugin, if there is one. The wavetable family
 /// (Polaris, Vortex, Monolith, Zenith, TriOsc) shares one patch format.
 pub fn panel_for(plugin_id: &str) -> Option<Instrument> {
@@ -168,8 +185,7 @@ impl App {
         let (plugin, state) = (c.plugin_id.clone(), c.state.clone());
         self.project.channel = channel;
         // the window opens and comes to the front, as a double click does in FL Studio
-        self.shell.open.synth = true;
-        self.shell.raise_synth = true;
+        self.shell.open.show(crate::raise::Win::Synth);
         match panel_for(&plugin) {
             Some(inst) => {
                 let k = index(inst);
@@ -191,6 +207,17 @@ impl App {
                 self.load_fx_list(inst, &fx);
                 self.bound = Some(Bound::Synth(channel));
                 self.sync_bank();
+                // the preset list shows the channel's own preset, not the one last
+                // picked on another channel of this synth
+                let name = state.get("preset").and_then(Value::as_str);
+                let list = &self.entries[k];
+                self.presets[k] = name
+                    .and_then(|n| list.iter().position(|e| e.name == n))
+                    .or_else(|| {
+                        list.iter()
+                            .position(|e| merge_patch(&base, &e.patch) == self.patches[k])
+                    })
+                    .unwrap_or(0);
                 self.view = crate::app::View::Sound;
             }
             None if plugin == "sampler" => self.bound = Some(Bound::Sampler(channel)),
@@ -210,7 +237,7 @@ impl App {
         }
         // loading is not an edit
         self.synth_dirty = false;
-        self.shell.open.synth = true;
+        self.shell.open.show(crate::raise::Win::Synth);
     }
 
     /// Write the synth panels' patch and rack back into the bound channel.
@@ -225,6 +252,10 @@ impl App {
         let k = index(self.inst);
         let patch = self.patches[k].clone();
         let items = self.fx[k].clone();
+        let preset = self.entries[k]
+            .get(self.presets[k])
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
         self.project.modify_coalesced("synth", move |p| {
             if let Some(c) = p.channels.get_mut(ch) {
                 if !c.state.is_object() {
@@ -233,6 +264,7 @@ impl App {
                 let old_fx = c.state.get("fx").cloned().unwrap_or(Value::Null);
                 c.state["patch"] = patch;
                 c.state["fx"] = fx_to_json(&items, &old_fx);
+                c.state["preset"] = json!(preset);
             }
         });
     }
@@ -247,6 +279,10 @@ impl App {
         };
         if c.plugin_id == "audioclip" {
             self.audio_clip_window(ui, channel);
+            return;
+        }
+        if c.plugin_id == las_project::slicer::SLICER_ID {
+            self.slicer_window(ui, channel);
             return;
         }
         let state = c.state.clone();
@@ -318,6 +354,20 @@ impl App {
             return;
         };
         ui.label(RichText::new(&c.name).size(16.0).strong());
+        // the sound's outline, and the way to edit it
+        if let Some(wave) = c
+            .sample_id
+            .as_ref()
+            .and_then(|s| self.project.playlist.waves.get(s))
+            .cloned()
+        {
+            let r = crate::sampleedit::wave_strip(ui, &wave, 80.0)
+                .on_hover_text("Double click to open the sample editor");
+            if r.double_clicked() {
+                crate::sampleedit::request(crate::sampleedit::Request::Edit(c.id.clone()));
+            }
+        }
+        ui.horizontal(|ui| crate::sampleedit::menu_items(ui, &c.id));
         let clips: Vec<&las_project::Clip> = project
             .playlist
             .clips
@@ -368,6 +418,25 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_play_the_channel_unless_a_synth_panel_stands_in_for_it() {
+        assert!(keys_to_project(false, None));
+        assert!(keys_to_project(false, Some(Bound::Synth(0))));
+        assert!(!keys_to_project(true, None));
+        assert!(!keys_to_project(true, Some(Bound::Synth(0))));
+        // Nebula's window open: a preset picked there is heard from the channel
+        for b in [
+            Bound::Nebula(1),
+            Bound::Pads(1),
+            Bound::Weave(1),
+            Bound::Sampler(1),
+            Bound::Basic(1),
+            Bound::Hosted(1),
+        ] {
+            assert!(keys_to_project(true, Some(b)), "{b:?}");
+        }
+    }
 
     #[test]
     fn the_wavetable_family_shares_the_polaris_panel() {

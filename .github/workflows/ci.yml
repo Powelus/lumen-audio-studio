@@ -17,10 +17,38 @@ jobs:
       - name: Linux libraries for audio and MIDI
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config xvfb
+      # ASIO (an interface's own driver, ASIO4ALL, FL Studio ASIO) needs Steinberg's
+      # ASIO SDK at build time and libclang, which the Windows runners have with LLVM.
+      # If the SDK cannot be fetched the build goes on without ASIO (WASAPI only).
+      - name: ASIO SDK (Windows)
+        id: asio
+        if: runner.os == 'Windows'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/asiosdk"
+          # Steinberg's ASIO SDK from its GitHub repo (GPLv3 option, as this app), else the zip
+          rm -rf "$dir"
+          if ! git clone --depth 1 https://github.com/audiosdk/asio "$dir"; then
+            rm -rf "$dir"
+            curl -fsSL --retry 4 --retry-delay 5 -o "$RUNNER_TEMP/asiosdk.zip" https://www.steinberg.net/asiosdk
+            mkdir -p "$dir" && unzip -q "$RUNNER_TEMP/asiosdk.zip" -d "$dir"
+          fi
+          common=$(find "$dir" -type f -name asio.h -path '*common*' | head -1)
+          test -n "$common"
+          root=$(dirname "$(dirname "$common")")
+          echo "CPAL_ASIO_DIR=$(cygpath -w "$root")" >> "$GITHUB_ENV"
+          if [ -d "/c/Program Files/LLVM/bin" ]; then echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"; fi
+          echo "features=--features las-app/asio" >> "$GITHUB_OUTPUT"
+      - name: Without ASIO
+        if: runner.os == 'Windows' && steps.asio.outputs.features == ''
+        shell: bash
+        run: echo "::warning::The ASIO SDK could not be fetched; this Windows build has WASAPI only"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets ${{ steps.asio.outputs.features }} -- -D warnings
+      - run: cargo test --workspace ${{ steps.asio.outputs.features }}

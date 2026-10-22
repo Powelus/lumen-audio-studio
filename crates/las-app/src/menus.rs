@@ -22,6 +22,14 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Y, Ctrl+Shift+Z", "Redo"),
             ("F1", "This window"),
             (
+                "Ctrl+K",
+                "Quick search: find any action, window, sound or project",
+            ),
+            (
+                "Ctrl+Shift+C",
+                "Capture MIDI: the notes just played into the pattern",
+            ),
+            (
                 "A W S E D F T G Y H U J K",
                 "Play notes on the chosen channel",
             ),
@@ -33,7 +41,8 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Delete", "Delete the selected notes"),
             ("Ctrl+A", "Select all notes"),
             ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut, paste"),
-            ("Ctrl+D", "Duplicate the selection after itself"),
+            ("Ctrl+B", "Duplicate the selection after itself"),
+            ("Ctrl+D", "Deselect"),
             ("Left / Right", "Nudge the selection"),
             ("Up / Down", "Transpose the selection"),
             ("Shift+click", "Add to or remove from the selection"),
@@ -47,7 +56,8 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "Ctrl+C / Ctrl+X / Ctrl+V",
                 "Copy, cut, paste at the start marker",
             ),
-            ("Ctrl+D", "Duplicate the selection after itself"),
+            ("Ctrl+B", "Duplicate the selection after itself"),
+            ("Ctrl+D", "Deselect"),
             ("Double-click", "Place the chosen pattern"),
             ("Right-click", "Markers, loops, clip colour, make unique"),
             ("Click the ruler", "Move the start marker"),
@@ -437,10 +447,14 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(220.0));
-                r.request_focus();
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                // Enter confirms: the box keeps the focus (it asks for it every frame),
+                // so the key is what counts, not the box losing the focus
+                if (r.has_focus() || r.lost_focus())
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                {
                     ok = true;
                 }
+                r.request_focus();
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     cancel = true;
                 }
@@ -462,7 +476,13 @@ impl App {
         let mut open = self.shell.open.history;
         let (back, forward) = self.project.history();
         let mut go = None;
+        crate::raise::front(
+            ctx,
+            crate::raise::Win::History,
+            crate::raise::Win::History.id(),
+        );
         egui::Window::new("History")
+            .id(crate::raise::Win::History.id())
             .open(&mut open)
             .default_size([260.0, 360.0])
             .show(ctx, |ui| {
@@ -501,7 +521,9 @@ impl App {
             self.shell.open.keys = !self.shell.open.keys;
         }
         let mut open = self.shell.open.keys;
+        crate::raise::front(ctx, crate::raise::Win::Keys, crate::raise::Win::Keys.id());
         egui::Window::new("Keyboard shortcuts")
+            .id(crate::raise::Win::Keys.id())
             .open(&mut open)
             .collapsible(false)
             .default_width(380.0)
@@ -530,7 +552,9 @@ impl App {
 
     pub(crate) fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.shell.open.about;
+        crate::raise::front(ctx, crate::raise::Win::About, crate::raise::Win::About.id());
         egui::Window::new("About")
+            .id(crate::raise::Win::About.id())
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -575,6 +599,7 @@ impl App {
                 self.guard(Action::Demo);
                 ui.close();
             }
+            self.template_menu(ui);
             ui.separator();
             if ui
                 .add_enabled(loaded, egui::Button::new("Save          Ctrl+S"))
@@ -602,7 +627,7 @@ impl App {
                 .add_enabled(loaded, egui::Button::new("Export...    Ctrl+R"))
                 .clicked()
             {
-                self.shell.open.export = true;
+                self.shell.open.show(crate::raise::Win::Export);
                 ui.close();
             }
             ui.separator();
@@ -622,7 +647,7 @@ impl App {
             }
             ui.separator();
             if ui.button("History...").clicked() {
-                self.shell.open.history = true;
+                self.shell.open.show(crate::raise::Win::History);
                 ui.close();
             }
         });
@@ -691,14 +716,16 @@ impl App {
                 ("Synth", o.synth),
             ] {
                 if ui.selectable_label(on, label).clicked() {
-                    let w = &mut self.shell.open;
-                    match label.split_whitespace().next().unwrap_or("") {
-                        "Playlist" => w.playlist = !on,
-                        "Channel" => w.rack = !on,
-                        "Piano" => w.roll = !on,
-                        "Mixer" => w.mixer = !on,
-                        _ => w.synth = !on,
-                    }
+                    use crate::raise::Win;
+                    let w = match label.split_whitespace().next().unwrap_or("") {
+                        "Playlist" => Win::Playlist,
+                        "Channel" => Win::Rack,
+                        "Piano" => Win::Roll,
+                        "Mixer" => Win::Mixer,
+                        _ => Win::Synth,
+                    };
+                    let c = self.covered(ui.ctx(), w);
+                    self.shell.open.toggle(w, c);
                     ui.close();
                 }
             }
@@ -707,10 +734,12 @@ impl App {
                 self.shell.browser = !b;
                 ui.close();
             }
+            ui.separator();
+            self.tools_menu(ui);
         });
         ui.menu_button("Options", |ui| {
             if ui.button("Settings...").clicked() {
-                self.shell.open.settings = true;
+                self.shell.open.show(crate::raise::Win::Settings);
                 ui.close();
             }
             ui.menu_button("Theme", |ui| {
@@ -735,12 +764,20 @@ impl App {
             });
         });
         ui.menu_button("Help", |ui| {
+            if ui
+                .button("Quick search...      Ctrl+K")
+                .on_hover_text("Type to find any action, window, instrument, effect, preset, sample or recent project")
+                .clicked()
+            {
+                self.wf.palette.show("");
+                ui.close();
+            }
             if ui.button("Keyboard shortcuts    F1").clicked() {
-                self.shell.open.keys = true;
+                self.shell.open.show(crate::raise::Win::Keys);
                 ui.close();
             }
             if ui.button("About").clicked() {
-                self.shell.open.about = true;
+                self.shell.open.show(crate::raise::Win::About);
                 ui.close();
             }
         });

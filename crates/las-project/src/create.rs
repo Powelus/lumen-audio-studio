@@ -21,10 +21,11 @@ pub const INSTRUMENTS: &[(&str, &str, &str)] = &[
     ("facet", "Facet", "#ff9f43"),
     ("mist", "Mist", "#7dd3fc"),
     ("lumapad", "LumaPad", "#ff5c8a"),
+    ("weave", "Weave", "#e0b341"),
 ];
 
 pub fn instrument_known(id: &str) -> bool {
-    INSTRUMENTS.iter().any(|i| i.0 == id)
+    INSTRUMENTS.iter().any(|i| i.0 == id) || id == crate::slicer::SLICER_ID
 }
 
 /// Milliseconds since 1970, as the web version stamps projects.
@@ -378,6 +379,22 @@ mod default_tests {
         let back = crate::decode(&bytes).unwrap().project;
         assert_eq!(back.channels.len(), 5);
         assert_eq!(back.samples.len(), 4);
+    }
+
+    #[test]
+    fn every_instrument_is_known_weave_and_the_slicer_among_them() {
+        for (id, name, color) in INSTRUMENTS {
+            assert!(instrument_known(id), "{id}");
+            let c = channel(id);
+            assert_eq!(c.name, *name);
+            assert_eq!(c.color, *color);
+        }
+        assert!(INSTRUMENTS.iter().any(|i| i.0 == "weave" && i.1 == "Weave"));
+        assert!(instrument_known(crate::slicer::SLICER_ID));
+        let mut p = empty_project("t");
+        let ch = add_channel(&mut p, "weave");
+        assert_eq!(p.channels[ch].plugin_id, "weave");
+        assert_eq!(p.channels[ch].kind, "instrument");
     }
 
     #[test]

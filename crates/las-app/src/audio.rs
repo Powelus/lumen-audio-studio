@@ -35,6 +35,15 @@ pub enum Garbage {
     Params(Box<Params>),
     Player(Box<Player>),
     Preview(Box<Preview>),
+    Reference(Box<RefTrack>),
+}
+
+/// A reference track to compare the mix with: its audio, the gain that matches its
+/// loudness to the mix, and the tempo that turns song positions into its seconds.
+pub struct RefTrack {
+    pub audio: Preview,
+    pub gain: f32,
+    pub bpm: f64,
 }
 
 /// The instruments the app can play.
@@ -113,6 +122,21 @@ pub enum Command {
         vel: f64,
         on: bool,
     },
+    /// A controller (mod wheel, pitch bend, aftertouch) moved on one of the project's
+    /// channels.
+    PlayerController {
+        channel: usize,
+        cc: Cc,
+        value: f64,
+    },
+    /// Load a reference track (or clear it with `None`).
+    Reference(Option<Box<RefTrack>>),
+    /// Hear the reference instead of the mix (the A/B switch).
+    ReferenceOn(bool),
+    /// New loudness-matching gain for the reference.
+    ReferenceGain(f32),
+    /// The insert the tuner listens to, or none.
+    Tuner(Option<usize>),
 }
 
 /// Meters and counters the audio thread publishes.
@@ -128,6 +152,8 @@ pub struct Meters {
     playing: AtomicU32,
     /// Beats of count-in still to come (0 when not counting in).
     counting: AtomicU32,
+    /// Frames the driver asked for in its last callback (the real buffer size).
+    callback_frames: AtomicU32,
     /// The peak of each mixer insert, master first (bits of an `f32`).
     inserts: [AtomicU32; 32],
     /// The last moments of what goes out, for the analyser.
@@ -219,6 +245,11 @@ impl Meters {
     pub fn playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed) != 0
     }
+    /// Frames in the driver's last callback, 0 before the first one. With the device's
+    /// own buffer size this is the only way to know it.
+    pub fn callback_frames(&self) -> u32 {
+        self.callback_frames.load(Ordering::Relaxed)
+    }
     /// Beats of count-in still to come, 0 when not counting in.
     pub fn counting(&self) -> u32 {
         self.counting.load(Ordering::Relaxed)
@@ -229,6 +260,9 @@ impl Meters {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AudioChoice {
+    /// The audio driver (cpal host) by name: "WASAPI" or "ASIO" on Windows, "ALSA" or
+    /// "JACK" on Linux, "CoreAudio" on macOS. Empty is Automatic (see [`auto_asio`]).
+    pub driver: String,
     /// The output device, by name.
     pub output: String,
     /// Frames per second.
@@ -261,9 +295,90 @@ pub fn device_name(d: &cpal::Device) -> String {
         .unwrap_or_else(|_| "Unknown device".into())
 }
 
-/// The output devices there are, by name.
-pub fn output_devices() -> Vec<String> {
-    let mut v: Vec<String> = cpal::default_host()
+/// The audio drivers this build can use, by name, the system's default first.
+pub fn drivers() -> Vec<String> {
+    let default = cpal::default_host().id();
+    let mut v = vec![default.name().to_string()];
+    for id in cpal::available_hosts() {
+        if id != default {
+            v.push(id.name().to_string());
+        }
+    }
+    v
+}
+
+/// Whether this build can talk to ASIO drivers (Windows builds made with the ASIO SDK).
+pub const HAS_ASIO: bool = cfg!(all(windows, feature = "asio"));
+
+/// What Automatic does, for Settings.
+pub const AUTO_HELP: &str = "Picks the best driver for you: your audio interface's ASIO driver, then FL Studio ASIO or ASIO4ALL, then Windows audio.";
+
+/// ASIO drivers that wrap other drivers rather than belong to an audio interface.
+fn generic_asio(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "asio4all",
+        "fl studio asio",
+        "flstudio asio",
+        "generic low latency",
+        "asio2wasapi",
+        "flexasio",
+        "voicemeeter",
+        "asio4all v2",
+    ]
+    .iter()
+    .any(|g| n.contains(g))
+}
+
+/// Which ASIO device Automatic opens, from the ASIO devices there are: the audio
+/// interface's own driver, else FL Studio ASIO, else ASIO4ALL. None: use the system's
+/// default driver (WASAPI on Windows).
+pub fn auto_asio(devices: &[String]) -> Option<String> {
+    let has = |key: &str| {
+        devices
+            .iter()
+            .find(|d| d.to_ascii_lowercase().contains(key))
+            .cloned()
+    };
+    devices
+        .iter()
+        .find(|d| !generic_asio(d))
+        .cloned()
+        .or_else(|| has("fl studio asio"))
+        .or_else(|| has("flstudio asio"))
+        .or_else(|| has("asio4all"))
+}
+
+/// What a driver is, in a few words, for Settings.
+pub fn driver_help(name: &str) -> &'static str {
+    match name.to_ascii_lowercase().as_str() {
+        "asio" => "ASIO talks to the audio interface directly and gives the lowest latency. Pick your interface's own ASIO driver, or ASIO4ALL or FL Studio ASIO if your sound card has none. Only one program can use most ASIO drivers at a time",
+        "wasapi" => "WASAPI is Windows' own audio system: it works with every device and lets other programs play at the same time, with a little more latency than ASIO",
+        "alsa" => "ALSA is Linux's own audio system",
+        "jack" => "JACK is a low latency audio server for Linux",
+        "coreaudio" => "Core Audio is macOS's own audio system, with low latency for every device",
+        _ => "The system's audio driver",
+    }
+}
+
+/// The host for a driver name, or the system's default when it is "" or not there.
+fn host(driver: &str) -> cpal::Host {
+    if !driver.is_empty() {
+        if let Some(id) = cpal::available_hosts()
+            .into_iter()
+            .find(|id| id.name().eq_ignore_ascii_case(driver))
+        {
+            if let Ok(h) = cpal::host_from_id(id) {
+                return h;
+            }
+        }
+    }
+    cpal::default_host()
+}
+
+/// The output devices the driver has, by name.
+pub fn output_devices(driver: &str) -> Vec<String> {
+    let mut v: Vec<String> = host(driver)
         .output_devices()
         .map(|it| it.map(|d| device_name(&d)).collect())
         .unwrap_or_default();
@@ -271,9 +386,9 @@ pub fn output_devices() -> Vec<String> {
     v
 }
 
-/// The input devices there are, by name.
-pub fn input_devices() -> Vec<String> {
-    let mut v: Vec<String> = cpal::default_host()
+/// The input devices the driver has, by name.
+pub fn input_devices(driver: &str) -> Vec<String> {
+    let mut v: Vec<String> = host(driver)
         .input_devices()
         .map(|it| it.map(|d| device_name(&d)).collect())
         .unwrap_or_default();
@@ -283,8 +398,8 @@ pub fn input_devices() -> Vec<String> {
 
 /// The chosen output device, or the default one when it is not chosen or not there.
 /// The flag says the chosen one was missing.
-fn pick_output(name: &str) -> (Option<cpal::Device>, bool) {
-    let host = cpal::default_host();
+fn pick_output(name: &str, driver: &str) -> (Option<cpal::Device>, bool) {
+    let host = host(driver);
     if !name.is_empty() {
         if let Some(d) = host
             .output_devices()
@@ -293,14 +408,20 @@ fn pick_output(name: &str) -> (Option<cpal::Device>, bool) {
         {
             return (Some(d), false);
         }
-        return (host.default_output_device(), true);
+        return (first_output(&host), true);
     }
-    (host.default_output_device(), false)
+    (first_output(&host), false)
+}
+
+/// The driver's default output; ASIO has no default, so its first device.
+fn first_output(host: &cpal::Host) -> Option<cpal::Device> {
+    host.default_output_device()
+        .or_else(|| host.output_devices().ok().and_then(|mut it| it.next()))
 }
 
 /// The chosen input device, or the default one.
-pub fn pick_input(name: &str) -> Option<cpal::Device> {
-    let host = cpal::default_host();
+pub fn pick_input(name: &str, driver: &str) -> Option<cpal::Device> {
+    let host = host(driver);
     if !name.is_empty() {
         if let Some(d) = host
             .input_devices()
@@ -311,6 +432,7 @@ pub fn pick_input(name: &str) -> Option<cpal::Device> {
         }
     }
     host.default_input_device()
+        .or_else(|| host.input_devices().ok().and_then(|mut it| it.next()))
 }
 
 pub struct Audio {
@@ -320,10 +442,16 @@ pub struct Audio {
     pub meters: Arc<Meters>,
     pub sample_rate: u32,
     pub device: String,
+    /// The driver the output is open on ("WASAPI", "ASIO", ...).
+    pub driver: String,
+    /// Whether Automatic chose the driver.
+    pub auto: bool,
     /// The frames per buffer asked for (None: the device's own choice).
     pub buffer: Option<u32>,
     /// What did not go as chosen (a missing device, a rate it does not take).
     pub note: Option<String>,
+    /// What the insert the tuner listens to plays (mono, at `sample_rate`).
+    pub tuner: Consumer<f32>,
     /// Wavetables are built here, off the audio thread, and shared.
     tables: TableLibrary,
 }
@@ -342,9 +470,54 @@ impl Audio {
     /// Open the output chosen in Settings. What cannot be had as chosen falls back to the
     /// device's defaults (and says so in `note`).
     pub fn start_with(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
-        let (device, missing) = pick_output(&choice.output);
+        if !choice.driver.is_empty() {
+            return Self::open_with(choice);
+        }
+        // Automatic: the best ASIO device there is, else the system's default driver
+        let mut failed = None;
+        if HAS_ASIO {
+            if let Some(dev) = auto_asio(&output_devices("ASIO")) {
+                let asio = AudioChoice {
+                    driver: "ASIO".into(),
+                    output: dev.clone(),
+                    ..choice.clone()
+                };
+                match Self::open_with(&asio) {
+                    Ok((mut a, tx)) => {
+                        a.auto = true;
+                        return Ok((a, tx));
+                    }
+                    Err(e) => {
+                        failed = Some(format!(
+                            "{dev} (ASIO) did not open ({e}), using Windows audio instead"
+                        ))
+                    }
+                }
+            }
+        }
+        let (mut a, tx) = Self::open_with(choice)?;
+        a.auto = true;
+        if let Some(f) = failed {
+            a.note = Some(match a.note.take() {
+                Some(n) => format!("{f}. {n}"),
+                None => f,
+            });
+        }
+        Ok((a, tx))
+    }
+
+    /// Open the output on the chosen driver ("" is the system's default).
+    fn open_with(choice: &AudioChoice) -> Result<(Self, MidiSender), String> {
+        let driver = host(&choice.driver).id().name().to_string();
+        let (device, missing) = pick_output(&choice.output, &choice.driver);
         let device = device.ok_or("No audio output device found")?;
         let mut notes = Vec::new();
+        if !choice.driver.is_empty() && !driver.eq_ignore_ascii_case(&choice.driver) {
+            notes.push(format!(
+                "The {} driver is not in this build or not installed, using {driver}",
+                choice.driver
+            ));
+        }
         if missing {
             notes.push(format!(
                 "{} is not there, using the default output",
@@ -385,7 +558,8 @@ impl Audio {
             let (midi_tx, midi_rx) = RingBuffer::<Command>::new(512);
             let (garbage_tx, garbage_rx) = RingBuffer::<Garbage>::new(64);
             let meters = Arc::new(Meters::default());
-            let state = Renderer::new(
+            let (tuner_tx, tuner_rx) = RingBuffer::<f32>::new(16384);
+            let mut state = Renderer::new(
                 sample_rate as f64,
                 config.channels as usize,
                 ui_rx,
@@ -393,6 +567,7 @@ impl Audio {
                 garbage_tx,
                 meters.clone(),
             );
+            state.tuner = Some(tuner_tx);
             let stream = match format {
                 SampleFormat::F32 => build::<f32>(&device, config, state),
                 SampleFormat::I16 => build::<i16>(&device, config, state),
@@ -411,8 +586,11 @@ impl Audio {
                     meters,
                     sample_rate,
                     device: name.clone(),
+                    driver: driver.clone(),
+                    auto: false,
                     buffer,
                     note: None,
+                    tuner: tuner_rx,
                     tables: TableLibrary::new(),
                 },
                 midi_tx,
@@ -564,6 +742,12 @@ struct Renderer {
     /// The count-in: frames until the player starts, the tick it starts at, and the
     /// beats still to come.
     count_in: Option<(usize, f64, usize)>,
+    /// The reference track, where it has got to (its frames), and whether it is heard.
+    reference: Option<(Box<RefTrack>, f64)>,
+    reference_on: bool,
+    /// Where the tuner's signal goes, and the insert it comes from.
+    tuner: Option<Producer<f32>>,
+    tuner_insert: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -638,6 +822,10 @@ impl Renderer {
             chain_quiet: 0,
             beeps: Vec::with_capacity(BEEPS),
             count_in: None,
+            reference: None,
+            reference_on: false,
+            tuner: None,
+            tuner_insert: None,
         }
     }
 
@@ -709,6 +897,7 @@ impl Renderer {
             }
             Command::SetPlayer(mut p) => {
                 p.set_metronome(self.metronome);
+                p.set_tap(self.tuner_insert);
                 // the old player goes back to be freed off this thread
                 if let Some(old) = self.player.replace(p) {
                     let _ = self.garbage.push(Garbage::Player(old));
@@ -717,6 +906,11 @@ impl Renderer {
             Command::PlayerPlay(from) => {
                 if let Some(p) = &mut self.player {
                     p.play(from);
+                }
+                // the reference follows the song position
+                if let Some((r, pos)) = &mut self.reference {
+                    let ppq = f64::from(las_project::PPQ);
+                    *pos = from / ppq * 60.0 / r.bpm.max(1.0) * r.audio.rate;
                 }
             }
             Command::Preview(p) => {
@@ -753,6 +947,11 @@ impl Renderer {
                     }
                 }
             }
+            Command::PlayerController { channel, cc, value } => {
+                if let Some(p) = &mut self.player {
+                    p.controller(channel, cc, value);
+                }
+            }
             Command::Instrument(i) => {
                 if i != self.engine.active {
                     // let go of what the old instrument is playing
@@ -787,6 +986,24 @@ impl Renderer {
                 self.count_in = Some((beat * beats as usize, from, beat.max(1)));
                 self.meters.counting.store(beats, Ordering::Relaxed);
             }
+            Command::Reference(r) => {
+                let new = r.map(|r| (r, 0.0));
+                if let Some((old, _)) = std::mem::replace(&mut self.reference, new) {
+                    let _ = self.garbage.push(Garbage::Reference(old));
+                }
+            }
+            Command::ReferenceOn(on) => self.reference_on = on,
+            Command::ReferenceGain(g) => {
+                if let Some((r, _)) = &mut self.reference {
+                    r.gain = g;
+                }
+            }
+            Command::Tuner(i) => {
+                self.tuner_insert = i;
+                if let Some(p) = &mut self.player {
+                    p.set_tap(i);
+                }
+            }
         }
     }
 
@@ -797,6 +1014,9 @@ impl Renderer {
         let started = Instant::now();
         las_host::flush_denormals();
         let frames = out.len() / self.channels;
+        self.meters
+            .callback_frames
+            .store(frames as u32, Ordering::Relaxed);
         let now = self.clock as f64 / self.sr;
         while let Ok(c) = self.ui.pop() {
             self.handle(c, now);
@@ -836,7 +1056,16 @@ impl Renderer {
                     l[i] += pl[i];
                     r[i] += pr[i];
                 }
+                if let Some(tx) = &mut self.tuner {
+                    p.drain_tap(|s| {
+                        let _ = tx.push(s);
+                    });
+                }
             }
+            let song_playing = self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.is_playing() && !p.finished());
             // the active instrument's effects; the song position follows the clock
             let chain = &mut self.chains[chain_index(self.engine.active)];
             // (smart disable: once nothing has come in or out for a while it sleeps)
@@ -879,6 +1108,28 @@ impl Renderer {
                 if *pos as usize + 1 >= len {
                     if let Some((old, _)) = self.preview.take() {
                         let _ = self.garbage.push(Garbage::Preview(old));
+                    }
+                }
+            }
+            // the reference track runs along with the song; heard, it replaces the
+            // whole mix (master effects included)
+            if let Some((rt, pos)) = &mut self.reference {
+                let step = rt.audio.rate / self.sr;
+                let len = rt.audio.left.len().min(rt.audio.right.len());
+                if self.reference_on {
+                    l.fill(0.0);
+                    r.fill(0.0);
+                }
+                if song_playing {
+                    for i in 0..n {
+                        let at = *pos as usize;
+                        if at + 1 < len && self.reference_on {
+                            let f = (*pos - at as f64) as f32;
+                            let (al, ar) = (&rt.audio.left, &rt.audio.right);
+                            l[i] = (al[at] + (al[at + 1] - al[at]) * f) * rt.gain;
+                            r[i] = (ar[at] + (ar[at + 1] - ar[at]) * f) * rt.gain;
+                        }
+                        *pos += step;
                     }
                 }
             }
@@ -1119,6 +1370,57 @@ mod tests {
     }
 
     #[test]
+    fn the_reference_replaces_the_mix_while_b_is_on_and_the_tuner_hears_an_insert() {
+        let (mut r, mut tx, _garbage) = renderer();
+        let (tuner_tx, mut tuner_rx) = RingBuffer::<f32>::new(1 << 16);
+        r.tuner = Some(tuner_tx);
+        let mut buf = vec![0f32; 512 * 2];
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        // a constant reference, easy to recognise, at a quarter gain
+        let n = 48000 * 30;
+        let one: Shared<[f32]> = vec![0.8f32; n].into();
+        tx.push(Command::Reference(Some(Box::new(RefTrack {
+            audio: Preview {
+                left: one.clone(),
+                right: one,
+                rate: 48000.0,
+            },
+            gain: 0.25,
+            bpm: 120.0,
+        }))))
+        .ok()
+        .unwrap();
+        tx.push(Command::Tuner(Some(0))).ok().unwrap();
+        tx.push(Command::PlayerPlay(0.0)).ok().unwrap();
+        for _ in 0..50 {
+            r.fill(&mut buf);
+        }
+        assert!(
+            buf.iter().any(|v| (v - 0.2 * 0.8).abs() > 1e-3),
+            "A: the mix is heard"
+        );
+        let heard = std::iter::from_fn(|| tuner_rx.pop().ok()).count();
+        assert!(
+            heard >= 512 * 40,
+            "the tuner got the master's signal: {heard}"
+        );
+        tx.push(Command::ReferenceOn(true)).ok().unwrap();
+        r.fill(&mut buf);
+        r.fill(&mut buf);
+        // the volume (0.8) times the matched reference (0.25 * 0.8)
+        assert!(
+            buf.iter().all(|v| (v - 0.8 * 0.25 * 0.8).abs() < 1e-4),
+            "B: only the reference"
+        );
+        tx.push(Command::ReferenceOn(false)).ok().unwrap();
+        tx.push(Command::Reference(None)).ok().unwrap();
+        r.fill(&mut buf);
+        assert!(r.reference.is_none());
+    }
+
+    #[test]
     fn a_project_player_plays_stops_and_is_swapped_out() {
         let (mut r, mut tx, mut garbage) = renderer();
         let mut buf = vec![0f32; 512 * 2];
@@ -1305,6 +1607,34 @@ mod tests {
         }
         assert!(!r.player.as_ref().unwrap().is_playing());
         assert_eq!(r.meters.counting(), 0);
+    }
+
+    #[test]
+    fn the_default_driver_comes_first_and_an_unknown_one_falls_back_to_it() {
+        let d = drivers();
+        assert_eq!(d[0], cpal::default_host().id().name());
+        assert_eq!(host("no such driver").id(), cpal::default_host().id());
+        assert_eq!(host("").id(), cpal::default_host().id());
+        assert!(driver_help("ASIO").contains("ASIO4ALL"));
+        let c: AudioChoice = serde_json::from_str(r#"{"output": "x"}"#).unwrap();
+        assert!(c.driver.is_empty(), "old settings get Automatic");
+    }
+
+    #[test]
+    fn automatic_ranks_the_interface_driver_then_fl_then_asio4all() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let pick = |x: &[&str]| auto_asio(&v(x));
+        assert_eq!(
+            pick(&["ASIO4ALL v2", "FL Studio ASIO", "Focusrite USB ASIO"]).as_deref(),
+            Some("Focusrite USB ASIO")
+        );
+        assert_eq!(
+            pick(&["ASIO4ALL v2", "FL Studio ASIO"]).as_deref(),
+            Some("FL Studio ASIO")
+        );
+        assert_eq!(pick(&["ASIO4ALL v2"]).as_deref(), Some("ASIO4ALL v2"));
+        assert_eq!(pick(&["Generic Low Latency ASIO Driver", "FlexASIO"]), None);
+        assert_eq!(pick(&[]), None);
     }
 
     #[test]

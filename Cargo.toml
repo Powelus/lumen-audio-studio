@@ -4,7 +4,7 @@ members = ["crates/las-dsp", "crates/las-project", "crates/las-engine", "crates/
     "crates/las-testvst3", "crates/las-window"]
 
 [workspace.package]
-version = "0.2.0-alpha.58"
+version = "0.2.0-alpha.60"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Powelus/lumen-audio-studio"
@@ -19,3 +19,9 @@ all = "warn"
 [profile.release]
 # no debug symbols in the programs that ship: smaller files that start faster
 strip = true
+# the audio thread is what users feel: full optimisation across crates. One codegen
+# unit and thin LTO let the DSP inline through the engine (measured in docs or the
+# perf example: `cargo run --release -p las-engine --example perf`)
+opt-level = 3
+lto = "thin"
+codegen-units = 1

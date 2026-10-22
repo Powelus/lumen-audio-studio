@@ -38,6 +38,10 @@ pub trait Instrument: Send {
     fn automate(&mut self, _id: u32, _points: &[(f64, f64)], _first: bool) -> bool {
         false
     }
+
+    /// A performance controller moved: the mod wheel (0 to 1), pitch bend (-1 to 1) or
+    /// aftertouch (0 to 1). Plugins that do not use it ignore it.
+    fn controller(&mut self, _cc: las_dsp::engine::Cc, _value: f64) {}
 }
 
 /// The lines automation draws on a plugin's parameters, read once a block.
@@ -172,6 +176,11 @@ impl Hosted {
     /// Automate the parameter `id` of the plugin.
     pub fn automate(&mut self, id: u32, points: &[(f64, f64)], first: bool) -> bool {
         self.plugin.automate(id, points, first)
+    }
+
+    /// Move a performance controller (applied from the next block).
+    pub fn controller(&mut self, cc: las_dsp::engine::Cc, value: f64) {
+        self.plugin.controller(cc, value);
     }
 
     pub fn stop(&mut self, time: f64) {

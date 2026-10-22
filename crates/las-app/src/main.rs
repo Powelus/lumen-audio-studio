@@ -25,8 +25,10 @@ mod playlist;
 mod presets;
 mod project;
 mod rack;
+mod raise;
 mod record;
 mod roll;
+mod sampleedit;
 mod samplerui;
 mod settings;
 mod shell;
@@ -34,8 +36,11 @@ mod skin;
 mod skin_tables;
 mod steps;
 mod theme;
+#[cfg(test)]
+mod uitest;
 mod weave_ui;
 mod widgets;
+mod workflow;
 
 fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--version" || a == "-V") {

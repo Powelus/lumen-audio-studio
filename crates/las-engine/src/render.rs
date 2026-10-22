@@ -155,9 +155,9 @@ pub(crate) struct Engine {
 /// The clip's value at `t`, its stored points ramped, between clip ticks `from` and `to`.
 fn automation_breakpoints(clip: &AutomationClip, from: f64, to: f64) -> Vec<(f64, f64)> {
     let mut out = vec![(from, automation_value_at(clip, from))];
-    for p in &clip.points {
-        if p.t > from && p.t < to {
-            out.push((p.t, p.v));
+    for (t, v) in crate::timeline::automation_curve(clip) {
+        if t > from && t < to {
+            out.push((t, v));
         }
     }
     if to > from {
@@ -446,6 +446,7 @@ impl Engine {
                 fine,
                 n.note.pan,
                 n.note.step == Some(true),
+                n.note.release.unwrap_or(0.5),
             );
         }
     }
@@ -483,6 +484,18 @@ impl Engine {
     pub(crate) fn note_off(&mut self, channel: usize, key: f64, time: f64) {
         if let Some(ch) = self.channels.get_mut(channel) {
             ch.inst.note_off(key, time);
+        }
+    }
+
+    pub(crate) fn controller(
+        &mut self,
+        channel: usize,
+        cc: las_dsp::engine::Cc,
+        value: f64,
+        time: f64,
+    ) {
+        if let Some(ch) = self.channels.get_mut(channel) {
+            ch.inst.controller(cc, value, time);
         }
     }
 
@@ -636,6 +649,18 @@ pub fn render_mix_with(
     opts: &RenderOptions,
 ) -> Result<Rendered, String> {
     let mut all = render_taps(project, samples, opts, &[None])?;
+    Ok(all.remove(0))
+}
+
+/// Render one output of the mixer offline: the master (`None`) or an insert after its
+/// fader. Used to bounce a channel or an insert to audio.
+pub fn render_tap(
+    project: &Project,
+    samples: &BTreeMap<String, Sample>,
+    opts: &RenderOptions,
+    insert: Option<usize>,
+) -> Result<Rendered, String> {
+    let mut all = render_taps(project, samples, opts, &[insert])?;
     Ok(all.remove(0))
 }
 
@@ -884,6 +909,21 @@ impl Engine {
             .filter(|&i| !self.mixer.is_asleep(i))
             .collect();
         (ch, ins)
+    }
+
+    /// Add the mono signal of insert `i` for the block just rendered to `out`, as far
+    /// as `out` has room (it never grows).
+    pub(crate) fn tap_insert(&self, i: usize, out: &mut Vec<f32>) {
+        if i >= self.mixer.len() {
+            return;
+        }
+        let (l, r) = self.mixer.insert_output(i);
+        for (a, b) in l.iter().zip(r) {
+            if out.len() == out.capacity() {
+                break;
+            }
+            out.push((a + b) * 0.5);
+        }
     }
 
     /// The peak level of each insert, master first.

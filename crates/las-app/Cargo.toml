@@ -16,6 +16,12 @@ build = "build.rs"
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
+[features]
+# ASIO drivers on Windows (an interface's own, ASIO4ALL, FL Studio ASIO). Building it
+# needs the Steinberg ASIO SDK (CPAL_ASIO_DIR pointing at it) and LLVM's libclang; the
+# Windows release and CI builds fetch the SDK and turn this on. Without it, WASAPI only.
+asio = ["cpal/asio"]
+
 [dependencies]
 cpal = "0.18.2"
 # glow starts in a moment where wgpu probes DirectX and Vulkan first, and the
@@ -27,6 +33,7 @@ las-dsp = { path = "../las-dsp" }
 las-engine = { path = "../las-engine" }
 las-host = { path = "../las-host" }
 las-project = { path = "../las-project" }
+las-window = { path = "../las-window" }
 midir = "0.11.1"
 rtrb = "0.4.0"
 serde = { version = "1", features = ["derive"] }

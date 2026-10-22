@@ -194,6 +194,13 @@ impl Shared {
                     vel,
                     on,
                 },
+                (Command::Controller { cc, value }, _) if ch != SYNTH => {
+                    Command::PlayerController {
+                        channel: ch,
+                        cc,
+                        value,
+                    }
+                }
                 (c, _) => c,
             };
             if let Ok(mut a) = self.audio.lock() {
@@ -345,13 +352,23 @@ mod tests {
                 ..
             })
         ));
+        // the mod wheel goes to the selected channel too
+        hub.feed(&[0xB0, 1, 127]);
+        assert!(matches!(
+            rx.pop(),
+            Ok(Command::PlayerController {
+                channel: 2,
+                cc: Cc::Mw,
+                ..
+            })
+        ));
         hub.set_channel(None);
         hub.feed(&[0x90, 65, 127]);
         assert!(matches!(rx.pop(), Ok(Command::NoteOn { key: 65, .. })));
         hub.feed(&[0xB0, 20, 5]);
         assert!(rx.pop().is_err(), "a plain knob is not for the synth");
         let got = hub.drain();
-        assert_eq!(got.len(), 3);
+        assert_eq!(got.len(), 4, "the keys, the mod wheel and the knob");
         assert!(hub.drain().is_empty());
         assert!(hub.active());
     }

@@ -98,8 +98,101 @@ impl SourcePlayback {
     }
 }
 
+/// A voice's own filter, moved by its own envelope (the sampler's filter envelope).
+#[derive(Clone, Debug)]
+pub struct FilterEnv {
+    pub kind: &'static str,
+    /// Cutoff in Hz with the envelope at 0.
+    pub cutoff: f64,
+    pub res: f64,
+    /// How far the envelope at full moves the cutoff, in octaves (may be negative).
+    pub amount: f64,
+    pub attack: f64,
+    pub decay: f64,
+    pub sustain: f64,
+    pub release: f64,
+    /// When the note starts, and when its release begins (seconds).
+    pub start: f64,
+    pub released_at: Option<f64>,
+    filt: [WebBiquad; 2],
+    made: f64,
+}
+
+impl FilterEnv {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        kind: &'static str,
+        cutoff: f64,
+        res: f64,
+        amount: f64,
+        attack: f64,
+        decay: f64,
+        sustain: f64,
+        release: f64,
+    ) -> Self {
+        Self {
+            kind,
+            cutoff,
+            res,
+            amount,
+            attack: attack.max(0.001),
+            decay: decay.max(0.001),
+            sustain: sustain.clamp(0.0, 1.0),
+            release: release.max(0.001),
+            start: 0.0,
+            released_at: None,
+            filt: [WebBiquad::default(); 2],
+            made: f64::NAN,
+        }
+    }
+
+    /// The envelope (0 to 1) `t` seconds on the engine clock.
+    pub fn level(&self, t: f64) -> f64 {
+        let held = |t: f64| {
+            let x = t - self.start;
+            if x <= 0.0 {
+                0.0
+            } else if x < self.attack {
+                x / self.attack
+            } else {
+                let k = (-(x - self.attack) * 4.6 / self.decay).exp();
+                self.sustain + (1.0 - self.sustain) * k
+            }
+        };
+        match self.released_at {
+            Some(r) if t > r => held(r) * (-(t - r) * 4.6 / self.release).exp(),
+            _ => held(t),
+        }
+    }
+
+    fn run(&mut self, t: f64, sr: f64, l: f32, r: f32) -> (f32, f32) {
+        let c = (self.cutoff * 2f64.powf(self.amount * self.level(t))).clamp(20.0, sr * 0.45);
+        // the coefficients move in steps of a hundredth of an octave
+        if !(self.made.is_finite() && (c / self.made).log2().abs() < 0.01) {
+            self.made = c;
+            for f in &mut self.filt {
+                f.set(self.kind, c, self.res, 0.0, sr);
+            }
+        }
+        (
+            self.filt[0].run(f64::from(l)) as f32,
+            self.filt[1].run(f64::from(r)) as f32,
+        )
+    }
+}
+
+fn filter_kind(k: &str) -> &'static str {
+    match k {
+        "highpass" => "highpass",
+        "bandpass" => "bandpass",
+        _ => "lowpass",
+    }
+}
+
 pub struct Voice {
     src: SourcePlayback,
+    /// Its own filter, when the filter envelope moves the cutoff.
+    fenv: Option<Box<FilterEnv>>,
     gain: Param,
     pan: f64,
     key: i32,
@@ -126,6 +219,7 @@ pub struct VoiceSpec {
     pub start: f64,
     pub end: f64,
     pub looped: bool,
+    pub filter: Option<FilterEnv>,
 }
 
 fn make_voice(buf: &Arc<Audio>, sr: f64, v: VoiceSpec) -> Voice {
@@ -143,6 +237,7 @@ fn make_voice(buf: &Arc<Audio>, sr: f64, v: VoiceSpec) -> Voice {
         start,
         end,
         looped,
+        filter,
     } = v;
     let dur = buf.frames() as f64 / buf.sample_rate;
     let start_sec = 0f64.max((dur - 0.001).min(start * dur));
@@ -179,6 +274,11 @@ fn make_voice(buf: &Arc<Audio>, sr: f64, v: VoiceSpec) -> Voice {
             loop_points: looped.then_some((start_sec * bsr, end_sec * bsr)),
         },
         gain: g,
+        fenv: filter.map(|mut f| {
+            f.start = t;
+            f.released_at = duration.map(|d| t + d.max(0.005));
+            Box::new(f)
+        }),
         pan,
         key,
         group: 0,
@@ -220,7 +320,10 @@ fn mix_voices(
                 break;
             };
             let g = gains[k];
-            let (a, b) = (s[0] * g, s[1] * g);
+            let (mut a, mut b) = (s[0] * g, s[1] * g);
+            if let Some(f) = &mut v.fenv {
+                (a, b) = f.run(frame as f64 / sr, sr, a, b);
+            }
             let (pl, pr) = if stereo {
                 let (mut x, mut y) = ([a], [b]);
                 stereo_pan(&mut x, &mut y, v.pan);
@@ -325,7 +428,9 @@ impl Sampler {
         }
     }
 
-    /// Play a note: `duration` gates it, `None` lets the sample ring out.
+    /// Play a note: `duration` gates it, `None` lets the sample ring out; `rel_scale`
+    /// stretches the release (the note's release).
+    #[allow(clippy::too_many_arguments)]
     pub fn play_note(
         &mut self,
         key: i32,
@@ -334,6 +439,7 @@ impl Sampler {
         duration: Option<f64>,
         fine: f64,
         pan: f64,
+        rel_scale: f64,
     ) {
         let Some(buf) = self.sample.clone() else {
             return;
@@ -350,8 +456,24 @@ impl Sampler {
         if s.get("cut").is_some_and(truthy) {
             self.cut_voices(time);
         }
-        let semis =
-            f64::from(key) - n("root", 60.0) + n("tune", 0.0) + (n("fine", 0.0) + fine) / 100.0;
+        // a slicer plays slice N of its sample, unpitched, on key C5 + N
+        let slice = s.get("slices").and_then(Value::as_array).map(|sl| {
+            let i = usize::try_from(key - 60).ok().filter(|&i| i < sl.len());
+            i.map(|i| {
+                let at = |k: usize| sl.get(k).and_then(Value::as_f64);
+                (at(i).unwrap_or(0.0), at(i + 1).unwrap_or(1.0))
+            })
+        });
+        if slice == Some(None) {
+            return;
+        }
+        let slice = slice.flatten();
+        let pitch = if slice.is_some() {
+            0.0
+        } else {
+            f64::from(key) - n("root", 60.0)
+        };
+        let semis = pitch + n("tune", 0.0) + (n("fine", 0.0) + fine) / 100.0;
         let vel_to_vol = n("velToVol", 0.7);
         let gain = 1.0 - vel_to_vol + vel_to_vol * vel;
         // the node's playbackRate is a float
@@ -360,9 +482,22 @@ impl Sampler {
             n("attack", 0.001),
             n("decay", 0.3),
             n("sustain", 1.0),
-            n("release", 0.08),
+            n("release", 0.08) * rel_scale,
         );
-        let (start, end) = (n("start", 0.0), n("end", 1.0));
+        let (start, end) = slice.unwrap_or((n("start", 0.0), n("end", 1.0)));
+        let amount = n("fltEnvAmt", 0.0);
+        let filter = (amount != 0.0).then(|| {
+            FilterEnv::new(
+                filter_kind(&self.filter_kind),
+                n("cutoff", 20000.0),
+                n("res", 0.7),
+                amount,
+                n("fltAttack", 0.01),
+                n("fltDecay", 0.4),
+                n("fltSustain", 0.0),
+                n("fltRelease", 0.3) * rel_scale,
+            )
+        });
         self.voices.push(make_voice(
             &buf,
             self.sr,
@@ -380,6 +515,7 @@ impl Sampler {
                 start,
                 end,
                 looped,
+                filter,
             },
         ));
     }
@@ -390,6 +526,9 @@ impl Sampler {
         for v in &mut self.voices {
             if v.key == key && !v.released {
                 v.released = true;
+                if let Some(f) = &mut v.fenv {
+                    f.released_at = Some(time);
+                }
                 v.gain.cancel_scheduled_values(time);
                 v.gain.set_target_at_time(0.0, time, rel.max(0.002) / 4.0);
                 v.src.stop = Some(time + rel * 1.5 + 0.05);
@@ -418,8 +557,17 @@ impl Sampler {
         l.fill(0.0);
         r.fill(0.0);
         mix_voices(&mut self.voices, f0, l, r, sr, &mut self.gain_buf);
-        // the shared filter and boost
+        // the shared filter and boost (with the filter envelope on, each voice has its
+        // own filter instead)
         self.g.fill(f0, n, sr);
+        if num(self.state.get("fltEnvAmt"), 0.0) != 0.0 {
+            for i in 0..n {
+                let boost = self.g.buf(2)[i];
+                l[i] *= boost;
+                r[i] *= boost;
+            }
+            return;
+        }
         for i in 0..n {
             let boost = self.g.buf(2)[i];
             for ch in 0..2 {
@@ -552,6 +700,7 @@ impl PadBank {
                 start: 0.0,
                 end: 1.0,
                 looped: false,
+                filter: None,
             },
         );
         v.group = cut;

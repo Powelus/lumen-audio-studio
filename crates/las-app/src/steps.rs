@@ -290,6 +290,10 @@ pub struct StepState {
     new_group: String,
     /// Where each shown channel's row was drawn (for things dropped on it).
     pub rows: Vec<(usize, Rect)>,
+    /// The bottom of the room the windows have (above the status bar).
+    pub room_bottom: Option<f32>,
+    /// The height of what the rack shows under the rows (from the last frame).
+    pub footer: f32,
 }
 
 impl StepState {
@@ -499,8 +503,12 @@ pub struct Out {
     pub open_roll: Option<usize>,
     /// A channel whose name was double-clicked: open its instrument.
     pub open_synth: Option<usize>,
+    /// A channel whose Channel settings (Arp and chords) were asked for.
+    pub open_settings: Option<usize>,
     /// A new length for the pattern, in steps (0: as long as its notes).
     pub steps: Option<usize>,
+    /// A channel to render to an audio clip: (channel, only the pattern).
+    pub render: Option<(usize, bool)>,
 }
 
 /// The menu of mixer inserts a channel can play through.
@@ -634,8 +642,21 @@ pub fn draw(
     state.rows.clear();
     let dragging = egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ui.ctx());
     let width = cell_offset(steps);
-    egui::ScrollArea::horizontal()
+    // the channels scroll up and down too, so the rack never grows past the screen
+    // and its buttons under the rows stay in reach however many channels there are
+    // (a window's own room is not bounded by the screen, so the screen bounds it: the
+    // room the panels leave, less the row of buttons under the rows and the frame)
+    let bottom = state
+        .room_bottom
+        .unwrap_or_else(|| ui.ctx().content_rect().bottom() - 30.0);
+    let footer = state.footer.max(30.0);
+    let screen_room = bottom - ui.cursor().top() - footer - 16.0;
+    let room = (ui.available_height() - footer)
+        .min(screen_room)
+        .max(ROW * 3.0);
+    egui::ScrollArea::both()
         .auto_shrink([false, true])
+        .max_height(room)
         .id_salt("steps")
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
@@ -774,7 +795,14 @@ pub fn draw(
                         *selected = i;
                     }
                     if resp.double_clicked() {
-                        out.open_synth = Some(i);
+                        if c.plugin_id == "audioclip" {
+                            // as FL opens an audio clip's sound in Edison
+                            crate::sampleedit::request(crate::sampleedit::Request::Edit(
+                                c.id.clone(),
+                            ));
+                        } else {
+                            out.open_synth = Some(i);
+                        }
                     }
                     let resp = resp.on_hover_text("Double click: instrument. Right click: more.");
                     resp.context_menu(|ui| {
@@ -859,7 +887,8 @@ pub fn draw(
                     }
                 });
                 let rr = row.response.rect;
-                state.rows.push((i, rr));
+                // a row scrolled out of sight is no drop target
+                state.rows.push((i, rr.intersect(ui.clip_rect())));
                 if dragging && ui.rect_contains_pointer(rr) {
                     ui.painter().rect_stroke(
                         rr.expand(1.0),
@@ -991,6 +1020,58 @@ fn channel_menu(
         out.open_synth = Some(i);
         ui.close();
     }
+    if ui
+        .button("Render to audio clip (song)")
+        .on_hover_text("Bounce this channel to a WAV in the project, put it on the playlist and mute the channel")
+        .clicked()
+    {
+        out.render = Some((i, false));
+        ui.close();
+    }
+    if ui
+        .button("Render to audio clip (pattern)")
+        .on_hover_text("The same, for the current pattern only")
+        .clicked()
+    {
+        out.render = Some((i, true));
+        ui.close();
+    }
+    if ui
+        .button("Channel settings (arp, chords)...")
+        .on_hover_text("The arpeggiator and chord presets of this channel; for a sampler also its sample and envelopes")
+        .clicked()
+    {
+        out.open_settings = Some(i);
+        ui.close();
+    }
+    if c.sample_id.is_some() {
+        crate::sampleedit::menu_items(ui, &c.id);
+    }
+    ui.menu_button("Create automation clip", |ui| {
+        let pitch = c.pitch;
+        for (param, what, start) in [
+            ("volume", "level", c.volume / 1.25),
+            ("pan", "pan", (c.pan + 1.0) / 2.0),
+            ("pitch", "pitch", ((pitch + 12.0) / 24.0).clamp(0.0, 1.0)),
+        ] {
+            if ui
+                .button(format!("Channel {what}"))
+                .on_hover_text(if param == "pitch" {
+                    "Sets the pitch notes start at, up to an octave up or down"
+                } else {
+                    ""
+                })
+                .clicked()
+            {
+                out.chans.push(ChanEdit::Automate(crate::auto::AutoRequest {
+                    target: crate::auto::channel_target(&c.id, param),
+                    name: format!("{} {what}", c.name),
+                    start,
+                }));
+                ui.close();
+            }
+        }
+    });
     ui.separator();
     if ui.button("Rename...").clicked() {
         out.chans.push(ChanEdit::AskRename(i));
@@ -1049,7 +1130,8 @@ fn channel_menu(
                     .hint_text("New group")
                     .desired_width(110.0),
             );
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let enter =
+                (r.has_focus() || r.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let name = state.new_group.trim().to_string();
             if (ui.button("Add").clicked() || enter) && !name.is_empty() {
                 out.chans.push(ChanEdit::Begin);

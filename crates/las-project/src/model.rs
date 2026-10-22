@@ -318,8 +318,91 @@ pub struct AutomationPoint {
     pub t: f64,
     /// 0 to 1.
     pub v: f64,
+    /// The shape of the curve from this point to the next, as FL's point menu.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curve: Option<CurveKind>,
+    /// How far the curve to the next point bends, -1 to 1 (0 is straight).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tension: Option<f64>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// The shape of an automation curve between two points (FL's point modes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CurveKind {
+    /// One bend; straight without tension.
+    #[default]
+    Single,
+    /// An S: bends one way, then the other.
+    Double,
+    /// Stays at this point's value until the next point.
+    Hold,
+    /// Steps up or down; tension sets how many.
+    Stairs,
+    /// Eases in and out.
+    Smooth,
+}
+
+impl CurveKind {
+    pub const ALL: [CurveKind; 5] = [
+        Self::Single,
+        Self::Double,
+        Self::Hold,
+        Self::Stairs,
+        Self::Smooth,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Single => "Single curve",
+            Self::Double => "Double curve",
+            Self::Hold => "Hold",
+            Self::Stairs => "Stairs",
+            Self::Smooth => "Smooth",
+        }
+    }
+
+    /// How far (0 to 1) the value has gone from one point to the next at `k` (0 to 1)
+    /// of the way between them.
+    pub fn shape(self, tension: f64, k: f64) -> f64 {
+        let k = k.clamp(0.0, 1.0);
+        let t = tension.clamp(-1.0, 1.0);
+        let e = 4f64.powf(t);
+        match self {
+            Self::Single => k.powf(e),
+            Self::Double => {
+                if k < 0.5 {
+                    0.5 * (2.0 * k).powf(e)
+                } else {
+                    1.0 - 0.5 * (2.0 * (1.0 - k)).powf(e)
+                }
+            }
+            Self::Hold => {
+                if k >= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Stairs => {
+                let n = Self::stairs(t) as f64;
+                ((k * n).floor() / (n - 1.0)).min(1.0)
+            }
+            Self::Smooth => (1.0 - (std::f64::consts::PI * k).cos()) / 2.0,
+        }
+    }
+
+    /// The number of steps of a stairs curve with this tension (2 to 16).
+    pub fn stairs(tension: f64) -> u32 {
+        (2.0 + (tension.clamp(-1.0, 1.0) + 1.0) * 7.0).round() as u32
+    }
+
+    /// Whether the curve is a straight line with this tension.
+    pub fn is_straight(self, tension: f64) -> bool {
+        self == Self::Single && tension.abs() < 1e-9
+    }
 }
 
 /// What an automation clip drives.

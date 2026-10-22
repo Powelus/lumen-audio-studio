@@ -128,6 +128,12 @@ pub struct App {
     pub(crate) weave: crate::weave_ui::WeaveEditor,
     /// The hosted plugins' own windows that are open.
     pub(crate) editors: Vec<crate::hosted::OpenEditor>,
+    /// The sample editor, while it is open.
+    pub(crate) sample_editor: Option<crate::sampleedit::SampleEditor>,
+    /// Command palette, capture, render, reference, tuner, templates, autosave.
+    pub(crate) wf: crate::workflow::Workflow,
+    /// The project generation the windows were last opened for.
+    pub(crate) seen_generation: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -149,11 +155,22 @@ fn full_defaults() -> [Value; 3] {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::new_with(cc, true)
+    }
+
+    /// The app, with or without opening the sound device (tests run without one).
+    pub(crate) fn new_with(cc: &eframe::CreationContext<'_>, sound: bool) -> Self {
         style(&cc.egui_ctx);
+        let wf = crate::workflow::Workflow::start();
         let settings = crate::settings::Settings::load();
         let mut midi = crate::midi::MidiHub::new();
         midi.set_repaint(&cc.egui_ctx);
-        let (audio, status) = match Audio::start_with(&settings.audio) {
+        let started = if sound {
+            Audio::start_with(&settings.audio)
+        } else {
+            Err("no sound device (test)".to_string())
+        };
+        let (audio, status) = match started {
             Ok((audio, tx)) => {
                 midi.set_sender(Some(tx));
                 let status = audio
@@ -204,17 +221,20 @@ impl App {
             analyser: None,
             weave: Default::default(),
             editors: Vec::new(),
+            sample_editor: None,
+            wf,
+            seen_generation: 0,
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
         }
         // `lumen --mist` or `--facet` start on that instrument (Polaris is the default)
         if std::env::args().any(|a| a == "--mist") {
-            app.shell.open.synth = true;
+            app.shell.open.show(crate::raise::Win::Synth);
             app.switch(Instrument::Mist);
         }
         if std::env::args().any(|a| a == "--facet") {
-            app.shell.open.synth = true;
+            app.shell.open.show(crate::raise::Win::Synth);
             app.switch(Instrument::Facet);
         }
         app.new_project();
@@ -222,6 +242,10 @@ impl App {
         let chooses = std::env::args().any(|a| a == "--open" || a == "--close" || a == "--add");
         if !chooses {
             app.restore_windows();
+        }
+        // `--palette "rev"` opens the quick search with that typed
+        if let Some(q) = std::env::args().skip_while(|a| a != "--palette").nth(1) {
+            app.wf.palette.show(&q);
         }
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
@@ -248,14 +272,6 @@ impl App {
             app.add_channel(&id);
             let at = app.project.channel;
             app.open_channel(at);
-        }
-        // `--channel 1` opens that channel's instrument window
-        if let Some(n) = std::env::args()
-            .skip_while(|a| a != "--channel")
-            .nth(1)
-            .and_then(|n| n.parse::<usize>().ok())
-        {
-            app.open_channel(n);
         }
         // `--effect 1,0` opens the window of the effect in slot 0 of insert 1
         if let Some(v) = std::env::args().skip_while(|a| a != "--effect").nth(1) {
@@ -298,6 +314,23 @@ impl App {
         if std::env::args().any(|a| a == "--demo-song") {
             app.open_demo();
         }
+        // `--channel 1` opens that channel's instrument window (after the demo song, so
+        // it is that song's channel); `--channel-tab envelope` picks the tab of a
+        // sampler's Channel settings
+        if let Some(n) = std::env::args()
+            .skip_while(|a| a != "--channel")
+            .nth(1)
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            app.open_channel(n);
+        }
+        if let Some(t) = std::env::args()
+            .skip_while(|a| a != "--channel-tab")
+            .nth(1)
+            .and_then(|t| crate::samplerui::Tab::from_name(&t))
+        {
+            crate::samplerui::ASK_TAB.with(|c| c.set(Some(t)));
+        }
         // `--demo-audio` adds an audio clip to the playlist (screenshots of waveforms)
         if std::env::args().any(|a| a == "--demo-audio") {
             let frames = 44_100 * 8;
@@ -316,6 +349,24 @@ impl App {
                 let track = p.playlist.tracks.len().min(6).saturating_sub(1);
                 let _ = crate::menus::import_audio_clip(p, samples, "Demo audio", wav, 0.0, track);
             });
+            // `--sample-editor` opens the demo audio in the sample editor, sliced
+            if std::env::args().any(|a| a == "--sample-editor") {
+                let id = app.project.loaded.as_ref().and_then(|l| {
+                    l.project
+                        .channels
+                        .iter()
+                        .rfind(|c| c.plugin_id == "audioclip")
+                        .map(|c| c.id.clone())
+                });
+                if let Some(id) = id {
+                    crate::sampleedit::request(crate::sampleedit::Request::Slice(id));
+                }
+            }
+        }
+        // `--arrange-demo` adds song markers, a loop, and a curved automation clip with
+        // its editor open (screenshots of the arrangement tools)
+        if std::env::args().any(|a| a == "--arrange-demo") {
+            app.arrange_demo();
         }
         if std::env::args().any(|a| a == "--analyser-demo") {
             app.analyser_demo();
@@ -323,9 +374,84 @@ impl App {
         // `--effects` opens the effects rack
         if std::env::args().any(|a| a == "--effects") {
             app.view = View::Effects;
-            app.shell.open.synth = true;
+            app.shell.open.show(crate::raise::Win::Synth);
         }
         app
+    }
+
+    /// Markers, a loop over the second four bars and a filter sweep with FL curves.
+    fn arrange_demo(&mut self) {
+        use crate::playlist::PlEdit;
+        let bar = f64::from(las_project::PPQ) * 4.0;
+        let has = self
+            .project
+            .loaded
+            .as_ref()
+            .is_some_and(|l| l.project.markers.as_ref().is_some_and(|m| !m.is_empty()));
+        let mut edits = vec![PlEdit::Begin];
+        if !has {
+            for k in [0.0, 4.0, 8.0, 12.0] {
+                edits.push(PlEdit::AddMarker(k * bar));
+            }
+        }
+        edits.push(PlEdit::SongLoop(Some((4.0 * bar, 8.0 * bar))));
+        self.project.edit_playlist(&edits);
+        if !has {
+            let names = ["Intro", "Verse", "Drop", "Outro"];
+            self.project.modify(false, |p| {
+                for (m, n) in p.markers.iter_mut().flatten().zip(names) {
+                    m.name = n.into();
+                }
+            });
+        }
+        self.shell.open.show(crate::raise::Win::Playlist);
+        self.shell.open.rack = false;
+        self.project.playlist.zoom = 0.1;
+        self.project.create_automation(&crate::auto::AutoRequest {
+            target: crate::auto::mixer_target(0, "volume"),
+            name: "Master sweep".into(),
+            start: 0.3,
+        });
+        let Some(id) = self.project.open_auto.clone() else {
+            return;
+        };
+        use crate::auto::AutoEdit;
+        use las_project::CurveKind;
+        let (b, len) = (bar, bar * 4.0);
+        let mut e = vec![AutoEdit::Begin];
+        for (t, v) in [(b * 0.75, 0.9), (b * 1.5, 0.45), (b * 2.0, 0.7)] {
+            e.push(AutoEdit::Add {
+                clip: id.clone(),
+                t,
+                v,
+            });
+        }
+        for (i, c, t) in [
+            (0, CurveKind::Single, 0.7),
+            (1, CurveKind::Double, 0.6),
+            (2, CurveKind::Stairs, 0.0),
+            (3, CurveKind::Hold, 0.0),
+        ] {
+            e.push(AutoEdit::Curve {
+                clip: id.clone(),
+                index: i,
+                curve: c,
+            });
+            e.push(AutoEdit::Tension {
+                clip: id.clone(),
+                index: i,
+                tension: t,
+            });
+        }
+        e.push(AutoEdit::Lfo {
+            clip: id.clone(),
+            from: b * 2.5,
+            to: len,
+            lfo: crate::auto::Lfo::default(),
+        });
+        self.project.edit_auto(&e);
+        self.project.auto_state.lfo_on = true;
+        self.project.auto_state.lfo_range = Some((b * 2.5, len));
     }
 
     pub(crate) fn load_preset(&mut self, inst: Instrument, i: usize) {
@@ -477,11 +603,36 @@ impl App {
             .pointer(path)
             .and_then(Value::as_f64)
             .unwrap_or(v);
+        if let Some(req) = self.synth_automation(path, label, v) {
+            crate::widgets::automate_next(req);
+        }
         let changed = knob(ui, &mut v, range, d, label, log, show);
         if changed {
             self.set(path, json!(v));
         }
         changed
+    }
+
+    /// What automating the synth knob at `path` (a JSON pointer into the patch) of the
+    /// channel the panels edit would make, with the knob at `v` now.
+    fn synth_automation(
+        &self,
+        path: &str,
+        label: &str,
+        v: f64,
+    ) -> Option<crate::auto::AutoRequest> {
+        let Some(crate::inst::Bound::Synth(ch)) = self.bound else {
+            return None;
+        };
+        let l = self.project.loaded.as_ref()?;
+        let c = l.project.channels.get(ch)?;
+        let param = format!("patch{}", path.replace('/', "."));
+        let def = las_engine::pluginparams::plugin_param_def(&c.plugin_id, &param);
+        Some(crate::auto::AutoRequest {
+            target: crate::auto::plugin_target(&c.id, &param),
+            name: format!("{} {label}", c.name),
+            start: def.to_normalized(v).clamp(0.0, 1.0),
+        })
     }
 
     pub(crate) fn toggle(&mut self, ui: &mut Ui, path: &str, label: &str) -> bool {
@@ -1556,10 +1707,11 @@ impl App {
     /// A key played from the screen or the computer keyboard: the project's selected
     /// channel while its page is open, otherwise the synth on the other pages.
     pub(crate) fn note(&mut self, key: u8, vel: f64, on: bool) {
-        if self.shell.keys_to_project() {
+        if self.keys_to_project() {
             self.record_key(key, vel, on);
         }
-        let c = if self.shell.keys_to_project() && self.project.has_player {
+        self.remember_key(key, vel, on);
+        let c = if self.keys_to_project() && self.project.has_player {
             Command::PlayerNote {
                 channel: self.project.channel,
                 key,
@@ -1612,9 +1764,36 @@ impl App {
         if redo {
             self.project.redo();
         }
+        // the function keys the menus name, as in FL Studio: each toggles its window
+        let typing = ctx.egui_wants_keyboard_input();
+        let f = |k: egui::Key| {
+            !typing && ctx.input(|i| !i.modifiers.command && !i.modifiers.alt && i.key_pressed(k))
+        };
+        if f(egui::Key::F4) && self.project.loaded.is_some() {
+            self.new_pattern();
+        }
+        let o = &mut self.shell.open;
+        if f(egui::Key::F5) {
+            o.playlist = !o.playlist;
+        }
+        if f(egui::Key::F6) {
+            o.rack = !o.rack;
+        }
+        if f(egui::Key::F7) {
+            o.roll = !o.roll;
+        }
+        if f(egui::Key::F9) {
+            o.mixer = !o.mixer;
+        }
+        if f(egui::Key::F8) {
+            self.shell.browser = !self.shell.browser;
+        }
     }
 
     fn keys(&mut self, ctx: &egui::Context) {
+        // letters typed into a text box (a name, the preset search) are not notes; a
+        // key let go still ends its note
+        let typing = ctx.egui_wants_keyboard_input();
         let events = ctx.input(|i| i.events.clone());
         for e in events {
             if let egui::Event::Key {
@@ -1626,6 +1805,9 @@ impl App {
             } = e
             {
                 if modifiers.command || modifiers.alt {
+                    continue;
+                }
+                if typing && pressed {
                     continue;
                 }
                 if let Some((_, semis)) = KEY_MAP.iter().find(|(k, _)| *k == key) {
@@ -1700,12 +1882,62 @@ impl App {
     }
 }
 
+impl App {
+    /// Where files dragged from the system are, or were let go. winit on Windows sends
+    /// no pointer moves during an OLE drag, so egui's pointer is stale or gone then:
+    /// there the cursor is read from the system. Elsewhere it is the pointer, or the
+    /// last place it was seen while the files hovered.
+    fn file_drop_pos(&mut self, ctx: &egui::Context) -> Option<egui::Pos2> {
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let dropping = ctx.input(|i| !i.raw.dropped_files.is_empty());
+        if !hovering && !dropping {
+            self.shell.file_hover = None;
+            return None;
+        }
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let at = crate::shell::os_cursor_pos(ctx)
+            .or(pointer)
+            .or(self.shell.file_hover);
+        if hovering {
+            self.shell.file_hover = at;
+        } else {
+            self.shell.file_hover = None;
+        }
+        at
+    }
+
+    /// Another project was opened: the instrument window, the sample editor and the
+    /// channel settings showed the old one's channels, so they close (the instrument
+    /// window would otherwise turn into a stand-alone synth no channel hears).
+    fn forget_old_windows(&mut self) {
+        let g = self.project.generation;
+        if g == self.seen_generation {
+            return;
+        }
+        let first = self.seen_generation == 0;
+        self.seen_generation = g;
+        if first {
+            return;
+        }
+        self.bound = None;
+        self.shell.open.synth = false;
+        self.sample_editor = None;
+        self.shell.chan_settings = None;
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.scale_ui(ctx);
+        // a knob's "Create automation clip" from the last frame
+        if let Some(r) = crate::widgets::take_automation_request() {
+            self.project.create_automation(&r);
+        }
         self.keys(ctx);
         self.shortcuts(ctx);
+        self.workflow_logic(ctx);
         let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));
+        let file_at = self.file_drop_pos(ctx);
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1714,6 +1946,7 @@ impl eframe::App for App {
                 .collect()
         });
         self.poll_project(ctx);
+        self.forget_old_windows();
         self.poll_midi();
         self.sync_bound();
         if self.quit {
@@ -1724,24 +1957,26 @@ impl eframe::App for App {
             && egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ctx)
         {
             if let Some(item) = egui::DragAndDrop::take_payload::<crate::shell::Dragged>(ctx) {
-                self.drop_item((*item).clone(), drop_at);
+                let over = crate::shell::Over::at(ctx, drop_at);
+                self.drop_item((*item).clone(), drop_at, over);
             }
         }
-        for path in dropped {
-            if path.extension().is_some_and(|e| e == "las") {
-                self.open_project(&path.to_string_lossy());
-                continue;
-            }
-            if self.project.loaded.is_some() {
-                self.drop_item(crate::shell::Dragged::File(path), drop_at);
-                continue;
-            }
-            match self.load_wav(&path) {
-                Ok(()) => {
-                    self.error = None;
-                    self.switch(Instrument::Mist);
+        if !dropped.is_empty() && self.project.loaded.is_some()
+            || dropped
+                .iter()
+                .any(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("las")))
+        {
+            let over = crate::shell::Over::at(ctx, file_at);
+            self.drop_files(dropped, file_at, over);
+        } else {
+            for path in dropped {
+                match self.load_wav(&path) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.switch(Instrument::Mist);
+                    }
+                    Err(e) => self.error = Some(format!("{}: {e}", path.display())),
                 }
-                Err(e) => self.error = Some(format!("{}: {e}", path.display())),
             }
         }
         if let Some(a) = &mut self.audio {
@@ -1749,7 +1984,7 @@ impl eframe::App for App {
         }
         self.serve_editors();
         if std::mem::take(&mut self.project.want_roll) {
-            self.shell.open.roll = true;
+            self.shell.open.show(crate::raise::Win::Roll);
         }
         self.autosave();
         self.feed_analyser();
@@ -1779,7 +2014,7 @@ impl eframe::App for App {
                             .on_hover_text("Audio and MIDI devices, recording, folders, autosave and the size of everything")
                             .clicked()
                         {
-                            self.shell.open.settings = true;
+                            self.shell.open.show(crate::raise::Win::Settings);
                         }
                     });
                 });

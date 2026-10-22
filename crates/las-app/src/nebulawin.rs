@@ -203,6 +203,7 @@ impl App {
         };
         let mut changed = false;
         let mut load: Option<usize> = None;
+        let mut macro_menu: Option<(MacroAction, &'static str, &'static str, f64)> = None;
         let mut cat = std::mem::take(&mut self.shell.nebula_cat);
         let mut find = std::mem::take(&mut self.shell.nebula_find);
         let mut page = self.shell.nebula_page;
@@ -274,7 +275,8 @@ impl App {
                 });
             });
             ui.vertical(|ui| {
-                ui.set_width(RIGHT);
+                // narrower when the window is (at 720p the pages wrap instead of clipping)
+                ui.set_width(RIGHT.min(ui.available_width() - 4.0).max(560.0));
                 lcd(ui, bank, current, &st, list.len());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -333,13 +335,32 @@ impl App {
                 match page {
                     1 => changed |= layers_page(ui, &mut st),
                     2 => changed |= arp_page(ui, &mut st),
-                    _ => changed |= main_page(ui, &mut st),
+                    _ => changed |= main_page(ui, &mut st, &mut macro_menu),
                 }
             });
         });
         self.shell.nebula_cat = cat;
         self.shell.nebula_find = find;
         self.shell.nebula_page = page;
+        if let Some((action, key, label, at)) = macro_menu {
+            let id = self
+                .project
+                .loaded
+                .as_ref()
+                .and_then(|l| l.project.channels.get(channel))
+                .map(|c| (c.id.clone(), c.name.clone()));
+            if let Some((id, name)) = id {
+                let req = crate::auto::AutoRequest {
+                    target: crate::auto::plugin_target(&id, &format!("macros.{key}")),
+                    name: format!("{name} {label}"),
+                    start: at.clamp(0.0, 1.0),
+                };
+                match action {
+                    MacroAction::Automate => self.project.create_automation(&req),
+                    MacroAction::Link => crate::midilearn::learn(req),
+                }
+            }
+        }
         if let Some(i) = load {
             let s = preset_state(bank, i, &st);
             self.project.modify(true, |pr| {
@@ -471,13 +492,25 @@ fn lcd(ui: &mut Ui, bank: &Bank, current: Option<usize>, st: &Value, listed: usi
     );
 }
 
-/// The macro knobs, master and the built-in effects.
-fn main_page(ui: &mut Ui, st: &mut Value) -> bool {
+/// What a macro knob's right click menu asked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MacroAction {
+    Automate,
+    Link,
+}
+
+/// The macro knobs, master and the built-in effects. A macro's right click menu
+/// leaves its choice in `menu`: the action, the macro's key and label, and its value.
+fn main_page(
+    ui: &mut Ui,
+    st: &mut Value,
+    menu: &mut Option<(MacroAction, &'static str, &'static str, f64)>,
+) -> bool {
     let mut changed = false;
     crate::skin::group(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new("MACROS").size(10.5).strong());
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             for (k, label, d) in MACROS {
                 let mut v = num(st.get("macros").and_then(|m| m.get(k)), d);
@@ -487,6 +520,26 @@ fn main_page(ui: &mut Ui, st: &mut Value) -> bool {
                     }
                     st["macros"][k] = json!(v);
                     changed = true;
+                }
+                if let Some(r) = crate::widgets::last_knob() {
+                    r.context_menu(|ui| {
+                        if ui
+                            .button("Create automation clip")
+                            .on_hover_text("Adds a clip to the playlist that moves this macro")
+                            .clicked()
+                        {
+                            *menu = Some((MacroAction::Automate, k, label, v));
+                            ui.close();
+                        }
+                        if ui
+                            .button("Link to MIDI controller...")
+                            .on_hover_text("Then move a knob or slider on your MIDI keyboard: it will move this macro")
+                            .clicked()
+                        {
+                            *menu = Some((MacroAction::Link, k, label, v));
+                            ui.close();
+                        }
+                    });
                 }
             }
             ui.separator();
@@ -837,6 +890,43 @@ fn arp_page(ui: &mut Ui, st: &mut Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A held middle C on channel 0 of a project, through the player built for it.
+    fn hear(p: &las_project::Project) -> Vec<f32> {
+        let mut pl = las_engine::Player::new(
+            std::sync::Arc::new(p.clone()),
+            &Default::default(),
+            24000.0,
+            las_engine::PlayMode::Song,
+        )
+        .unwrap();
+        pl.note_on(0, 60.0, 0.9);
+        let (mut l, mut r) = (vec![0f32; 256], vec![0f32; 256]);
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            pl.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+        }
+        out
+    }
+
+    #[test]
+    fn a_preset_loaded_changes_the_channel_and_what_the_player_plays() {
+        let b = las_dsp::presets::bank("nebula").unwrap();
+        let mut p = las_project::create::empty_project("t");
+        let ch = las_project::create::add_channel(&mut p, "nebula");
+        let before = hear(&p);
+        let i = (0..b.presets.len())
+            .find(|&i| b.presets[i].name != "Init")
+            .unwrap();
+        let s = preset_state(b, i, &p.channels[ch].state);
+        p.channels[ch].state = s.clone();
+        assert_eq!(p.channels[ch].state["preset"], json!(b.presets[i].name));
+        assert_eq!(p.channels[ch].state["layers"], b.presets[i].state["layers"]);
+        let after = hear(&p);
+        assert!(after.iter().any(|v| v.abs() > 1e-4), "the preset sounds");
+        assert_ne!(before, after, "the player plays the new preset");
+    }
 
     #[test]
     fn the_browser_filters_and_a_preset_keeps_the_favourites() {

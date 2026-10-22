@@ -264,12 +264,13 @@ impl crate::app::App {
 
     /// Hear from MIDI input: where keys go, recording, and linked controls.
     pub(crate) fn poll_midi(&mut self) {
-        let to_project = self.shell.keys_to_project() && self.project.has_player;
+        let to_project = self.keys_to_project() && self.project.has_player;
         self.midi
             .set_channel(to_project.then_some(self.project.channel));
         for e in self.midi.drain() {
             match e {
                 crate::midi::MidiEvent::Note { key, vel, on } => {
+                    self.remember_key(key, vel, on);
                     if to_project {
                         self.record_key(key, vel, on);
                     }

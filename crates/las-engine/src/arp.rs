@@ -22,6 +22,32 @@ pub struct ArpState {
     pub div: f64,
     pub octaves: f64,
     pub gate: f64,
+    /// How many steps each note of the pattern plays before the next (FL's repeat).
+    pub repeat: f64,
+    /// A chord every note becomes (see [`CHORDS`]); empty for none.
+    pub chord: String,
+}
+
+/// FL's chord presets: id, name, and the notes above the root in semitones.
+pub const CHORDS: [(&str, &str, &[i32]); 13] = [
+    ("", "None", &[0]),
+    ("major", "Major", &[0, 4, 7]),
+    ("minor", "Minor", &[0, 3, 7]),
+    ("maj7", "Major 7th", &[0, 4, 7, 11]),
+    ("min7", "Minor 7th", &[0, 3, 7, 10]),
+    ("dom7", "Dominant 7th", &[0, 4, 7, 10]),
+    ("sus2", "Sus 2", &[0, 2, 7]),
+    ("sus4", "Sus 4", &[0, 5, 7]),
+    ("dim", "Diminished", &[0, 3, 6]),
+    ("aug", "Augmented", &[0, 4, 8]),
+    ("add9", "Add 9", &[0, 4, 7, 14]),
+    ("power", "Power (5th)", &[0, 7]),
+    ("octave", "Octave", &[0, 12]),
+];
+
+/// The notes above the root of a chord preset (just the root for none or one not known).
+pub fn chord_intervals(id: &str) -> &'static [i32] {
+    CHORDS.iter().find(|c| c.0 == id).map_or(&[0], |c| c.2)
 }
 
 impl Default for ArpState {
@@ -32,6 +58,8 @@ impl Default for ArpState {
             div: 0.25,
             octaves: 1.0,
             gate: 0.7,
+            repeat: 1.0,
+            chord: String::new(),
         }
     }
 }
@@ -49,10 +77,14 @@ impl ArpState {
         if let Some(m) = o.get("mode").and_then(Value::as_str) {
             s.mode = m.into();
         }
+        if let Some(c) = o.get("chord").and_then(Value::as_str) {
+            s.chord = c.into();
+        }
         for (key, slot) in [
             ("div", &mut s.div),
             ("octaves", &mut s.octaves),
             ("gate", &mut s.gate),
+            ("repeat", &mut s.repeat),
         ] {
             if let Some(x) = o.get(key).and_then(Value::as_f64) {
                 *slot = x;
@@ -78,6 +110,8 @@ pub struct Arpeggiator {
     done_until_step: f64,
     pub state: ArpState,
     rng: Rng,
+    /// The random pick, kept while it repeats.
+    picked: usize,
 }
 
 impl Arpeggiator {
@@ -89,6 +123,7 @@ impl Arpeggiator {
             done_until_step: f64::NEG_INFINITY,
             state,
             rng: Rng::new(1),
+            picked: 0,
         }
     }
 
@@ -157,19 +192,26 @@ impl Arpeggiator {
                     }
                 }
                 let n = seq.len();
+                let repeat = (self.state.repeat.round().max(1.0)) as usize;
+                let c = self.counter / repeat;
                 let idx = match self.state.mode.as_str() {
-                    "down" => n - 1 - (self.counter % n),
+                    "down" => n - 1 - (c % n),
                     "updown" => {
                         let period = (n * 2).saturating_sub(2).max(1);
-                        let p = self.counter % period;
+                        let p = c % period;
                         if p < n {
                             p
                         } else {
                             period - p
                         }
                     }
-                    "random" => (self.rng.next_f64() * n as f64).floor() as usize,
-                    _ => self.counter % n,
+                    "random" => {
+                        if self.counter % repeat == 0 {
+                            self.picked = (self.rng.next_f64() * n as f64).floor() as usize;
+                        }
+                        self.picked
+                    }
+                    _ => c % n,
                 };
                 let (key, vel) = seq[idx.min(n - 1)];
                 emit(key, vel, time, dur);

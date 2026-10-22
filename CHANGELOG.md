@@ -2,6 +2,47 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.60
+
+Quick search, capturing what you played, rendering, and safer projects.
+
+- Audio driver: the new Automatic setting, now the default, picks your audio interface's ASIO driver, then FL Studio ASIO or ASIO4ALL, then Windows audio, and the status line shows what it chose. Windows builds now get the ASIO SDK from Steinberg's GitHub repository.
+- Quick search: press Ctrl+K and type to find actions, windows, instruments, effects, presets, samples, recent projects and themes, then press Enter to use it.
+- Capture MIDI: press Ctrl+Shift+C or the Capture button to turn what you just played into notes, even when you were not recording. Lumen remembers what you play on a MIDI keyboard, the computer keyboard or the on-screen piano.
+- Rendering: Render to audio clip turns a channel or a mixer insert into an audio clip on the playlist, for the whole song or only the current pattern. Consolidate turns the selected clips into one audio clip.
+- Sidechain: right-click an insert and choose "Sidechain to this track..." to make it duck when another track plays, in one click.
+- Reference track: load a finished song to compare with your mix, switch between them with the A/B switch, and its loudness is matched to your mix. It is never exported.
+- Tuner: a tuner for any mixer insert shows the note and how far off it is.
+- Templates: New from template starts a project from one of your templates, and Save as template keeps the current project as one.
+- Autosave: your project is saved in the background every 2 minutes, and after a crash Lumen offers to restore it.
+- Windows come to the front when opened. The top bar buttons bring a covered window forward, and close it if it is already on top.
+- While a channel's window is open the keys play that channel, so Nebula and the other presets are heard at once.
+- Audio files dragged from Explorer land on the playlist track under the pointer, several files go on consecutive tracks, and .las files open as projects.
+- Weave is in the Add menus.
+- Audio driver setting: WASAPI or ASIO on Windows, with ASIO4ALL, FL Studio ASIO or your interface's own driver. The status shows the driver, the device, the real buffer size and the latency.
+- About 20% less CPU while playing (reverb, EQ, stereo width, delays and envelopes), and release builds are fully optimised.
+- The F4 to F9 shortcuts work.
+- The channel rack scrolls instead of growing off the screen.
+- Typing in a text box no longer plays notes.
+- Synth windows show each channel's own preset.
+- The delete tool and right drag erase every note they pass over.
+- A new or opened project starts without the old project's loop and selection, and the song loop is saved with the project.
+- Missing symbols are fixed, slider rails are visible, and the export path follows the open project.
+- Windows fit the screen: no more creeping windows, and the mixer scrolls.
+- Quick search fixes: a preset never lands in a channel of another synth, and a name typed in full comes first.
+- The effects menu scrolls instead of running off the screen.
+- In the mixer, right click automation and MIDI link work, and double clicking a fader resets it.
+- Enter confirms the rename, save as template and new group boxes.
+- Opening another project closes the old project's instrument windows, sample editor and channel settings.
+
+## 0.2.0-alpha.59
+
+Channel settings, a sample editor and slicer, and arranging tools.
+
+- Channel settings: the sampler has Sample, Envelope, Misc and Arp tabs with start, pitch, root key, loop, reverse, draggable volume and filter envelopes, and an arpeggiator with chord presets. Every channel gets Arp from its right-click menu in the rack. A note's release now changes how long it fades out. Mod wheel, pitch bend and aftertouch reach the selected channel, Weave included. Nebula drive, width and detune can be automated, and every macro has automation and MIDI link menus. Instrument windows fit a 720p screen and scroll.
+- Sample editor and slicer: an Edison-style editor with a zoomable waveform, trim, delete, silence, fades, normalize, reverse, gain, undo and redo, preview and save as WAV; the original file is never changed. Slice to new channel finds the beats with an adjustable sensitivity, puts one slice on each key from middle C and makes a pattern that replays the loop. The tempo of a loop is detected, and the audio clip channel window shows its waveform.
+- Arranging: drag on the ruler to set the song loop (Loop button, Ctrl+Shift+L). Markers can be dragged, jumped to, renamed and deleted, with Alt+Left and Alt+Right to move between them. Clips get Make unique, Rename, Split by channel and select all alike, and patterns get Clone, Rename and Delete. Make automation clips from synth knobs, the tempo and a channel's level, pan and pitch, with FL curve types, tension handles and an LFO tool. Tempo automation is followed in playback and export, and Ctrl+Shift+F fits the song to the window.
+
 ## 0.2.0-alpha.58
 
 Speed, editing, the rack and mixer, and audio and MIDI.
