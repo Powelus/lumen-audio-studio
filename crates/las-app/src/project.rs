@@ -184,8 +184,19 @@ impl ProjectState {
                     self.redo.clear();
                 }
                 PlEdit::Seek(t) => self.start_tick = *t,
+                PlEdit::LoopOn(on) => {
+                    self.playlist.loop_on = *on && self.playlist.song_loop.is_some();
+                    self.stale = true;
+                }
+                PlEdit::AskRenamePattern(id) => {
+                    if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
+                        let name = l.project.patterns[i].name.clone();
+                        self.rename = Some((RenameTarget::Pattern(i), name));
+                    }
+                }
                 PlEdit::SongLoop(r) => {
                     self.playlist.song_loop = *r;
+                    self.playlist.loop_on = r.is_some();
                     // a playing song picks the loop up from where it is
                     self.stale = true;
                 }
@@ -224,9 +235,17 @@ impl ProjectState {
                     playlist::apply(Arc::make_mut(&mut l.project), e);
                     self.dirty = true;
                     self.stale = true;
+                    if let PlEdit::ClonePattern(id) = e {
+                        // the copy, just after the pattern, becomes the current one
+                        if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
+                            self.pattern = i + 1;
+                        }
+                    }
                 }
             }
         }
+        let n = l.project.patterns.len();
+        self.pattern = self.pattern.min(n.saturating_sub(1));
     }
 
     /// Make an automation clip for a request, at the start marker, and open its editor.
@@ -436,7 +455,7 @@ impl ProjectState {
     fn start(&mut self, mode: PlayMode, from: Start, sample_rate: f64) {
         let Some(l) = &self.loaded else { return };
         let (project, samples) = (l.project.clone(), l.samples.clone());
-        let song_loop = self.playlist.song_loop;
+        let song_loop = self.playlist.active_loop();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let player = Player::new(project, &samples, sample_rate, mode).map(|mut p| {
@@ -591,16 +610,27 @@ impl App {
             ui.label("Height");
             ui.add(egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
                 .on_hover_text("The height of the playlist's tracks");
+            let has_loop = self.project.playlist.song_loop.is_some();
+            let mut on = self.project.playlist.loop_on;
+            if ui
+                .add_enabled(has_loop, egui::Button::selectable(on, "Loop"))
+                .on_hover_text("Loop the song over the range on the ruler (Ctrl+Shift+L)")
+                .on_disabled_hover_text("Drag along the ruler to set a loop range")
+                .clicked()
+            {
+                on = !on;
+                self.project.edit_playlist(&[playlist::PlEdit::LoopOn(on)]);
+            }
             if ui
                 .button("Fit")
-                .on_hover_text("Zoom so that the whole song fits the window")
+                .on_hover_text("Zoom so that the whole song fits the window (Ctrl+Shift+F)")
                 .clicked()
             {
                 let w = ui.clip_rect().width().max(400.0);
                 self.project.playlist.zoom = playlist::fit_zoom(&project, w);
             }
             ui.label(
-                RichText::new("Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Right click the ruler for markers and loops. Drop a sound file here for an audio clip.")
+                RichText::new("Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Drag along the ruler to loop, right click it for markers; Alt+Left/Right jump between markers. Drop a sound file here for an audio clip.")
                     .weak()
                     .size(11.0),
             );
@@ -615,6 +645,15 @@ impl App {
         );
         drop(project);
         self.project.edit_playlist(&edits);
+        // a jump while the song plays carries on playing from there, as in FL
+        let playing = self.audio.as_ref().is_some_and(|a| a.meters.playing());
+        let jump = edits.iter().rev().find_map(|e| match e {
+            playlist::PlEdit::Seek(t) => Some(*t),
+            _ => None,
+        });
+        if let Some(t) = jump.filter(|_| playing && self.shell.song_mode && !self.project.looping) {
+            self.play_project(PlayMode::Song, t);
+        }
     }
 
     pub(crate) fn roll(&mut self, ui: &mut Ui, playhead: Option<f64>) {

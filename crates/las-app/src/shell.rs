@@ -849,8 +849,13 @@ impl App {
                 self.shell.metronome = !metro;
                 self.send(Command::Metronome(!metro));
             }
-            // tempo
-            let r = lcd(ui, &format!("{bpm:.2}"), "BPM", 86.0);
+            // tempo: while a tempo automation clip plays the song, the tempo there
+            let live = self.project.loaded.as_ref().and_then(|l| {
+                let song = playing && self.shell.song_mode && !self.project.looping;
+                las_engine::timeline::has_tempo_automation(&l.project, song)
+                    .then(|| las_engine::timeline::tempo_at(&l.project, pos, true))
+            });
+            let r = lcd(ui, &format!("{:.2}", live.unwrap_or(bpm)), "BPM", 86.0);
             if r.drag_started() {
                 self.project.modify(true, |_| {});
             }
@@ -861,7 +866,24 @@ impl App {
                         .modify(false, |pr| pr.bpm = (pr.bpm + d).clamp(30.0, 300.0));
                 }
             }
-            r.on_hover_text("Drag up and down to change the tempo");
+            let r = r.on_hover_text(
+                "Drag up and down to change the tempo. Right click: Create automation clip (the tempo then follows it in the song)",
+            );
+            let mut automate = None;
+            r.context_menu(|ui| {
+                if ui.button("Create automation clip").clicked() {
+                    let (lo, hi) = las_engine::timeline::TEMPO_RANGE;
+                    automate = Some(crate::auto::AutoRequest {
+                        target: crate::auto::master_target("tempo"),
+                        name: "Tempo".into(),
+                        start: ((bpm - lo) / (hi - lo)).clamp(0.0, 1.0),
+                    });
+                    ui.close();
+                }
+            });
+            if let Some(r) = automate {
+                self.project.create_automation(&r);
+            }
             if ui
                 .add(
                     egui::Button::new(RichText::new("TAP").size(11.0).strong())
@@ -918,6 +940,40 @@ impl App {
                     });
                     self.project.pattern = n - 1;
                 }
+                ui.menu_button("...", |ui| {
+                    let i = self.project.pattern;
+                    if ui
+                        .button("Clone pattern")
+                        .on_hover_text("A copy of this pattern, to change without changing it")
+                        .clicked()
+                    {
+                        self.project.modify(true, |p| {
+                            crate::menus::clone_pattern(p, i);
+                        });
+                        self.project.pattern = i + 1;
+                        ui.close();
+                    }
+                    if ui.button("Rename pattern...").clicked() {
+                        if let Some(x) = project.patterns.get(i) {
+                            self.project.rename =
+                                Some((crate::project::RenameTarget::Pattern(i), x.name.clone()));
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(project.patterns.len() > 1, egui::Button::new("Delete pattern"))
+                        .on_hover_text("Remove this pattern and its clips in the playlist")
+                        .clicked()
+                    {
+                        self.project.modify(true, |p| {
+                            crate::menus::delete_pattern(p, i);
+                        });
+                        self.project.pattern = i.saturating_sub(1);
+                        ui.close();
+                    }
+                })
+                .response
+                .on_hover_text("Clone, rename or delete the pattern");
             }
             // windows
             let o = self.shell.open;
@@ -1715,11 +1771,12 @@ impl App {
             });
         });
         ui.label(
-            RichText::new("Click to add a point, drag to move it, right click to remove it.")
+            RichText::new("Click to add a point and drag to move it. Right click a point for its curve (single, double, hold, stairs, smooth) or to delete it. Drag the small ring between two points up or down to bend the curve, double click it to straighten.")
                 .weak()
                 .size(11.0),
         );
-        let edits = crate::auto::draw(ui, clip, &mut self.project.auto_state);
+        let mut edits = crate::auto::lfo_row(ui, clip, &mut self.project.auto_state);
+        edits.extend(crate::auto::draw(ui, clip, &mut self.project.auto_state));
         let cid = clip.id.clone();
         drop(project);
         self.project.edit_auto(&edits);

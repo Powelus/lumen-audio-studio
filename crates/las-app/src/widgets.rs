@@ -30,6 +30,23 @@ fn from_unit(t: f64, r: &RangeInclusive<f64>, log: bool) -> f64 {
 thread_local! {
     static LAST_KNOB: std::cell::RefCell<Option<egui::Response>> = const { std::cell::RefCell::new(None) };
     static KNOB_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+    /// What the next knob drawn automates, if anything: its right click menu then
+    /// offers "Create automation clip".
+    static AUTOMATE_NEXT: std::cell::RefCell<Option<crate::auto::AutoRequest>> =
+        const { std::cell::RefCell::new(None) };
+    /// The automation clip a knob's menu asked for, until the app makes it.
+    static AUTOMATE_ASKED: std::cell::RefCell<Option<crate::auto::AutoRequest>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Let the next knob drawn offer to automate `req` on a right click.
+pub fn automate_next(req: crate::auto::AutoRequest) {
+    AUTOMATE_NEXT.with(|c| *c.borrow_mut() = Some(req));
+}
+
+/// The automation clip a knob's menu asked for since the last call.
+pub fn take_automation_request() -> Option<crate::auto::AutoRequest> {
+    AUTOMATE_ASKED.with(|c| c.borrow_mut().take())
 }
 
 /// Draw the knobs that `add` makes at `scale` times their usual size.
@@ -204,10 +221,22 @@ fn knob_scaled(
         FontId::proportional(11.0 * k.sqrt()),
         skin.map_or(crate::theme::pal().muted, |s| s.text),
     );
-    let resp = resp.on_hover_text(format!(
-        "{label}: {}\nDrag, Shift for fine, double-click to reset",
-        show(*value)
-    ));
+    let auto = AUTOMATE_NEXT.with(|c| c.borrow_mut().take());
+    let tip = if auto.is_some() {
+        "Drag, Shift for fine, double-click to reset, right click to automate"
+    } else {
+        "Drag, Shift for fine, double-click to reset"
+    };
+    let resp = resp.on_hover_text(format!("{label}: {}\n{tip}", show(*value)));
+    if let Some(req) = auto {
+        resp.context_menu(|ui| {
+            if ui.button("Create automation clip").clicked() {
+                AUTOMATE_ASKED.with(|c| *c.borrow_mut() = Some(req.clone()));
+                ui.close();
+            }
+            crate::midilearn::menu_item(ui, || req.clone());
+        });
+    }
     LAST_KNOB.with(|c| *c.borrow_mut() = Some(resp));
     changed
 }

@@ -172,10 +172,55 @@ pub fn automation_value_at(clip: &AutomationClip, t: f64) -> f64 {
         if t <= pts[i].t {
             let (a, b) = (&pts[i - 1], &pts[i]);
             let k = (t - a.t) / (b.t - a.t).max(1e-9);
-            return a.v + (b.v - a.v) * k;
+            let kind = a.curve.unwrap_or_default();
+            return a.v + (b.v - a.v) * kind.shape(a.tension.unwrap_or(0.0), k);
         }
     }
     last.v
+}
+
+/// Ticks between the points that [`automation_curve`] puts on a bent curve.
+pub const CURVE_STEP: f64 = 3.0;
+/// How long before a jump (hold, stairs) the old value is still held, ticks.
+const JUMP: f64 = 1e-3;
+
+/// The clip's curve as straight lines (clip tick, value): its points, with points added
+/// along bent segments and on both sides of jumps, so that ramping linearly between
+/// them follows the curve. Playback and the editors both draw from this.
+pub fn automation_curve(clip: &AutomationClip) -> Vec<(f64, f64)> {
+    let pts = &clip.points;
+    let mut out = Vec::with_capacity(pts.len());
+    for (i, a) in pts.iter().enumerate() {
+        out.push((a.t, a.v));
+        let Some(b) = pts.get(i + 1) else { break };
+        let kind = a.curve.unwrap_or_default();
+        let tension = a.tension.unwrap_or(0.0);
+        let span = b.t - a.t;
+        if span <= JUMP * 2.0 || kind.is_straight(tension) || (b.v - a.v).abs() < 1e-12 {
+            continue;
+        }
+        let at = |k: f64| a.v + (b.v - a.v) * kind.shape(tension, k);
+        match kind {
+            las_project::CurveKind::Hold => out.push((b.t - JUMP, a.v)),
+            las_project::CurveKind::Stairs => {
+                let n = las_project::CurveKind::stairs(tension);
+                for j in 1..n {
+                    let x = a.t + span * f64::from(j) / f64::from(n);
+                    out.push((x - JUMP, at((f64::from(j) - 0.5) / f64::from(n))));
+                    out.push((x, at(f64::from(j) / f64::from(n))));
+                }
+                out.push((b.t - JUMP, at(1.0 - 0.5 / f64::from(n))));
+            }
+            _ => {
+                let n = (span / CURVE_STEP).ceil().clamp(2.0, 4096.0) as usize;
+                for j in 1..n {
+                    let k = j as f64 / n as f64;
+                    out.push((a.t + span * k, at(k)));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// An automation clip placed in the playlist that drives the tempo.

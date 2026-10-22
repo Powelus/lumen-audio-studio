@@ -155,9 +155,9 @@ pub(crate) struct Engine {
 /// The clip's value at `t`, its stored points ramped, between clip ticks `from` and `to`.
 fn automation_breakpoints(clip: &AutomationClip, from: f64, to: f64) -> Vec<(f64, f64)> {
     let mut out = vec![(from, automation_value_at(clip, from))];
-    for p in &clip.points {
-        if p.t > from && p.t < to {
-            out.push((p.t, p.v));
+    for (t, v) in crate::timeline::automation_curve(clip) {
+        if t > from && t < to {
+            out.push((t, v));
         }
     }
     if to > from {
