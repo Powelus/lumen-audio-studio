@@ -46,6 +46,21 @@ pub enum Edit {
     Paste {
         notes: Vec<Note>,
     },
+    /// Set a note's velocity (0 to 1).
+    Velocity {
+        id: String,
+        vel: f64,
+    },
+    /// Set a note's pan (-1 to 1).
+    NotePan {
+        id: String,
+        pan: f64,
+    },
+    /// Set a note's fine pitch (cents, -100 to 100).
+    Fine {
+        id: String,
+        cents: f64,
+    },
     /// Snap every note's start and length to the grid.
     Quantize {
         snap: f64,
@@ -730,6 +745,22 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
                     release: m.release.map(|r| r.clamp(0.0, 1.0)),
                     ..(**m).clone()
                 };
+            }
+        }
+        Edit::Velocity { id, vel } => {
+            if let Some(n) = notes.iter_mut().find(|n| &n.id == id) {
+                n.vel = vel.clamp(0.0, 1.0);
+            }
+        }
+        Edit::NotePan { id, pan } => {
+            if let Some(n) = notes.iter_mut().find(|n| &n.id == id) {
+                n.pan = pan.clamp(-1.0, 1.0);
+            }
+        }
+        Edit::Fine { id, cents } => {
+            if let Some(n) = notes.iter_mut().find(|n| &n.id == id) {
+                let c = cents.clamp(-100.0, 100.0);
+                n.fine = (c.abs() > 1e-9).then_some(c);
             }
         }
         Edit::Quantize { snap } => {

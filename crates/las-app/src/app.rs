@@ -317,7 +317,7 @@ impl App {
         app
     }
 
-    fn load_preset(&mut self, inst: Instrument, i: usize) {
+    pub(crate) fn load_preset(&mut self, inst: Instrument, i: usize) {
         let k = index(inst);
         let Some(e) = self.entries[k].get(i) else {
             return;
@@ -1704,7 +1704,9 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         // something dragged from the browser and let go
-        if ctx.input(|i| i.pointer.any_released()) {
+        if ctx.input(|i| i.pointer.any_released())
+            && egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ctx)
+        {
             if let Some(item) = egui::DragAndDrop::take_payload::<crate::shell::Dragged>(ctx) {
                 self.drop_item((*item).clone(), drop_at);
             }

@@ -24,6 +24,34 @@ pub type Extra = Map<String, Value>;
 fn yes() -> bool {
     true
 }
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Gains (dB) of an insert's built-in EQ bands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InsertEq {
+    pub low: f64,
+    pub mid: f64,
+    pub high: f64,
+}
+
+impl InsertEq {
+    /// Frequencies of the bands, Hz.
+    pub const FREQS: [f64; 3] = [100.0, 1000.0, 8000.0];
+    /// The most a band boosts or cuts, dB.
+    pub const RANGE: f64 = 18.0;
+
+    pub fn is_flat(&self) -> bool {
+        self.low == 0.0 && self.mid == 0.0 && self.high == 0.0
+    }
+
+    pub fn gains(&self) -> [f64; 3] {
+        [self.low, self.mid, self.high]
+    }
+}
+
 fn one() -> f64 {
     1.0
 }
@@ -188,10 +216,6 @@ pub struct PlaylistTrack {
     pub height: f64,
     #[serde(flatten)]
     pub extra: Extra,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,7 +391,7 @@ impl AutomationClip {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EffectSlot {
     pub id: Id,
@@ -418,6 +442,16 @@ pub struct MixerTrack {
     pub output: Option<usize>,
     #[serde(rename = "fxBypass")]
     pub fx_bypass: bool,
+    /// The insert's built-in three-band EQ, like FL's: gains in dB of a low shelf
+    /// (100 Hz), a peak (1 kHz) and a high shelf (8 kHz). Absent means flat.
+    #[serde(skip_serializing_if = "InsertEq::is_flat")]
+    pub eq: InsertEq,
+    /// Invert the polarity (phase) of both sides.
+    #[serde(skip_serializing_if = "is_false")]
+    pub invert: bool,
+    /// Swap the left and right sides.
+    #[serde(rename = "swapLR", skip_serializing_if = "is_false")]
+    pub swap: bool,
     #[serde(flatten)]
     pub extra: Extra,
 }

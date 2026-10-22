@@ -86,6 +86,9 @@ pub fn mixer_track(index: usize, name: Option<&str>) -> MixerTrack {
         sends: Vec::new(),
         output: if index == 0 { None } else { Some(0) },
         fx_bypass: false,
+        eq: Default::default(),
+        invert: false,
+        swap: false,
         extra: Extra::new(),
     }
 }

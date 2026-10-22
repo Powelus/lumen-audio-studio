@@ -5,7 +5,7 @@
 
 use crate::app::App;
 use crate::audio::{Command, Instrument, Preview};
-use crate::mixer;
+use crate::mixer::{self, MixEdit};
 use crate::steps::{self, StepState};
 use crate::theme::{self, pal};
 use crate::widgets::{knob, meter};
@@ -47,6 +47,8 @@ pub struct Windows {
 pub enum Dragged {
     File(std::path::PathBuf),
     Factory(&'static str, &'static str),
+    /// A preset of the browser's Presets tab: the synth it is for, and its name.
+    Preset(Instrument, String),
 }
 
 impl Dragged {
@@ -56,8 +58,35 @@ impl Dragged {
                 .file_stem()
                 .map_or("Sample".into(), |s| s.to_string_lossy().into_owned()),
             Dragged::Factory(_, n) => (*n).to_string(),
+            Dragged::Preset(_, n) => n.clone(),
         }
     }
+}
+
+/// Give sampler channel `ch` the sample `id`, named after it.
+pub fn set_channel_sample(p: &mut las_project::Project, ch: usize, id: &str, name: &str) {
+    if let Some(c) = p.channels.get_mut(ch) {
+        c.sample_id = Some(id.to_string());
+        c.name = name.to_string();
+    }
+}
+
+/// A file name for an insert's chain: its name, or "Insert n".
+fn mixer_file_name(t: &las_project::MixerTrack, i: usize) -> String {
+    let n = if t.name.trim().is_empty() {
+        format!("Insert {i}")
+    } else {
+        t.name.trim().to_string()
+    };
+    n.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 impl App {
@@ -67,12 +96,32 @@ impl App {
         if self.project.loaded.is_none() {
             return;
         }
+        // on a channel of the rack: a preset loads into it, a sample replaces a sampler's
+        let row = at
+            .filter(|_| self.shell.open.rack)
+            .and_then(|pos| self.shell.steps.row_at(pos));
+        if let Dragged::Preset(inst, name) = &item {
+            match row {
+                Some(ch) => self.drop_preset(ch, *inst, name),
+                None => {
+                    self.shell.notice = Some(
+                        "Drop a preset on a channel in the channel rack to load it there.".into(),
+                    )
+                }
+            }
+            return;
+        }
         if let Dragged::File(p) = &item {
             if !las_engine::library::is_audio_file(&p.to_string_lossy()) {
                 self.shell.notice = Some(format!(
                     "{} is not an audio file this app can read. WAV, MP3, FLAC, OGG, AIFF and M4A work.",
                     p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
                 ));
+                return;
+            }
+        }
+        if let Some(ch) = row {
+            if self.replace_sample(ch, &item) {
                 return;
             }
         }
@@ -102,6 +151,7 @@ impl App {
                 }
             }
             (Dragged::Factory(id, name), None) => self.add_factory_channel(id, name),
+            (Dragged::Preset(..), _) => {}
         }
     }
 
@@ -147,6 +197,104 @@ impl App {
         ctx.request_repaint();
     }
 
+    /// Load the preset `name` of `inst` into channel `ch`, when that is its synth.
+    fn drop_preset(&mut self, ch: usize, inst: Instrument, name: &str) {
+        let Some(c) = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(ch))
+        else {
+            return;
+        };
+        let cname = c.name.clone();
+        if crate::inst::panel_for(&c.plugin_id) != Some(inst) {
+            self.shell.notice = Some(format!(
+                "{name} is a preset for another instrument than {cname}'s. Drop it on a channel of the same synth."
+            ));
+            return;
+        }
+        self.open_channel(ch);
+        let k = crate::app::index(inst);
+        match self.entries[k].iter().position(|e| e.name == name) {
+            Some(i) => {
+                self.load_preset(inst, i);
+                self.sync_bound();
+            }
+            None => {
+                self.shell.notice = Some(format!("{cname}'s synth has no preset called {name}."))
+            }
+        }
+    }
+
+    /// Put a dropped sample in sampler channel `ch` in place of its own. Returns
+    /// whether it did (false when the channel is not a sampler).
+    fn replace_sample(&mut self, ch: usize, item: &Dragged) -> bool {
+        let is_sampler = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(ch))
+            .is_some_and(|c| c.plugin_id == "sampler");
+        if !is_sampler {
+            return false;
+        }
+        match item {
+            Dragged::Factory(id, name) => {
+                let (id, name) = (*id, *name);
+                self.project.modify(true, |p| {
+                    if !p.samples.iter().any(|s| s.id == id) {
+                        p.samples.push(las_project::SampleRef {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            factory: Some(true),
+                            ..Default::default()
+                        });
+                    }
+                    set_channel_sample(p, ch, id, name);
+                });
+            }
+            Dragged::File(path) => {
+                let name = item.name();
+                let bytes = match std::fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.shell.notice = Some(format!("{}: {e}", path.display()));
+                        return true;
+                    }
+                };
+                let (audio, bytes) = match las_engine::library::import_audio(bytes) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        self.shell.notice = Some(format!("{}: {e}", path.display()));
+                        return true;
+                    }
+                };
+                self.project.modify_with_samples(true, |p, samples| {
+                    let id = las_project::create::uid("smp_");
+                    p.samples.push(las_project::SampleRef {
+                        id: id.clone(),
+                        name: name.clone(),
+                        duration: Some(audio.frames() as f64 / audio.sample_rate),
+                        ..Default::default()
+                    });
+                    samples.insert(
+                        id.clone(),
+                        las_project::Sample {
+                            name: name.clone(),
+                            mime: "audio/wav".into(),
+                            data: bytes,
+                        },
+                    );
+                    set_channel_sample(p, ch, &id, &name);
+                });
+            }
+            Dragged::Preset(..) => return false,
+        }
+        self.project.channel = ch;
+        true
+    }
+
     /// While something is dragged from the browser, its name follows the pointer.
     pub(crate) fn drag_label(&self, ctx: &egui::Context) {
         self.drop_highlight(ctx);
@@ -165,7 +313,11 @@ impl App {
                     ui.label(format!("\u{266A} {}", item.name()));
                     ui.label(
                         RichText::new(
-                            "Drop on the playlist for a clip, anywhere else for a channel",
+                            if matches!(*item, Dragged::Preset(..)) {
+                                "Drop on a channel of the same synth in the channel rack"
+                            } else {
+                                "Drop on the playlist for a clip, on a sampler channel to replace its sample, anywhere else for a new channel"
+                            },
                         )
                         .size(11.0)
                         .weak(),
@@ -903,8 +1055,56 @@ impl App {
                 });
                 ui.add_space(4.0);
                 self.preset_picker(ui);
+                ui.add_space(6.0);
+                self.preset_list(ui);
             }
             BrowserTab::Project => self.project_tab(ui),
+        }
+    }
+
+    /// The presets of the browser's synth, each one dragged onto a channel of that synth
+    /// to load it there (as in FL), or clicked to hear it.
+    fn preset_list(&mut self, ui: &mut Ui) {
+        let p = pal();
+        ui.label(
+            RichText::new("Drag one onto a channel of this synth in the rack")
+                .size(11.0)
+                .color(p.muted),
+        );
+        let inst = self.inst;
+        let k = crate::app::index(inst);
+        let mut pick = None;
+        egui::ScrollArea::vertical()
+            .id_salt("preset-list")
+            .show(ui, |ui| {
+                let mut shown = "";
+                for (i, e) in self.entries[k].iter().enumerate() {
+                    if !crate::presets::matches(e, &self.search) {
+                        continue;
+                    }
+                    if e.category != shown {
+                        shown = &e.category;
+                        ui.label(
+                            RichText::new(shown)
+                                .size(11.0)
+                                .strong()
+                                .color(p.accent_text),
+                        );
+                    }
+                    let r = ui
+                        .selectable_label(self.presets[k] == i, &e.name)
+                        .interact(Sense::click_and_drag())
+                        .on_hover_text(
+                            "Click to load it. Drag it onto a channel to load it there.",
+                        );
+                    r.dnd_set_drag_payload(Dragged::Preset(inst, e.name.clone()));
+                    if r.clicked() {
+                        pick = Some(i);
+                    }
+                }
+            });
+        if let Some(i) = pick {
+            self.load_preset(inst, i);
         }
     }
 
@@ -1350,6 +1550,14 @@ impl App {
         });
         drop(project);
         self.project.channel = selected;
+        if let Some(n) = out.steps {
+            let pattern = self.project.pattern;
+            self.project.modify(true, |p| {
+                if let Some(pat) = p.patterns.get_mut(pattern) {
+                    pat.length = n as f64 * f64::from(las_project::TICKS_PER_STEP);
+                }
+            });
+        }
         if let Some(c) = out.open_roll {
             self.project.channel = c;
             self.shell.open.roll = true;
@@ -1453,7 +1661,55 @@ impl App {
                 .collect(),
             _ => Vec::new(),
         };
-        let edits = mixer::draw(ui, &project, &mut self.project.mixer_state, &peaks);
+        let ch = self.project.channel;
+        let selected = project.channels.get(ch).map(|c| (ch, c.name.as_str()));
+        let mut edits = mixer::draw(
+            ui,
+            &project,
+            &mut self.project.mixer_state,
+            &peaks,
+            selected,
+        );
+        // the effects chain files
+        let mut more = Vec::new();
+        edits.retain(|e| match e {
+            MixEdit::SaveChain(i) => {
+                if let Some(t) = project.mixer.get(*i) {
+                    let file = rfd::FileDialog::new()
+                        .add_filter("Effects chain", &["json"])
+                        .set_title("Save chain")
+                        .set_file_name(format!("{}.json", mixer_file_name(t, *i)))
+                        .save_file();
+                    if let Some(f) = file {
+                        if let Err(e) = std::fs::write(&f, mixer::chain_json(t)) {
+                            self.shell.notice = Some(format!("{}: {e}", f.display()));
+                        }
+                    }
+                }
+                false
+            }
+            MixEdit::LoadChain(i) => {
+                let file = rfd::FileDialog::new()
+                    .add_filter("Effects chain", &["json"])
+                    .set_title("Load chain")
+                    .pick_file();
+                if let Some(f) = file {
+                    match std::fs::read_to_string(&f)
+                        .map_err(|e| e.to_string())
+                        .and_then(|t| mixer::parse_chain(&t))
+                    {
+                        Ok(slots) => {
+                            more.push(MixEdit::Begin);
+                            more.push(MixEdit::SetChain { insert: *i, slots });
+                        }
+                        Err(e) => self.shell.notice = Some(format!("{}: {e}", f.display())),
+                    }
+                }
+                false
+            }
+            _ => true,
+        });
+        edits.extend(more);
         drop(project);
         self.project.edit_mixer(&edits);
     }
