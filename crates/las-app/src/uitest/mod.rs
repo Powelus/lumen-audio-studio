@@ -4,6 +4,7 @@
 //! builds), then look at what changed in the app.
 
 mod flows;
+mod glyphs;
 
 use crate::app::App;
 use eframe::egui::{self, accesskit, pos2, Event, Key, Modifiers, PointerButton, Pos2, Rect};

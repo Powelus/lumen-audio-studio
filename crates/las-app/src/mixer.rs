@@ -684,13 +684,16 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
     for n in 0..las_project::MIXER_SLOTS {
         let row = ui.horizontal(|ui| match t.slots.get(n).and_then(Option::as_ref) {
             Some(s) => {
-                let led = ui
-                    .add(
-                        egui::Button::new(if s.enabled { "\u{25cf}" } else { "\u{25cb}" })
-                            .small()
-                            .frame(false),
-                    )
-                    .on_hover_text("Switch on or off");
+                // the light is painted: the fonts have no filled circle
+                let (lr, led) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+                let c = lr.center();
+                if s.enabled {
+                    ui.painter().circle_filled(c, 4.5, crate::theme::pal().ok);
+                } else {
+                    ui.painter()
+                        .circle_stroke(c, 4.0, egui::Stroke::new(1.2, crate::theme::pal().muted));
+                }
+                let led = led.on_hover_text("Switch on or off");
                 if led.clicked() {
                     edits.push(MixEdit::Begin);
                     edits.push(MixEdit::SlotOn {

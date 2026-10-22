@@ -728,3 +728,40 @@ fn json_diff(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
     go(a, b, String::new(), &mut out);
     out
 }
+
+#[test]
+fn the_export_file_follows_the_open_project_until_the_user_picks_one() {
+    let mut h = Harness::demo();
+    h.menu(&["File", "Export... Ctrl+R"]);
+    assert!(h.app.shell.open.export);
+    assert!(
+        h.app.shell.export.path.ends_with("Lumen Nights (demo).wav"),
+        "named after the song: {}",
+        h.app.shell.export.path
+    );
+    let dir = std::env::temp_dir().join(format!("las-uitest-export-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let a = dir.join("first.las").to_string_lossy().into_owned();
+    let b = dir.join("second.las").to_string_lossy().into_owned();
+    h.app.project.save_to(&a).unwrap();
+    h.run(2);
+    assert_eq!(
+        h.app.shell.export.path,
+        dir.join("first.wav").to_string_lossy()
+    );
+    h.app.project.save_to(&b).unwrap();
+    h.app.open_project(&a);
+    h.run(2);
+    assert_eq!(
+        h.app.shell.export.path,
+        dir.join("first.wav").to_string_lossy()
+    );
+    h.app.open_project(&b);
+    h.run(2);
+    assert_eq!(
+        h.app.shell.export.path,
+        dir.join("second.wav").to_string_lossy(),
+        "another project exports to its own file, not over the last one's"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

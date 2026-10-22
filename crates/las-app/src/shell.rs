@@ -375,6 +375,9 @@ pub struct Export {
     pub loop_only: bool,
     /// Each mixer track as its own file (stems), in the folder of `path`.
     pub stems: bool,
+    /// The project (its file, and its name) the path was made for, while the user has
+    /// not typed or chosen one: another project gets a path of its own.
+    pub made_for: Option<(String, String)>,
     working: Option<Receiver<Result<String, String>>>,
     pub message: Option<Result<String, String>>,
     /// How far the render has come, when it started, and the song's tempo and beats
@@ -481,6 +484,7 @@ impl Shell {
                 pattern_only: false,
                 loop_only: false,
                 stems: false,
+                made_for: None,
                 working: None,
                 message: None,
                 progress: None,
@@ -1952,10 +1956,14 @@ impl App {
     }
 
     fn export_window(&mut self, ui: &mut Ui) {
-        if self.shell.export.path.is_empty() {
-            if let Some(l) = &self.project.loaded {
-                let (_, kind, _) = FORMATS[self.shell.export.format];
-                self.shell.export.path = default_export_path(&l.path, kind);
+        if let Some(l) = &self.project.loaded {
+            let now = (l.path.clone(), l.project.name.clone());
+            let e = &mut self.shell.export;
+            let stale = e.made_for.as_ref().is_some_and(|m| *m != now);
+            if e.path.is_empty() || stale {
+                let (_, kind, _) = FORMATS[e.format];
+                e.path = default_export_path(&now.0, &now.1, kind);
+                e.made_for = Some(now);
             }
         }
         // a render that has finished
@@ -1996,7 +2004,12 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label("Save to");
-            ui.add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0));
+            if ui
+                .add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0))
+                .changed()
+            {
+                self.shell.export.made_for = None;
+            }
             let stems = self.shell.export.stems;
             if stems
                 && ui
@@ -2013,6 +2026,7 @@ impl App {
                 if let Some(d) = dialog.pick_folder() {
                     let file = format!("{}.{kind}", self.export_name());
                     self.shell.export.path = d.join(file).to_string_lossy().into_owned();
+                    self.shell.export.made_for = None;
                 }
             }
             if !stems
@@ -2037,6 +2051,7 @@ impl App {
                         p.set_extension(kind);
                     }
                     self.shell.export.path = p.to_string_lossy().into_owned();
+                    self.shell.export.made_for = None;
                 }
             }
         });
@@ -2219,7 +2234,26 @@ impl App {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty());
-        from_file.unwrap_or_else(|| "Untitled".into())
+        let from_name = self
+            .project
+            .loaded
+            .as_ref()
+            .map(|l| {
+                l.project
+                    .name
+                    .trim()
+                    .chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || " -_()".contains(c) {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .filter(|s| !s.trim().is_empty());
+        from_file.or(from_name).unwrap_or_else(|| "Untitled".into())
     }
 }
 
@@ -2313,18 +2347,34 @@ fn clock(s: f64) -> String {
 }
 
 /// Where an export goes when the user has not chosen: next to the project, or in the
-/// Music folder for a project not yet saved.
-fn default_export_path(project: &str, kind: &str) -> String {
+/// Music folder for a project not yet saved (named after the song).
+fn default_export_path(project: &str, name: &str, kind: &str) -> String {
     if !project.is_empty() {
         return format!("{}.{kind}", project.trim_end_matches(".las"));
     }
+    let name: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || " -_()".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = if name.trim().is_empty() {
+        "Untitled".to_string()
+    } else {
+        name.trim().to_string()
+    };
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
         .unwrap_or_default();
     let music = home.join("Music");
     let dir = if music.is_dir() { music } else { home };
-    dir.join(format!("Untitled.{kind}"))
+    dir.join(format!("{name}.{kind}"))
         .to_string_lossy()
         .into_owned()
 }
@@ -2368,8 +2418,14 @@ mod tests {
     fn export_paths_and_clocks_read_well() {
         assert_eq!(clock(0.0), "0:00");
         assert_eq!(clock(195.4), "3:15");
-        assert_eq!(default_export_path("/a/song.las", "mp3"), "/a/song.mp3");
-        assert!(default_export_path("", "wav").ends_with("Untitled.wav"));
+        assert_eq!(
+            default_export_path("/a/song.las", "x", "mp3"),
+            "/a/song.mp3"
+        );
+        assert!(default_export_path("", "", "wav").ends_with("Untitled.wav"));
+        assert!(default_export_path("", "Lumen Nights (demo)", "wav")
+            .ends_with("Lumen Nights (demo).wav"));
+        assert!(default_export_path("", "a/b:c", "wav").ends_with("a_b_c.wav"));
     }
 
     #[test]
