@@ -136,6 +136,12 @@ impl Player {
         self.playing
     }
 
+    /// The channels and the mixer inserts that are running; the rest sleep (smart
+    /// disable) because they have nothing to play.
+    pub fn awake(&self) -> (Vec<usize>, Vec<usize>) {
+        self.engine.awake()
+    }
+
     /// The peak level of each mixer insert (master first), falling slowly.
     pub fn insert_peaks(&self) -> &[f32] {
         self.engine.insert_peaks()

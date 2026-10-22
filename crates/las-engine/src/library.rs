@@ -7,19 +7,87 @@ use las_project::Sample;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+/// A key for audio that is the same whatever its id: a hash of the file's bytes and
+/// the rate it is brought to.
+type AudioKey = (u64, u64);
+
+/// The audio every library has decoded, kept for the life of the program so playing,
+/// stopping, editing and rendering never decode a file twice. Shared, read only.
+struct Shared {
+    decoded: HashMap<AudioKey, Arc<Audio>>,
+    processed: HashMap<(AudioKey, bool, u64), Arc<Audio>>,
+    factory: HashMap<(String, u64), Arc<Audio>>,
+}
+
+fn shared() -> std::sync::MutexGuard<'static, Shared> {
+    static SHARED: std::sync::OnceLock<std::sync::Mutex<Shared>> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            std::sync::Mutex::new(Shared {
+                decoded: HashMap::new(),
+                processed: HashMap::new(),
+                factory: HashMap::new(),
+            })
+        })
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Audio past this many bytes in the shared cache is let go once nothing plays it.
+const CACHE_BYTES: usize = 1 << 30;
+
+impl Shared {
+    fn trim(&mut self) {
+        let size = |a: &Arc<Audio>| a.channels.iter().map(Vec::len).sum::<usize>() * 4;
+        let total: usize = self
+            .decoded
+            .values()
+            .chain(self.processed.values())
+            .map(size)
+            .sum();
+        if total > CACHE_BYTES {
+            self.decoded.retain(|_, a| Arc::strong_count(a) > 1);
+            self.processed.retain(|_, a| Arc::strong_count(a) > 1);
+        }
+    }
+}
+
+/// A hash of a file's bytes, which names its audio in the shared cache.
+pub fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.len().hash(&mut h);
+    bytes.hash(&mut h);
+    h.finish()
+}
+
 pub struct Library {
-    raw: BTreeMap<String, Sample>,
+    /// Each sample's key in the shared cache.
+    keys: HashMap<String, AudioKey>,
+    /// The bytes of the samples not decoded yet (the rest are not copied).
+    raw: HashMap<String, Vec<u8>>,
     cache: HashMap<String, Option<Arc<Audio>>>,
-    processed: HashMap<(String, bool, String), Arc<Audio>>,
     sample_rate: f64,
 }
 
 impl Library {
     pub fn new(sample_rate: f64, samples: &BTreeMap<String, Sample>) -> Self {
+        let rate = sample_rate.to_bits();
+        let mut keys = HashMap::new();
+        let mut raw = HashMap::new();
+        let have = shared();
+        for (id, s) in samples {
+            let key = (content_hash(&s.data), rate);
+            if !have.decoded.contains_key(&key) {
+                raw.insert(id.clone(), s.data.clone());
+            }
+            keys.insert(id.clone(), key);
+        }
+        drop(have);
         Self {
-            raw: samples.clone(),
+            keys,
+            raw,
             cache: HashMap::new(),
-            processed: HashMap::new(),
             sample_rate,
         }
     }
@@ -30,20 +98,34 @@ impl Library {
     }
 
     /// The decoded audio of a sample at the render's sample rate, or `None` if
-    /// there is no such sample or it cannot be decoded.
+    /// there is no such sample or it cannot be decoded. Each file is decoded once in
+    /// the life of the program.
     pub fn get(&mut self, id: &str) -> Option<Arc<Audio>> {
         if let Some(hit) = self.cache.get(id) {
             return hit.clone();
         }
+        let rate = self.sample_rate.to_bits();
         let audio = if is_factory_id(id) {
-            render_factory(id, self.sample_rate)
+            let key = (id.to_string(), rate);
+            let hit = shared().factory.get(&key).cloned();
+            hit.or_else(|| {
+                let a = Arc::new(render_factory(id, self.sample_rate)?);
+                shared().factory.insert(key, a.clone());
+                Some(a)
+            })
         } else {
-            self.raw
-                .get(id)
-                .and_then(|s| decode_wav(&s.data))
-                .map(|a| resample(a, self.sample_rate))
+            let key = *self.keys.get(id)?;
+            let hit = shared().decoded.get(&key).cloned();
+            hit.or_else(|| {
+                let bytes = self.raw.remove(id)?;
+                DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let a = Arc::new(resample(decode_wav(&bytes)?, self.sample_rate));
+                let mut s = shared();
+                s.decoded.insert(key, a.clone());
+                s.trim();
+                Some(a)
+            })
         };
-        let audio = audio.map(Arc::new);
         self.cache.insert(id.to_string(), audio.clone());
         audio
     }
@@ -56,8 +138,13 @@ impl Library {
         if factor == 1.0 && !reverse {
             return Some(src);
         }
-        let key = (id.to_string(), reverse, format!("{factor:.6}"));
-        if let Some(hit) = self.processed.get(&key) {
+        let base_key = self
+            .keys
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| (content_hash(id.as_bytes()), self.sample_rate.to_bits()));
+        let key = (base_key, reverse, ((factor * 1e6).round() as i64) as u64);
+        if let Some(hit) = shared().processed.get(&key) {
             return Some(hit.clone());
         }
         let base: Vec<Vec<f32>> = if reverse {
@@ -77,9 +164,19 @@ impl Library {
             channels,
             sample_rate: src.sample_rate,
         });
-        self.processed.insert(key, out.clone());
+        let mut s = shared();
+        s.processed.insert(key, out.clone());
+        s.trim();
         Some(out)
     }
+}
+
+static DECODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many times a project sample has been decoded in this process (for tests and
+/// the benchmark: playing again must not decode again).
+pub fn decode_count() -> usize {
+    DECODES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Decode a WAV file (8 to 32 bit integer or 32 bit float).
@@ -245,32 +342,45 @@ pub fn resample(a: Audio, rate: f64) -> Audio {
     let frames = (a.frames() as f64 * ratio).round() as usize;
     let cutoff = ratio.min(1.0);
     let half = 16.0 / cutoff;
-    let channels = a
-        .channels
-        .iter()
-        .map(|src| {
-            (0..frames)
-                .map(|i| {
-                    let t = i as f64 / ratio;
-                    let lo = ((t - half).ceil().max(0.0)) as usize;
-                    let hi = ((t + half).floor() as usize).min(src.len().saturating_sub(1));
-                    let mut acc = 0.0;
-                    for (k, &s) in src.iter().enumerate().take(hi + 1).skip(lo) {
-                        let x = k as f64 - t;
-                        let w = 0.5 + 0.5 * (std::f64::consts::PI * x / half).cos();
-                        // low pass at the lower of the two Nyquist frequencies
-                        let sinc = if x == 0.0 {
-                            cutoff
-                        } else {
-                            (std::f64::consts::PI * x * cutoff).sin() / (std::f64::consts::PI * x)
-                        };
-                        acc += f64::from(s) * sinc * w;
-                    }
-                    acc as f32
-                })
-                .collect()
-        })
-        .collect();
+    let pi = std::f64::consts::PI;
+    // the window and the sinc are sines of x, which steps by one from tap to tap: they
+    // are turned on by a rotation rather than computed again for every tap
+    let (dc, ds) = ((pi / half).cos(), (pi / half).sin());
+    let (ec, es) = ((pi * cutoff).cos(), (pi * cutoff).sin());
+    let one = |src: &[f32]| -> Vec<f32> {
+        (0..frames)
+            .map(|i| {
+                let t = i as f64 / ratio;
+                let lo = ((t - half).ceil().max(0.0)) as usize;
+                let hi = ((t + half).floor() as usize).min(src.len().saturating_sub(1));
+                let x0 = lo as f64 - t;
+                let (mut wc, mut ws) = ((pi * x0 / half).cos(), (pi * x0 / half).sin());
+                let (mut sc, mut ss) = ((pi * x0 * cutoff).cos(), (pi * x0 * cutoff).sin());
+                let mut acc = 0.0;
+                for (k, &s) in src.iter().enumerate().take(hi + 1).skip(lo) {
+                    let x = k as f64 - t;
+                    let w = 0.5 + 0.5 * wc;
+                    // low pass at the lower of the two Nyquist frequencies
+                    let sinc = if x == 0.0 { cutoff } else { ss / (pi * x) };
+                    acc += f64::from(s) * sinc * w;
+                    (wc, ws) = (wc * dc - ws * ds, ws * dc + wc * ds);
+                    (sc, ss) = (sc * ec - ss * es, ss * ec + sc * es);
+                }
+                acc as f32
+            })
+            .collect()
+    };
+    // the channels side by side
+    let channels: Vec<Vec<f32>> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = a
+            .channels
+            .iter()
+            .map(|src| scope.spawn(|| one(src)))
+            .collect();
+        jobs.into_iter()
+            .map(|j| j.join().unwrap_or_default())
+            .collect()
+    });
     Audio {
         channels,
         sample_rate: rate,

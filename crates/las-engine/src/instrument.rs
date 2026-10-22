@@ -120,6 +120,60 @@ pub struct Instrument {
     plugin_id: String,
     /// Nebula's master level.
     master: f64,
+    gate: Gate,
+}
+
+/// Silence under this (-120 dB) counts as nothing.
+pub const QUIET: f32 = 1e-6;
+
+/// How long an instrument or an insert keeps running after it went quiet, seconds.
+pub const SMART_HOLD: f64 = 2.0;
+
+/// FL Studio's "smart disable": an instrument with no notes to play whose output has
+/// been quiet for [`SMART_HOLD`] is not run until a note comes.
+pub(crate) struct Gate {
+    pub enabled: bool,
+    /// Times (seconds) of the notes and clips to come.
+    wake: Vec<f64>,
+    /// Keys held live.
+    held: u32,
+    /// Frames the output has been quiet.
+    quiet: usize,
+    hold: usize,
+}
+
+impl Gate {
+    fn new(sr: f64) -> Self {
+        Self {
+            enabled: true,
+            wake: Vec::with_capacity(256),
+            held: 0,
+            quiet: 0,
+            hold: (SMART_HOLD * sr) as usize,
+        }
+    }
+
+    fn at(&mut self, time: f64) {
+        self.wake.push(time);
+    }
+
+    /// Whether the block up to `end` seconds can be skipped.
+    fn sleeps(&mut self, end: f64) -> bool {
+        let before = self.wake.len();
+        self.wake.retain(|&t| t >= end);
+        if self.wake.len() != before || self.held > 0 {
+            self.quiet = 0;
+        }
+        self.enabled && self.quiet >= self.hold
+    }
+
+    fn heard(&mut self, l: &[f32], r: &[f32]) {
+        if l.iter().chain(r).all(|s| s.abs() < QUIET) {
+            self.quiet = self.quiet.saturating_add(l.len());
+        } else {
+            self.quiet = 0;
+        }
+    }
 }
 
 fn cut_mul(m: f64) -> f64 {
@@ -331,6 +385,7 @@ impl Instrument {
             gains: [Vec::new(), Vec::new()],
             plugin_id: plugin_id.to_string(),
             master: num(state.get("master"), 0.8),
+            gate: Gate::new(sr),
         })
     }
 
@@ -437,6 +492,7 @@ impl Instrument {
         pan: f64,
         one_shot: bool,
     ) {
+        self.gate.at(time);
         if let Core::Sampler(s) = &mut self.core {
             // step notes ring out like FL; piano roll notes are gated by their length
             let ring = one_shot && s.state_loop() != Some(true);
@@ -466,6 +522,7 @@ impl Instrument {
     }
 
     fn direct(&mut self, key: f64, vel: f64, time: f64, duration: f64, fine: f64, pan: f64) {
+        self.gate.at(time);
         let evs = [
             Event::On {
                 time,
@@ -490,6 +547,7 @@ impl Instrument {
         duration: f64,
         clip: Option<&ClipPlayback>,
     ) {
+        self.gate.at(time);
         if let Core::AudioClip(c) = &mut self.core {
             c.play_clip(time, offset, duration, clip);
         }
@@ -498,6 +556,8 @@ impl Instrument {
     /// Stop at `time`: notes that have not happened yet are forgotten and what sounds is
     /// released (or faded).
     pub fn stop(&mut self, time: f64) {
+        self.gate.at(time);
+        self.gate.held = 0;
         if let Some(arp) = &mut self.arp {
             arp.clear();
         }
@@ -515,6 +575,8 @@ impl Instrument {
 
     /// A key played live: sounds from `time` until [`Instrument::note_off`].
     pub fn note_on(&mut self, key: f64, vel: f64, time: f64) {
+        self.gate.at(time);
+        self.gate.held += 1;
         match &mut self.core {
             Core::Sampler(s) => s.play_note(key as i32, vel, time, None, 0.0, 0.0),
             Core::Pads(p) => p.play_note(key as i32, vel, time, 0.0),
@@ -535,6 +597,8 @@ impl Instrument {
 
     /// A key played live is let go.
     pub fn note_off(&mut self, key: f64, time: f64) {
+        self.gate.at(time);
+        self.gate.held = self.gate.held.saturating_sub(1);
         match &mut self.core {
             Core::Sampler(s) => s.note_off(key as i32, time),
             Core::Pads(_) | Core::AudioClip(_) | Core::Silent => {}
@@ -584,6 +648,25 @@ impl Instrument {
         let n = l.len();
         l.fill(0.0);
         r.fill(0.0);
+        if self.gate.sleeps(t0 + n as f64 / self.sr) {
+            return;
+        }
+        self.render_awake(t0, l, r);
+        self.gate.heard(l, r);
+    }
+
+    /// Smart disable: whether this instrument may sleep while it has nothing to play.
+    pub fn set_smart_disable(&mut self, on: bool) {
+        self.gate.enabled = on;
+    }
+
+    /// Whether the instrument is asleep (smart disable), for tests and meters.
+    pub fn is_asleep(&self) -> bool {
+        self.gate.enabled && self.gate.quiet >= self.gate.hold
+    }
+
+    fn render_awake(&mut self, t0: f64, l: &mut [f32], r: &mut [f32]) {
+        let n = l.len();
         match &mut self.core {
             Core::Layers(layers) => {
                 for s in &mut self.scratch {

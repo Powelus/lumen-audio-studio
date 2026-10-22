@@ -105,8 +105,51 @@ impl App {
         }
     }
 
+    /// While a sound is dragged over the playlist (from the browser or from the
+    /// system), the place it would land on is lit: the snapped start on the track
+    /// under the pointer, a bar long.
+    pub(crate) fn drop_highlight(&self, ctx: &egui::Context) {
+        let from_os = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if !from_os && egui::DragAndDrop::payload::<Dragged>(ctx).is_none() {
+            return;
+        }
+        let Some(area) = self
+            .project
+            .playlist
+            .area
+            .filter(|_| self.shell.open.playlist)
+        else {
+            return;
+        };
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos())) else {
+            return;
+        };
+        let Some((tick, track)) = area.place(pos) else {
+            return;
+        };
+        let x = area.left + tick as f32 * area.zoom;
+        let y = area.top + track as f32 * area.row;
+        let bar = f64::from(las_project::PPQ) * 4.0;
+        let w = (bar as f32 * area.zoom).max(24.0);
+        let r = egui::Rect::from_min_size(egui::pos2(x, y), vec2(w, area.row)).intersect(area.rect);
+        let accent = theme::pal().accent;
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("drop-highlight"),
+        ));
+        painter.rect_filled(r, 3.0, accent.gamma_multiply(0.25));
+        painter.rect_stroke(
+            r,
+            3.0,
+            egui::Stroke::new(1.5, accent),
+            egui::StrokeKind::Inside,
+        );
+        ctx.request_repaint();
+    }
+
     /// While something is dragged from the browser, its name follows the pointer.
     pub(crate) fn drag_label(&self, ctx: &egui::Context) {
+        self.drop_highlight(ctx);
         let Some(item) = egui::DragAndDrop::payload::<Dragged>(ctx) else {
             return;
         };

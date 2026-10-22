@@ -405,6 +405,8 @@ struct Renderer {
     metronome: bool,
     meters: Arc<Meters>,
     load: f32,
+    /// Frames the live effects chain has been quiet in and out (smart disable).
+    chain_quiet: usize,
 }
 
 impl Renderer {
@@ -441,6 +443,7 @@ impl Renderer {
             metronome: false,
             meters,
             load: 0.0,
+            chain_quiet: 0,
         }
     }
 
@@ -564,6 +567,7 @@ impl Renderer {
         T: Sample + FromSample<f32>,
     {
         let started = Instant::now();
+        las_host::flush_denormals();
         let frames = out.len() / self.channels;
         let now = self.clock as f64 / self.sr;
         while let Ok(c) = self.ui.pop() {
@@ -591,7 +595,13 @@ impl Renderer {
             }
             // the active instrument's effects; the song position follows the clock
             let chain = &mut self.chains[chain_index(self.engine.active)];
-            if !chain.is_empty() {
+            // (smart disable: once nothing has come in or out for a while it sleeps)
+            let quiet = |l: &[f32], r: &[f32]| l.iter().chain(r).all(|s| s.abs() < 1e-6);
+            let hold = (las_engine::instrument::SMART_HOLD * self.sr) as usize;
+            if !quiet(l, r) {
+                self.chain_quiet = 0;
+            }
+            if !chain.is_empty() && self.chain_quiet < hold {
                 let pos = Position {
                     beat: t * self.bpm / 60.0,
                     bpm: self.bpm,
@@ -599,6 +609,11 @@ impl Renderer {
                 for slot in chain.iter_mut() {
                     slot.unit.set_position(pos);
                     slot.process(l, r, None);
+                }
+                if quiet(l, r) {
+                    self.chain_quiet += n;
+                } else {
+                    self.chain_quiet = 0;
                 }
             }
             if let Some((p, pos)) = &mut self.preview {
