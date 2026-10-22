@@ -503,6 +503,8 @@ pub struct Out {
     pub open_settings: Option<usize>,
     /// A new length for the pattern, in steps (0: as long as its notes).
     pub steps: Option<usize>,
+    /// A channel to render to an audio clip: (channel, only the pattern).
+    pub render: Option<(usize, bool)>,
 }
 
 /// The menu of mixer inserts a channel can play through.
@@ -998,6 +1000,22 @@ fn channel_menu(
     }
     if ui.button("Instrument").clicked() {
         out.open_synth = Some(i);
+        ui.close();
+    }
+    if ui
+        .button("Render to audio clip (song)")
+        .on_hover_text("Bounce this channel to a WAV in the project, put it on the playlist and mute the channel")
+        .clicked()
+    {
+        out.render = Some((i, false));
+        ui.close();
+    }
+    if ui
+        .button("Render to audio clip (pattern)")
+        .on_hover_text("The same, for the current pattern only")
+        .clicked()
+    {
+        out.render = Some((i, true));
         ui.close();
     }
     if ui

@@ -27,6 +27,9 @@ pub enum PlayMode {
 /// A player is built for one project and one play: after [`Player::stop`] it keeps
 /// sounding the tails, and a new player (built off the audio thread) starts the next
 /// play. Building is the slow part: instruments, samples and reverb responses.
+/// Room for the tapped signal between drains, frames.
+const TAP_ROOM: usize = 8192;
+
 pub struct Player {
     engine: Engine,
     project: Arc<Project>,
@@ -49,6 +52,9 @@ pub struct Player {
     click: Option<(usize, f32)>,
     /// In song mode, a stretch (ticks) that plays over and over.
     song_loop: Option<(f64, f64)>,
+    /// The insert the tuner listens to, and its mono signal since it was last drained.
+    tap: Option<usize>,
+    tapped: Vec<f32>,
 }
 
 impl Player {
@@ -85,6 +91,8 @@ impl Player {
             metronome: false,
             click: None,
             song_loop: None,
+            tap: None,
+            tapped: Vec::with_capacity(TAP_ROOM),
         })
     }
 
@@ -277,6 +285,9 @@ impl Player {
                 self.schedule();
                 let [bl, br] = &mut self.out;
                 self.engine.render_block(self.frame, bl, br);
+                if let Some(i) = self.tap {
+                    self.engine.tap_insert(i, &mut self.tapped);
+                }
                 let at = self.frame;
                 self.add_click(at);
                 self.frame += BLOCK;
@@ -301,6 +312,21 @@ impl Player {
     /// the mixer. A DAW with delay compensation starts the song that much early.
     pub fn output_latency(&self) -> f64 {
         self.engine.output_latency()
+    }
+
+    /// Listen to one insert (after its fader) for a tuner, or stop with `None`.
+    pub fn set_tap(&mut self, insert: Option<usize>) {
+        self.tap = insert;
+        self.tapped.clear();
+    }
+
+    /// Hand over what the tapped insert played since the last call (mono), and forget
+    /// it. Never allocates, so it is safe on the audio thread.
+    pub fn drain_tap(&mut self, mut f: impl FnMut(f32)) {
+        for &s in &self.tapped {
+            f(s);
+        }
+        self.tapped.clear();
     }
 
     /// The engine time of the next block, in frames.

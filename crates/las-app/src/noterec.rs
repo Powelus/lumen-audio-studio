@@ -270,6 +270,7 @@ impl crate::app::App {
         for e in self.midi.drain() {
             match e {
                 crate::midi::MidiEvent::Note { key, vel, on } => {
+                    self.remember_key(key, vel, on);
                     if to_project {
                         self.record_key(key, vel, on);
                     }

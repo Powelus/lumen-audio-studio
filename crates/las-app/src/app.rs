@@ -130,6 +130,8 @@ pub struct App {
     pub(crate) editors: Vec<crate::hosted::OpenEditor>,
     /// The sample editor, while it is open.
     pub(crate) sample_editor: Option<crate::sampleedit::SampleEditor>,
+    /// Command palette, capture, render, reference, tuner, templates, autosave.
+    pub(crate) wf: crate::workflow::Workflow,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,6 +154,7 @@ fn full_defaults() -> [Value; 3] {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         style(&cc.egui_ctx);
+        let wf = crate::workflow::Workflow::start();
         let settings = crate::settings::Settings::load();
         let mut midi = crate::midi::MidiHub::new();
         midi.set_repaint(&cc.egui_ctx);
@@ -207,6 +210,7 @@ impl App {
             weave: Default::default(),
             editors: Vec::new(),
             sample_editor: None,
+            wf,
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
@@ -225,6 +229,10 @@ impl App {
         let chooses = std::env::args().any(|a| a == "--open" || a == "--close" || a == "--add");
         if !chooses {
             app.restore_windows();
+        }
+        // `--palette "rev"` opens the quick search with that typed
+        if let Some(q) = std::env::args().skip_while(|a| a != "--palette").nth(1) {
+            app.wf.palette.show(&q);
         }
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
@@ -1689,6 +1697,7 @@ impl App {
         if self.shell.keys_to_project() {
             self.record_key(key, vel, on);
         }
+        self.remember_key(key, vel, on);
         let c = if self.shell.keys_to_project() && self.project.has_player {
             Command::PlayerNote {
                 channel: self.project.channel,
@@ -1839,6 +1848,7 @@ impl eframe::App for App {
         }
         self.keys(ctx);
         self.shortcuts(ctx);
+        self.workflow_logic(ctx);
         let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw

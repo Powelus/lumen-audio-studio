@@ -37,6 +37,7 @@ mod steps;
 mod theme;
 mod weave_ui;
 mod widgets;
+mod workflow;
 
 fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--version" || a == "-V") {

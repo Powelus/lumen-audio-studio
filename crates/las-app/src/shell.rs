@@ -1060,7 +1060,7 @@ impl App {
             } else if self.project.is_building() {
                 RichText::new("Loading the sounds...").color(p.muted)
             } else {
-                RichText::new(&self.shell.status).color(p.muted)
+                RichText::new(self.wf.note.as_deref().unwrap_or(&self.shell.status)).color(p.muted)
             };
             ui.label(msg.size(12.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1629,6 +1629,7 @@ impl App {
         self.analyser_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
+        self.workflow_windows(ctx);
     }
 
     fn no_project(&self, ui: &mut Ui) {
@@ -1663,6 +1664,7 @@ impl App {
                     }
                 }
             });
+            self.capture_button(ui);
             ui.label(
                 RichText::new(
                     project
@@ -1704,6 +1706,9 @@ impl App {
         }
         if let Some(c) = out.open_settings {
             self.open_channel_settings(c);
+        }
+        if let Some((c, pat)) = out.render {
+            self.rack_render(c, pat);
         }
         for (ch, e) in &out.notes {
             self.project.edit_channel(*ch, std::slice::from_ref(e));
@@ -1802,6 +1807,7 @@ impl App {
                 .collect(),
             _ => Vec::new(),
         };
+        self.reference_bar(ui);
         let ch = self.project.channel;
         let selected = project.channels.get(ch).map(|c| (ch, c.name.as_str()));
         let mut edits = mixer::draw(
@@ -1851,6 +1857,7 @@ impl App {
             _ => true,
         });
         edits.extend(more);
+        let edits = self.workflow_mix_edits(edits);
         drop(project);
         self.project.edit_mixer(&edits);
     }

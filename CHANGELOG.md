@@ -2,6 +2,19 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.60
+
+Quick search, capturing what you played, rendering, and safer projects.
+
+- Quick search: press Ctrl+K and type to find actions, windows, instruments, effects, presets, samples, recent projects and themes, then press Enter to use it.
+- Capture MIDI: press Ctrl+Shift+C or the Capture button to turn what you just played into notes, even when you were not recording. Lumen remembers what you play on a MIDI keyboard, the computer keyboard or the on-screen piano.
+- Rendering: Render to audio clip turns a channel or a mixer insert into an audio clip on the playlist, for the whole song or only the current pattern. Consolidate turns the selected clips into one audio clip.
+- Sidechain: right-click an insert and choose "Sidechain to this track..." to make it duck when another track plays, in one click.
+- Reference track: load a finished song to compare with your mix, switch between them with the A/B switch, and its loudness is matched to your mix. It is never exported.
+- Tuner: a tuner for any mixer insert shows the note and how far off it is.
+- Templates: New from template starts a project from one of your templates, and Save as template keeps the current project as one.
+- Autosave: your project is saved in the background every 2 minutes, and after a crash Lumen offers to restore it.
+
 ## 0.2.0-alpha.59
 
 Channel settings, a sample editor and slicer, and arranging tools.

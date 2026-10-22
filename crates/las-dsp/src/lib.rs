@@ -18,6 +18,7 @@ mod nebula_gen;
 pub mod onset;
 pub mod param;
 pub mod patch;
+pub mod pitch;
 pub mod presets;
 pub mod stretch;
 pub mod synth;

@@ -652,6 +652,18 @@ pub fn render_mix_with(
     Ok(all.remove(0))
 }
 
+/// Render one output of the mixer offline: the master (`None`) or an insert after its
+/// fader. Used to bounce a channel or an insert to audio.
+pub fn render_tap(
+    project: &Project,
+    samples: &BTreeMap<String, Sample>,
+    opts: &RenderOptions,
+    insert: Option<usize>,
+) -> Result<Rendered, String> {
+    let mut all = render_taps(project, samples, opts, &[insert])?;
+    Ok(all.remove(0))
+}
+
 /// One output of the mixer: the master, or an insert after its fader.
 type Tap = Option<usize>;
 
@@ -897,6 +909,21 @@ impl Engine {
             .filter(|&i| !self.mixer.is_asleep(i))
             .collect();
         (ch, ins)
+    }
+
+    /// Add the mono signal of insert `i` for the block just rendered to `out`, as far
+    /// as `out` has room (it never grows).
+    pub(crate) fn tap_insert(&self, i: usize, out: &mut Vec<f32>) {
+        if i >= self.mixer.len() {
+            return;
+        }
+        let (l, r) = self.mixer.insert_output(i);
+        for (a, b) in l.iter().zip(r) {
+            if out.len() == out.capacity() {
+                break;
+            }
+            out.push((a + b) * 0.5);
+        }
     }
 
     /// The peak level of each insert, master first.
