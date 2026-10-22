@@ -88,6 +88,76 @@ pub enum MixEdit {
         slot: usize,
         on: bool,
     },
+    /// Make `insert` duck when `source` plays: its compressor (one is added when there
+    /// is none) listens to the source.
+    Sidechain {
+        insert: usize,
+        source: usize,
+    },
+    /// Not a change: render the insert to an audio clip (`pattern`: only the current
+    /// pattern), or show the tuner for it. Handled by the workflow tools.
+    Render {
+        insert: usize,
+        pattern: bool,
+    },
+    Tuner {
+        insert: usize,
+    },
+}
+
+/// Settings of the compressor that "Sidechain to this track" adds: deep, quick ducking
+/// that lets go within a beat, as a kick-to-bass pump is usually set up.
+pub fn ducking_state(source: usize) -> serde_json::Value {
+    let mut st = las_dsp::fx::registry::descriptor("las-comp")
+        .map(|d| d.default_state.clone())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(o) = st.as_object_mut() {
+        o.insert("threshold".into(), (-30.0).into());
+        o.insert("ratio".into(), 10.0.into());
+        o.insert("attack".into(), 1.0.into());
+        o.insert("release".into(), 150.0.into());
+        o.insert("sidechain".into(), source.into());
+    }
+    st
+}
+
+/// One-click sidechain: the first compressor on `insert` listens to `source`, or a
+/// ducking compressor is put in the first free slot. Returns the slot, or `None` when
+/// nothing could be done (same insert, the master, no room).
+pub fn sidechain_to(project: &mut Project, insert: usize, source: usize) -> Option<usize> {
+    if insert == source
+        || insert == 0
+        || insert >= project.mixer.len()
+        || source >= project.mixer.len()
+    {
+        return None;
+    }
+    let t = &mut project.mixer[insert];
+    if let Some(i) = t.slots.iter().position(|s| {
+        s.as_ref()
+            .is_some_and(|s| s.plugin_id == "las-comp" || s.plugin_id == "las-ducker")
+    }) {
+        let s = t.slots[i].as_mut()?;
+        if !s.state.is_object() {
+            s.state = serde_json::json!({});
+        }
+        s.state["sidechain"] = source.into();
+        s.enabled = true;
+        return Some(i);
+    }
+    if t.slots.len() < las_project::MIXER_SLOTS {
+        t.slots.resize(las_project::MIXER_SLOTS, None);
+    }
+    let free = t.slots.iter().position(Option::is_none)?;
+    t.slots[free] = Some(las_project::EffectSlot {
+        id: las_project::create::uid("fx"),
+        plugin_id: "las-comp".into(),
+        enabled: true,
+        mix: 1.0,
+        state: ducking_state(source),
+        ..Default::default()
+    });
+    Some(free)
 }
 
 /// Whether feeding `to` from `from` would make a loop: `to` is `from`, or `from` is
@@ -134,7 +204,13 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
                 project.mixer[i].solo = *on;
             }
         }
-        MixEdit::OpenEffect { .. } | MixEdit::Automate(_) => {}
+        MixEdit::OpenEffect { .. }
+        | MixEdit::Automate(_)
+        | MixEdit::Render { .. }
+        | MixEdit::Tuner { .. } => {}
+        MixEdit::Sidechain { insert, source } => {
+            sidechain_to(project, *insert, *source);
+        }
         MixEdit::Output { insert, target } => {
             if *insert > 0
                 && *insert < project.mixer.len()
@@ -579,6 +655,8 @@ fn strip(
                 if resp.clicked() {
                     state.selected = i;
                 }
+                resp.on_hover_text("Click to select, right-click for render, sidechain and tuner")
+                    .context_menu(|ui| insert_menu(ui, project, i, edits));
                 let mut pan = t.pan;
                 let (ch, start, pr) =
                     crate::steps::mini_knob_resp(ui, &mut pan, (-1.0, 1.0), 0.0, "Pan", p.text2);
@@ -661,6 +739,60 @@ fn strip(
         });
     if frame.response.interact(egui::Sense::click()).clicked() {
         state.selected = i;
+    }
+}
+
+/// The right-click menu of an insert's name: render it, sidechain it, tune it.
+fn insert_menu(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
+    if ui
+        .button("Render to audio clip (song)")
+        .on_hover_text("Bounce what this insert plays in the song to a WAV in the project and put it on the playlist")
+        .clicked()
+    {
+        edits.push(MixEdit::Render { insert: i, pattern: false });
+        ui.close();
+    }
+    if ui
+        .button("Render to audio clip (pattern)")
+        .on_hover_text("Bounce what this insert plays in the current pattern")
+        .clicked()
+    {
+        edits.push(MixEdit::Render {
+            insert: i,
+            pattern: true,
+        });
+        ui.close();
+    }
+    if i > 0 {
+        ui.menu_button("Sidechain to this track...", |ui| {
+            ui.label(RichText::new("Duck this insert when the source plays").weak());
+            for (s, t) in project.mixer.iter().enumerate().skip(1) {
+                if s == i {
+                    continue;
+                }
+                let name = if t.name.is_empty() {
+                    format!("Insert {s}")
+                } else {
+                    format!("{s} {}", t.name)
+                };
+                if ui.button(name).clicked() {
+                    edits.push(MixEdit::Begin);
+                    edits.push(MixEdit::Sidechain {
+                        insert: i,
+                        source: s,
+                    });
+                    ui.close();
+                }
+            }
+        });
+    }
+    if ui
+        .button("Tuner")
+        .on_hover_text("Show the pitch of what this insert plays")
+        .clicked()
+    {
+        edits.push(MixEdit::Tuner { insert: i });
+        ui.close();
     }
 }
 
@@ -966,6 +1098,72 @@ mod tests {
             p.mixer[2].slots[free].as_ref().unwrap().state["id"],
             "vendor.plugin"
         );
+    }
+
+    #[test]
+    fn sidechain_to_this_track_ducks_the_target_when_the_kick_hits() {
+        use las_project::create::{add_channel, step_note};
+        let mut p = las_project::create::empty_project("sc");
+        p.bpm = 120.0;
+        p.patterns = vec![las_project::create::pattern(0, None)];
+        let kick = add_channel(&mut p, "sampler");
+        p.channels[kick].sample_id = Some("factory:kick-deep".into());
+        p.samples.push(las_project::SampleRef {
+            id: "factory:kick-deep".into(),
+            name: "Kick".into(),
+            factory: Some(true),
+            ..Default::default()
+        });
+        let pad = add_channel(&mut p, "polaris");
+        let (ki, pi) = (p.channels[kick].mixer_track, p.channels[pad].mixer_track);
+        assert_ne!(ki, pi);
+        let (kid, pid) = (p.channels[kick].id.clone(), p.channels[pad].id.clone());
+        // a kick on every beat of a bar, a held chord under it
+        let pat = &mut p.patterns[0];
+        pat.notes.clear();
+        pat.notes
+            .insert(kid, (0..4).map(|b| step_note(b * 4, 60, 1.0)).collect());
+        let mut held = step_note(0, 48, 0.9);
+        held.len = f64::from(las_project::PPQ) * 4.0;
+        pat.notes.insert(pid, vec![held]);
+        let opts = las_engine::RenderOptions {
+            sample_rate: 24000.0,
+            tail: 0.0,
+            mode: las_engine::Mode::Pattern { id: None, loops: 1 },
+        };
+        let level = |p: &Project| {
+            let r = las_engine::render_tap(p, &Default::default(), &opts, Some(pi)).unwrap();
+            // just after the second kick (0.5 s at 120 BPM) and just before the third
+            let rms = |a: f64, b: f64| {
+                let s = &r.left[(a * 24000.0) as usize..(b * 24000.0) as usize];
+                (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt()
+            };
+            (rms(0.52, 0.58), rms(0.88, 0.98))
+        };
+        let (hit0, gap0) = level(&p);
+        assert!(hit0 > 0.0 && gap0 > 0.0);
+        let mut q = p.clone();
+        apply(
+            &mut q,
+            &MixEdit::Sidechain {
+                insert: pi,
+                source: ki,
+            },
+        );
+        let slot = q.mixer[pi].slots.iter().flatten().next().unwrap();
+        assert_eq!(slot.plugin_id, "las-comp");
+        assert_eq!(slot.state["sidechain"], serde_json::json!(ki));
+        let (hit, gap) = level(&q);
+        assert!(hit < hit0 * 0.6, "ducks on the kick: {hit} against {hit0}");
+        assert!(
+            gap > hit * 1.5,
+            "comes back between kicks: {gap} against {hit}"
+        );
+        // a second click reuses the compressor; the master and itself are refused
+        assert_eq!(sidechain_to(&mut q, pi, ki), Some(0));
+        assert_eq!(q.mixer[pi].slots.iter().flatten().count(), 1);
+        assert_eq!(sidechain_to(&mut q, pi, pi), None);
+        assert_eq!(sidechain_to(&mut q, 0, ki), None);
     }
 
     #[test]

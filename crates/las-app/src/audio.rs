@@ -35,6 +35,15 @@ pub enum Garbage {
     Params(Box<Params>),
     Player(Box<Player>),
     Preview(Box<Preview>),
+    Reference(Box<RefTrack>),
+}
+
+/// A reference track to compare the mix with: its audio, the gain that matches its
+/// loudness to the mix, and the tempo that turns song positions into its seconds.
+pub struct RefTrack {
+    pub audio: Preview,
+    pub gain: f32,
+    pub bpm: f64,
 }
 
 /// The instruments the app can play.
@@ -104,6 +113,14 @@ pub enum Command {
         vel: f64,
         on: bool,
     },
+    /// Load a reference track (or clear it with `None`).
+    Reference(Option<Box<RefTrack>>),
+    /// Hear the reference instead of the mix (the A/B switch).
+    ReferenceOn(bool),
+    /// New loudness-matching gain for the reference.
+    ReferenceGain(f32),
+    /// The insert the tuner listens to, or none.
+    Tuner(Option<usize>),
 }
 
 /// Meters and counters the audio thread publishes.
@@ -164,6 +181,8 @@ pub struct Audio {
     pub meters: Arc<Meters>,
     pub sample_rate: u32,
     pub device: String,
+    /// What the insert the tuner listens to plays (mono, at `sample_rate`).
+    pub tuner: Consumer<f32>,
     /// Wavetables are built here, off the audio thread, and shared.
     tables: TableLibrary,
 }
@@ -194,7 +213,8 @@ impl Audio {
         let (midi_tx, midi_rx) = RingBuffer::<Command>::new(512);
         let (garbage_tx, garbage_rx) = RingBuffer::<Garbage>::new(64);
         let meters = Arc::new(Meters::default());
-        let state = Renderer::new(
+        let (tuner_tx, tuner_rx) = RingBuffer::<f32>::new(16384);
+        let mut state = Renderer::new(
             sample_rate as f64,
             config.channels as usize,
             ui_rx,
@@ -202,6 +222,7 @@ impl Audio {
             garbage_tx,
             meters.clone(),
         );
+        state.tuner = Some(tuner_tx);
         let stream = match format {
             SampleFormat::F32 => build::<f32>(&device, config, state),
             SampleFormat::I16 => build::<i16>(&device, config, state),
@@ -220,6 +241,7 @@ impl Audio {
                 meters,
                 sample_rate,
                 device: name,
+                tuner: tuner_rx,
                 tables: TableLibrary::new(),
             },
             midi_tx,
@@ -352,6 +374,12 @@ struct Renderer {
     metronome: bool,
     meters: Arc<Meters>,
     load: f32,
+    /// The reference track, where it has got to (its frames), and whether it is heard.
+    reference: Option<(Box<RefTrack>, f64)>,
+    reference_on: bool,
+    /// Where the tuner's signal goes, and the insert it comes from.
+    tuner: Option<Producer<f32>>,
+    tuner_insert: Option<usize>,
 }
 
 impl Renderer {
@@ -388,6 +416,10 @@ impl Renderer {
             metronome: false,
             meters,
             load: 0.0,
+            reference: None,
+            reference_on: false,
+            tuner: None,
+            tuner_insert: None,
         }
     }
 
@@ -446,6 +478,7 @@ impl Renderer {
             }
             Command::SetPlayer(mut p) => {
                 p.set_metronome(self.metronome);
+                p.set_tap(self.tuner_insert);
                 // the old player goes back to be freed off this thread
                 if let Some(old) = self.player.replace(p) {
                     let _ = self.garbage.push(Garbage::Player(old));
@@ -454,6 +487,11 @@ impl Renderer {
             Command::PlayerPlay(from) => {
                 if let Some(p) = &mut self.player {
                     p.play(from);
+                }
+                // the reference follows the song position
+                if let Some((r, pos)) = &mut self.reference {
+                    let ppq = f64::from(las_project::PPQ);
+                    *pos = from / ppq * 60.0 / r.bpm.max(1.0) * r.audio.rate;
                 }
             }
             Command::Preview(p) => {
@@ -503,6 +541,24 @@ impl Renderer {
                     .set_source(src.left, src.right, src.rate);
             }
             Command::Volume(v) => self.volume = v,
+            Command::Reference(r) => {
+                let new = r.map(|r| (r, 0.0));
+                if let Some((old, _)) = std::mem::replace(&mut self.reference, new) {
+                    let _ = self.garbage.push(Garbage::Reference(old));
+                }
+            }
+            Command::ReferenceOn(on) => self.reference_on = on,
+            Command::ReferenceGain(g) => {
+                if let Some((r, _)) = &mut self.reference {
+                    r.gain = g;
+                }
+            }
+            Command::Tuner(i) => {
+                self.tuner_insert = i;
+                if let Some(p) = &mut self.player {
+                    p.set_tap(i);
+                }
+            }
         }
     }
 
@@ -535,7 +591,16 @@ impl Renderer {
                     l[i] += pl[i];
                     r[i] += pr[i];
                 }
+                if let Some(tx) = &mut self.tuner {
+                    p.drain_tap(|s| {
+                        let _ = tx.push(s);
+                    });
+                }
             }
+            let song_playing = self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.is_playing() && !p.finished());
             // the active instrument's effects; the song position follows the clock
             let chain = &mut self.chains[chain_index(self.engine.active)];
             if !chain.is_empty() {
@@ -564,6 +629,28 @@ impl Renderer {
                 if *pos as usize + 1 >= len {
                     if let Some((old, _)) = self.preview.take() {
                         let _ = self.garbage.push(Garbage::Preview(old));
+                    }
+                }
+            }
+            // the reference track runs along with the song; heard, it replaces the
+            // whole mix (master effects included)
+            if let Some((rt, pos)) = &mut self.reference {
+                let step = rt.audio.rate / self.sr;
+                let len = rt.audio.left.len().min(rt.audio.right.len());
+                if self.reference_on {
+                    l.fill(0.0);
+                    r.fill(0.0);
+                }
+                if song_playing {
+                    for i in 0..n {
+                        let at = *pos as usize;
+                        if at + 1 < len && self.reference_on {
+                            let f = (*pos - at as f64) as f32;
+                            let (al, ar) = (&rt.audio.left, &rt.audio.right);
+                            l[i] = (al[at] + (al[at + 1] - al[at]) * f) * rt.gain;
+                            r[i] = (ar[at] + (ar[at + 1] - ar[at]) * f) * rt.gain;
+                        }
+                        *pos += step;
                     }
                 }
             }
@@ -800,6 +887,57 @@ mod tests {
             las_engine::PlayMode::Song,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_reference_replaces_the_mix_while_b_is_on_and_the_tuner_hears_an_insert() {
+        let (mut r, mut tx, _garbage) = renderer();
+        let (tuner_tx, mut tuner_rx) = RingBuffer::<f32>::new(1 << 16);
+        r.tuner = Some(tuner_tx);
+        let mut buf = vec![0f32; 512 * 2];
+        tx.push(Command::SetPlayer(Box::new(project_player())))
+            .ok()
+            .unwrap();
+        // a constant reference, easy to recognise, at a quarter gain
+        let n = 48000 * 30;
+        let one: Shared<[f32]> = vec![0.8f32; n].into();
+        tx.push(Command::Reference(Some(Box::new(RefTrack {
+            audio: Preview {
+                left: one.clone(),
+                right: one,
+                rate: 48000.0,
+            },
+            gain: 0.25,
+            bpm: 120.0,
+        }))))
+        .ok()
+        .unwrap();
+        tx.push(Command::Tuner(Some(0))).ok().unwrap();
+        tx.push(Command::PlayerPlay(0.0)).ok().unwrap();
+        for _ in 0..50 {
+            r.fill(&mut buf);
+        }
+        assert!(
+            buf.iter().any(|v| (v - 0.2 * 0.8).abs() > 1e-3),
+            "A: the mix is heard"
+        );
+        let heard = std::iter::from_fn(|| tuner_rx.pop().ok()).count();
+        assert!(
+            heard >= 512 * 40,
+            "the tuner got the master's signal: {heard}"
+        );
+        tx.push(Command::ReferenceOn(true)).ok().unwrap();
+        r.fill(&mut buf);
+        r.fill(&mut buf);
+        // the volume (0.8) times the matched reference (0.25 * 0.8)
+        assert!(
+            buf.iter().all(|v| (v - 0.8 * 0.25 * 0.8).abs() < 1e-4),
+            "B: only the reference"
+        );
+        tx.push(Command::ReferenceOn(false)).ok().unwrap();
+        tx.push(Command::Reference(None)).ok().unwrap();
+        r.fill(&mut buf);
+        assert!(r.reference.is_none());
     }
 
     #[test]

@@ -7,7 +7,10 @@ use midir::{Ignore, MidiInput, MidiInputConnection};
 
 /// Connect to the first MIDI input port, if there is one. Keep the returned
 /// value alive to stay connected.
-pub fn connect(mut tx: MidiSender) -> Option<(MidiInputConnection<()>, String)> {
+pub fn connect(
+    mut tx: MidiSender,
+    log: crate::workflow::capture::SharedLog,
+) -> Option<(MidiInputConnection<()>, String)> {
     let mut input = MidiInput::new("Lumen Audio Studio").ok()?;
     input.ignore(Ignore::SysexAndTime);
     let port = input.ports().into_iter().next()?;
@@ -20,6 +23,12 @@ pub fn connect(mut tx: MidiSender) -> Option<(MidiInputConnection<()>, String)> 
             "lumen-input",
             move |_, msg, _| {
                 if let Some(c) = parse(msg) {
+                    // remembered for Capture MIDI
+                    if let (Command::NoteOn { key, vel }, Ok(mut l)) = (&c, log.lock()) {
+                        l.push(*key, *vel, true);
+                    } else if let (Command::NoteOff { key }, Ok(mut l)) = (&c, log.lock()) {
+                        l.push(*key, 0.0, false);
+                    }
                     let _ = tx.push(c);
                 }
             },

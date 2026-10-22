@@ -16,6 +16,7 @@ pub mod mist;
 pub mod modular;
 pub mod param;
 pub mod patch;
+pub mod pitch;
 pub mod presets;
 pub mod stretch;
 pub mod synth;

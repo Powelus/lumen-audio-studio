@@ -22,6 +22,14 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Y, Ctrl+Shift+Z", "Redo"),
             ("F1", "This window"),
             (
+                "Ctrl+K",
+                "Quick search: find any action, window, sound or project",
+            ),
+            (
+                "Ctrl+Shift+C",
+                "Capture MIDI: the notes just played into the pattern",
+            ),
+            (
                 "A W S E D F T G Y H U J K",
                 "Play notes on the chosen channel",
             ),
@@ -549,6 +557,7 @@ impl App {
                 self.guard(Action::Demo);
                 ui.close();
             }
+            self.template_menu(ui);
             ui.separator();
             if ui
                 .add_enabled(loaded, egui::Button::new("Save          Ctrl+S"))
@@ -681,6 +690,8 @@ impl App {
                 self.shell.browser = !b;
                 ui.close();
             }
+            ui.separator();
+            self.tools_menu(ui);
         });
         ui.menu_button("Options", |ui| {
             ui.menu_button("Theme", |ui| {
@@ -705,6 +716,14 @@ impl App {
             });
         });
         ui.menu_button("Help", |ui| {
+            if ui
+                .button("Quick search...      Ctrl+K")
+                .on_hover_text("Type to find any action, window, instrument, effect, preset, sample or recent project")
+                .clicked()
+            {
+                self.wf.palette.show("");
+                ui.close();
+            }
             if ui.button("Keyboard shortcuts    F1").clicked() {
                 self.shell.open.keys = true;
                 ui.close();

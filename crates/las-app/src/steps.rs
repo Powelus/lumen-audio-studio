@@ -277,6 +277,8 @@ pub struct Out {
     pub open_roll: Option<usize>,
     /// A channel whose name was double-clicked: open its instrument.
     pub open_synth: Option<usize>,
+    /// A channel to render to an audio clip: (channel, only the pattern).
+    pub render: Option<(usize, bool)>,
 }
 
 pub fn draw(
@@ -408,6 +410,22 @@ pub fn draw(
                         }
                         if ui.button("Instrument").clicked() {
                             out.open_synth = Some(i);
+                            ui.close();
+                        }
+                        if ui
+                            .button("Render to audio clip (song)")
+                            .on_hover_text("Bounce this channel to a WAV in the project, put it on the playlist and mute the channel")
+                            .clicked()
+                        {
+                            out.render = Some((i, false));
+                            ui.close();
+                        }
+                        if ui
+                            .button("Render to audio clip (pattern)")
+                            .on_hover_text("The same, for the current pattern only")
+                            .clicked()
+                        {
+                            out.render = Some((i, true));
                             ui.close();
                         }
                         ui.separator();

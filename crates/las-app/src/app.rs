@@ -115,6 +115,8 @@ pub struct App {
     pub(crate) weave: crate::weave_ui::WeaveEditor,
     /// The hosted plugins' own windows that are open.
     pub(crate) editors: Vec<crate::hosted::OpenEditor>,
+    /// Command palette, capture, render, reference, tuner, templates, autosave.
+    pub(crate) wf: crate::workflow::Workflow,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -137,10 +139,11 @@ fn full_defaults() -> [Value; 3] {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         style(&cc.egui_ctx);
+        let wf = crate::workflow::Workflow::start();
         let (audio, midi, status, midi_name) = match Audio::start() {
             Ok((audio, tx)) => {
                 let status = format!("{} at {} Hz", audio.device, audio.sample_rate);
-                let m = crate::midi::connect(tx);
+                let m = crate::midi::connect(tx, wf.capture.clone());
                 let name = m.as_ref().map(|(_, n)| n.clone());
                 (Some(audio), m.map(|(c, _)| c), status, name)
             }
@@ -179,6 +182,7 @@ impl App {
             quit: false,
             weave: Default::default(),
             editors: Vec::new(),
+            wf,
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
@@ -193,6 +197,14 @@ impl App {
             app.switch(Instrument::Facet);
         }
         app.new_project();
+        // `--demo-song` opens the demo song
+        if std::env::args().any(|a| a == "--demo-song") {
+            app.open_demo();
+        }
+        // `--palette "rev"` opens the quick search with that typed
+        if let Some(q) = std::env::args().skip_while(|a| a != "--palette").nth(1) {
+            app.wf.palette.show(&q);
+        }
         // `lumen song.las` opens a project
         if let Some(path) = std::env::args().skip(1).find(|a| a.ends_with(".las")) {
             app.open_project(&path);
@@ -269,7 +281,7 @@ impl App {
         app
     }
 
-    fn load_preset(&mut self, inst: Instrument, i: usize) {
+    pub(crate) fn load_preset(&mut self, inst: Instrument, i: usize) {
         let k = index(inst);
         let Some(e) = self.entries[k].get(i) else {
             return;
@@ -1460,6 +1472,7 @@ impl App {
     /// A key played from the screen or the computer keyboard: the project's selected
     /// channel while its page is open, otherwise the synth on the other pages.
     pub(crate) fn note(&mut self, key: u8, vel: f64, on: bool) {
+        self.remember_key(key, vel, on);
         let c = if self.shell.keys_to_project() && self.project.has_player {
             Command::PlayerNote {
                 channel: self.project.channel,
@@ -1580,6 +1593,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.keys(ctx);
         self.shortcuts(ctx);
+        self.workflow_logic(ctx);
         let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
