@@ -9,6 +9,8 @@ Sound works again on Windows.
 - Fixed "No sound: the audio output could not be opened" on Windows. If the driver you chose does not open, Lumen now tries Windows audio on the default device and then every other output, so you get sound whenever any output works.
 - Audio now runs on its own thread: opening the output, listing devices, recording and closing never happen on the window's thread, and a driver that crashes or hangs can no longer stop the app from finding another output.
 - Automatic falls back to Windows audio when no ASIO driver is installed, and leaves the onboard Realtek ASIO driver alone.
+- The app's icon is shown at the left of the toolbar.
+- The menu bar and the toolbar line up: the same side margins, and every toolbar control has the same height on one centre line.
 - When there is no sound, Settings shows what went wrong for each output it tried, with a Copy details button for bug reports. Other messages no longer replace it.
 
 ## 0.2.0-alpha.60

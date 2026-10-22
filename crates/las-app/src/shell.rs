@@ -876,22 +876,50 @@ fn lcd(ui: &mut Ui, text: &str, caption: &str, width: f32) -> egui::Response {
     resp
 }
 
+/// The app's icon (assets/icon.png) at the left of the toolbar, as FL Studio shows its
+/// logo. The texture is made once and kept in egui's memory.
+/// The height of the toolbar's buttons, boxes and displays.
+const TOOL_H: f32 = 30.0;
+
 fn logo(ui: &mut Ui) {
-    let p = pal();
-    let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-    ui.painter().rect_filled(r, 8.0, p.accent);
-    ui.painter().rect_filled(
-        Rect::from_min_max(r.center(), r.max),
-        8.0,
-        p.accent2.gamma_multiply(0.85),
-    );
-    ui.painter().text(
-        r.center(),
-        Align2::CENTER_CENTER,
-        "L",
-        FontId::proportional(17.0),
-        p.on_accent,
-    );
+    let id = egui::Id::unique("lumen-logo-texture");
+    let tex = ui.ctx().data(|d| d.get_temp::<egui::TextureHandle>(id));
+    let tex = tex.or_else(|| {
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok()?;
+        let img = egui::ColorImage::from_rgba_unmultiplied(
+            [icon.width as usize, icon.height as usize],
+            &icon.rgba,
+        );
+        let t = ui
+            .ctx()
+            .load_texture("lumen-logo", img, egui::TextureOptions::LINEAR);
+        ui.ctx().data_mut(|d| d.insert_temp(id, t.clone()));
+        Some(t)
+    });
+    let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
+    match tex {
+        Some(t) => {
+            egui::Image::new((t.id(), r.size()))
+                .corner_radius(6.0)
+                .paint_at(ui, r);
+        }
+        None => {
+            let p = pal();
+            ui.painter().rect_filled(r, 8.0, p.accent);
+            ui.painter().rect_filled(
+                Rect::from_min_max(r.center(), r.max),
+                8.0,
+                p.accent2.gamma_multiply(0.85),
+            );
+            ui.painter().text(
+                r.center(),
+                Align2::CENTER_CENTER,
+                "L",
+                FontId::proportional(17.0),
+                p.on_accent,
+            );
+        }
+    }
 }
 
 impl App {
@@ -929,7 +957,10 @@ impl App {
             .map_or(120.0, |l| l.project.bpm);
         let busy = self.project.is_building();
         ui.horizontal_centered(|ui| {
+            // every control in the toolbar is as tall as the others and sits on the
+            // same centre line
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+            ui.spacing_mut().interact_size.y = TOOL_H;
             logo(ui);
             ui.add_space(4.0);
             // transport
@@ -1023,7 +1054,7 @@ impl App {
             if ui
                 .add(
                     egui::Button::new(RichText::new("TAP").size(11.0).strong())
-                        .min_size(vec2(40.0, 30.0)),
+                        .min_size(vec2(40.0, TOOL_H)),
                 )
                 .clicked()
             {
@@ -1064,7 +1095,11 @@ impl App {
                             ui.selectable_value(&mut self.project.pattern, i, &x.name);
                         }
                     });
-                if ui.button("+").on_hover_text("New pattern").clicked() {
+                if ui
+                    .add(egui::Button::new("+").min_size(vec2(TOOL_H, TOOL_H)))
+                    .on_hover_text("New pattern")
+                    .clicked()
+                {
                     let n = project.patterns.len() + 1;
                     self.project.modify(true, |pr| {
                         pr.patterns.push(Pattern {
@@ -1157,7 +1192,7 @@ impl App {
             if ui
                 .add_enabled(
                     self.project.dirty,
-                    egui::Button::new("Save").min_size(vec2(0.0, 30.0)),
+                    egui::Button::new("Save").min_size(vec2(0.0, TOOL_H)),
                 )
                 .on_hover_text("Ctrl+S")
                 .clicked()
@@ -1167,7 +1202,7 @@ impl App {
             if ui
                 .add_enabled(
                     self.project.loaded.is_some(),
-                    egui::Button::new("Export").min_size(vec2(0.0, 30.0)),
+                    egui::Button::new("Export").min_size(vec2(0.0, TOOL_H)),
                 )
                 .clicked()
             {

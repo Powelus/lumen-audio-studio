@@ -2002,6 +2002,8 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        /// The left and right margin of the menu bar and the toolbar.
+        const TOP_MARGIN_X: i8 = 10;
         let ctx = ui.ctx().clone();
         self.paint_theme(&ctx);
         let p = crate::theme::pal();
@@ -2010,7 +2012,8 @@ impl eframe::App for App {
             .frame(
                 egui::Frame::new()
                     .fill(p.bg)
-                    .inner_margin(egui::Margin::symmetric(8, 2)),
+                    // the same side margins as the toolbar under it, so both line up
+                    .inner_margin(egui::Margin::symmetric(TOP_MARGIN_X, 2)),
             )
             .show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
@@ -2030,7 +2033,7 @@ impl eframe::App for App {
             .frame(
                 egui::Frame::new()
                     .fill(p.panel2)
-                    .inner_margin(egui::Margin::symmetric(10, 8)),
+                    .inner_margin(egui::Margin::symmetric(TOP_MARGIN_X, 6)),
             )
             .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status")
