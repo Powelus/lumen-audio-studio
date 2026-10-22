@@ -1229,19 +1229,40 @@ pub fn draw(
             edits.push(Edit::Audition { key: o, on: false });
         }
 
+        // the notes on the line from `a` to `b`, so a quick swipe of the delete tool
+        // misses none between the frames
+        let swept = |a: egui::Pos2, b: egui::Pos2| -> Vec<usize> {
+            let steps = ((b - a).length() / 3.0).ceil().max(1.0) as usize;
+            let mut out: Vec<usize> = Vec::new();
+            for s in 0..=steps {
+                let (t, k) = ptr(a + (b - a) * (s as f32 / steps as f32));
+                if let Some((i, _)) = hit(notes, t, k, edge) {
+                    if !out.contains(&i) {
+                        out.push(i);
+                    }
+                }
+            }
+            out
+        };
         if resp.drag_started_by(egui::PointerButton::Primary) && !on_keys {
             if let Some(op) = press {
                 let (t, k) = ptr(op);
                 state.just_added.clear();
                 match (state.tool, hit(notes, t, k, edge)) {
-                    (Tool::Delete, Some((i, _))) => {
-                        edits.push(Edit::Begin);
-                        edits.push(Edit::Delete {
-                            id: notes[i].id.clone(),
+                    (Tool::Delete, _) => {
+                        let gone = swept(op, pos.unwrap_or(op));
+                        if !gone.is_empty() {
+                            edits.push(Edit::Begin);
+                            for i in &gone {
+                                edits.push(Edit::Delete {
+                                    id: notes[*i].id.clone(),
+                                });
+                            }
+                        }
+                        state.drag = Some(Drag::Erase {
+                            begun: !gone.is_empty(),
                         });
-                        state.drag = Some(Drag::Erase { begun: true });
                     }
-                    (Tool::Delete, None) => state.drag = Some(Drag::Erase { begun: false }),
                     (_, Some((i, false))) if shift => {
                         // Shift+drag copies, as in FL: the copy moves, the original stays
                         let n = &notes[i];
@@ -1408,13 +1429,20 @@ pub fn draw(
                         }
                     }
                     Drag::Erase { begun } => {
-                        if let Some((i, _)) = hit(notes, t, k, edge) {
+                        // every note on the way from where the pointer was last frame,
+                        // so a quick swipe misses none
+                        let delta = ui.input(|i| i.pointer.delta());
+                        let gone = swept(p - delta, p);
+                        let _ = (t, k);
+                        if !gone.is_empty() {
                             if !begun {
                                 edits.push(Edit::Begin);
                             }
-                            edits.push(Edit::Delete {
-                                id: notes[i].id.clone(),
-                            });
+                            for i in gone {
+                                edits.push(Edit::Delete {
+                                    id: notes[i].id.clone(),
+                                });
+                            }
                             state.drag = Some(Drag::Erase { begun: true });
                         }
                     }
@@ -1510,8 +1538,14 @@ pub fn draw(
             || resp.clicked_by(egui::PointerButton::Secondary)
         {
             if let Some(p) = pos.filter(|p| !in_keys(*p)) {
-                let (t, k) = ptr(p);
-                if let Some((i, _)) = hit(notes, t, k, edge) {
+                // a right drag deletes all it passed since the last frame
+                let from = if resp.dragged_by(egui::PointerButton::Secondary) {
+                    p - ui.input(|i| i.pointer.delta())
+                } else {
+                    p
+                };
+                let gone = swept(from, p);
+                if !gone.is_empty() {
                     let begun = matches!(state.drag, Some(Drag::Erase { begun: true }));
                     if !begun {
                         edits.push(Edit::Begin);
@@ -1519,10 +1553,12 @@ pub fn draw(
                     if resp.dragged_by(egui::PointerButton::Secondary) {
                         state.drag = Some(Drag::Erase { begun: true });
                     }
-                    state.selected.remove(&notes[i].id);
-                    edits.push(Edit::Delete {
-                        id: notes[i].id.clone(),
-                    });
+                    for i in gone {
+                        state.selected.remove(&notes[i].id);
+                        edits.push(Edit::Delete {
+                            id: notes[i].id.clone(),
+                        });
+                    }
                 }
             }
         }

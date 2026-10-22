@@ -255,3 +255,202 @@ fn typing_a_name_does_not_play_notes_or_change_the_octave() {
         "the letters went into the name: {name}"
     );
 }
+
+/// The preset menu button of the synth window ("Name  v").
+fn preset_title(h: &Harness) -> String {
+    let n = h
+        .nodes
+        .iter()
+        .find(|n| n.label.ends_with("  v") && n.role == eframe::egui::accesskit::Role::Button)
+        .expect("the preset menu button");
+    n.label.trim_end_matches("  v").to_string()
+}
+
+#[test]
+fn synth_presets_step_with_the_arrows_and_stay_with_their_channel() {
+    for id in ["polaris", "monolith", "zenith", "triosc", "facet", "mist"] {
+        let mut h = Harness::demo();
+        h.app.shell.open.mixer = false;
+        h.app.add_channel(id);
+        let a = h.project().channels.len() - 1;
+        h.app.add_channel(id);
+        let b = a + 1;
+        h.app.open_channel(a);
+        h.run(3);
+        let first = preset_title(&h);
+        h.click(">");
+        h.click(">");
+        let picked = preset_title(&h);
+        assert_ne!(first, picked, "{id}: > moves to another preset");
+        let k = crate::app::index(h.app.inst);
+        let want = h.app.entries[k]
+            .iter()
+            .find(|e| e.name == picked)
+            .unwrap()
+            .patch
+            .clone();
+        let saved = h.project().channels[a].state["patch"].clone();
+        assert_eq!(
+            saved,
+            las_dsp::patch::merge_patch(&saved, &want),
+            "{id}: the channel has the preset's sound"
+        );
+        // another channel of the same synth shows its own preset, not the last one picked
+        h.app.open_channel(b);
+        h.run(3);
+        assert_eq!(
+            preset_title(&h),
+            first,
+            "{id}: the second channel is still on its own preset"
+        );
+        h.app.open_channel(a);
+        h.run(3);
+        assert_eq!(
+            preset_title(&h),
+            picked,
+            "{id}: the first channel shows the preset it has"
+        );
+        h.click("<");
+        assert_ne!(preset_title(&h), picked, "{id}: < steps back");
+    }
+}
+
+/// The visible part of the piano roll's grid (right of its keyboard).
+fn roll_grid(h: &Harness) -> eframe::egui::Rect {
+    let win = h.get("Piano Roll").rect;
+    let grid = h
+        .nodes
+        .iter()
+        .filter(|n| n.label.is_empty() && n.rect.height() > 1000.0 && win.intersects(n.rect))
+        .max_by(|a, b| a.rect.height().total_cmp(&b.rect.height()))
+        .expect("the roll's grid")
+        .rect;
+    // the roll's vertical scroll bar spans the part of the grid in view
+    let bar = h
+        .nodes
+        .iter()
+        .filter(|n| n.role == eframe::egui::accesskit::Role::ScrollBar && win.contains_rect(n.rect))
+        .max_by(|a, b| a.rect.height().total_cmp(&b.rect.height()))
+        .expect("the roll's scroll bar")
+        .rect;
+    eframe::egui::Rect::from_min_max(
+        eframe::egui::pos2(grid.left() + 90.0, bar.top() + 10.0),
+        eframe::egui::pos2(bar.left() - 10.0, bar.bottom() - 10.0),
+    )
+}
+
+fn roll_notes(h: &Harness) -> Vec<las_project::Note> {
+    let p = h.project();
+    let id = &p.channels[h.app.project.channel].id;
+    p.patterns[h.app.project.pattern]
+        .notes
+        .get(id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn roll_harness() -> Harness {
+    let mut h = Harness::demo();
+    let o = &mut h.app.shell.open;
+    o.playlist = false;
+    o.rack = false;
+    o.mixer = false;
+    h.app.add_channel("polaris");
+    h.run(2);
+    h.key(eframe::egui::Key::F7);
+    h.run(3);
+    assert!(h.app.shell.open.roll);
+    h
+}
+
+#[test]
+fn piano_roll_draw_select_copy_paste_delete_undo() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = roll_harness();
+    let g = roll_grid(&h);
+    let a = g.left_top() + eframe::egui::vec2(40.0, 40.0);
+    let b = g.left_top() + eframe::egui::vec2(200.0, 80.0);
+    h.click_at(a);
+    assert_eq!(roll_notes(&h).len(), 1, "a click draws a note");
+    h.click_at(b);
+    assert_eq!(roll_notes(&h).len(), 2, "another click draws another");
+    // a click on a note does not add one
+    h.click_at(a + eframe::egui::vec2(3.0, 0.0));
+    assert_eq!(roll_notes(&h).len(), 2, "a click on a note leaves it");
+    h.key_with(Key::A, Modifiers::COMMAND);
+    assert_eq!(h.app.project.roll.selected.len(), 2, "Ctrl+A selects all");
+    h.key_with(Key::C, Modifiers::COMMAND);
+    h.key_with(Key::V, Modifiers::COMMAND);
+    assert_eq!(roll_notes(&h).len(), 4, "Ctrl+V pastes the copy");
+    h.key(Key::Delete);
+    assert_eq!(
+        roll_notes(&h).len(),
+        2,
+        "Delete removes the pasted (selected) notes"
+    );
+    // Ctrl+B with nothing selected duplicates all, as in FL
+    h.key_with(Key::B, Modifiers::COMMAND);
+    assert_eq!(roll_notes(&h).len(), 4, "Ctrl+B duplicates");
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(roll_notes(&h).len(), 2, "Ctrl+Z undoes the duplicate");
+    h.key_with(Key::D, Modifiers::COMMAND);
+    assert!(h.app.project.roll.selected.is_empty(), "Ctrl+D deselects");
+    // a right click deletes the note under it
+    h.right_click_at(b + eframe::egui::vec2(3.0, 0.0));
+    assert_eq!(roll_notes(&h).len(), 1, "a right click deletes");
+    // drag a note to the right moves it
+    let before = roll_notes(&h)[0].pos;
+    h.drag(
+        a + eframe::egui::vec2(3.0, 0.0),
+        a + eframe::egui::vec2(120.0, 0.0),
+    );
+    let n = roll_notes(&h);
+    assert_eq!(n.len(), 1);
+    assert!(
+        n[0].pos > before,
+        "a drag moves the note later: {} -> {}",
+        before,
+        n[0].pos
+    );
+}
+
+#[test]
+fn piano_roll_paint_and_delete_tools() {
+    let mut h = roll_harness();
+    let g = roll_grid(&h);
+    h.click("Paint");
+    let a = g.left_top() + eframe::egui::vec2(20.0, 60.0);
+    h.drag(a, a + eframe::egui::vec2(300.0, 0.0));
+    let painted = roll_notes(&h).len();
+    assert!(painted >= 3, "painting across draws notes: {painted}");
+    h.click("Delete");
+    h.drag(a, a + eframe::egui::vec2(300.0, 0.0));
+    assert_eq!(
+        roll_notes(&h).len(),
+        0,
+        "the delete tool erases what it passes"
+    );
+    h.key_with(eframe::egui::Key::Z, eframe::egui::Modifiers::COMMAND);
+    assert_eq!(roll_notes(&h).len(), painted, "undo brings them back");
+}
+
+#[test]
+fn piano_roll_right_drag_erases_every_note_it_passes() {
+    let mut h = roll_harness();
+    let g = roll_grid(&h);
+    h.click("Paint");
+    let a = g.left_top() + eframe::egui::vec2(20.0, 60.0);
+    h.drag(a, a + eframe::egui::vec2(300.0, 0.0));
+    assert!(roll_notes(&h).len() >= 3);
+    h.drag_with(
+        a,
+        a + eframe::egui::vec2(300.0, 0.0),
+        eframe::egui::PointerButton::Secondary,
+        eframe::egui::Modifiers::NONE,
+    );
+    assert_eq!(
+        roll_notes(&h).len(),
+        0,
+        "a right drag erases what it passes"
+    );
+}
