@@ -144,6 +144,8 @@ pub(crate) struct Engine {
     automation_first: HashSet<String>,
     /// The peak of each insert's output (falling slowly), for the mixer's meters.
     peaks: Vec<f32>,
+    /// The same, left and right apart.
+    peaks_lr: Vec<[f32; 2]>,
     /// Scratch for rendering a block.
     bl: Vec<f32>,
     br: Vec<f32>,
@@ -830,6 +832,7 @@ impl Engine {
             automation_first: HashSet::new(),
             project,
             peaks: Vec::new(),
+            peaks_lr: Vec::new(),
             bl: vec![0.0; BLOCK],
             br: vec![0.0; BLOCK],
             vol: vec![0.0; BLOCK],
@@ -901,13 +904,15 @@ impl Engine {
         self.mixer.process(frame, out_l, out_r);
         let inserts = self.mixer.len();
         self.peaks.resize(inserts, 0.0);
+        self.peaks_lr.resize(inserts, [0.0; 2]);
         for i in 0..inserts {
             let (l, r) = self.mixer.insert_output(i);
-            let p = l[..n]
-                .iter()
-                .chain(&r[..n])
-                .fold(0f32, |m, s| m.max(s.abs()));
-            self.peaks[i] = p.max(self.peaks[i] * 0.93);
+            let peak = |b: &[f32]| b[..n].iter().fold(0f32, |m, s| m.max(s.abs()));
+            let (pl, pr) = (peak(l), peak(r));
+            let held = &mut self.peaks_lr[i];
+            held[0] = pl.max(held[0] * 0.93);
+            held[1] = pr.max(held[1] * 0.93);
+            self.peaks[i] = pl.max(pr).max(self.peaks[i] * 0.93);
         }
     }
 
@@ -940,6 +945,22 @@ impl Engine {
     /// The peak level of each insert, master first.
     pub fn insert_peaks(&self) -> &[f32] {
         &self.peaks
+    }
+
+    /// The peak level of each insert, left and right, master first.
+    pub fn insert_peaks_lr(&self) -> &[[f32; 2]] {
+        &self.peaks_lr
+    }
+
+    /// See [`Mixer::set_live`].
+    pub fn set_live(
+        &mut self,
+        insert: usize,
+        control: &crate::mixer::LiveControl,
+        value: f64,
+        time: f64,
+    ) {
+        self.mixer.set_live(insert, control, value, time);
     }
 }
 

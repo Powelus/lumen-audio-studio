@@ -150,6 +150,17 @@ impl Player {
         self.engine.awake()
     }
 
+    /// The peak level of each mixer insert, left and right (master first).
+    pub fn insert_peaks_lr(&self) -> &[[f32; 2]] {
+        self.engine.insert_peaks_lr()
+    }
+
+    /// Move a mixer control live while it is dragged: it glides there, no zipper.
+    pub fn set_live(&mut self, insert: usize, control: &crate::mixer::LiveControl, value: f64) {
+        let t = self.frame as f64 / self.sr;
+        self.engine.set_live(insert, control, value, t);
+    }
+
     /// The peak level of each mixer insert (master first), falling slowly.
     pub fn insert_peaks(&self) -> &[f32] {
         self.engine.insert_peaks()

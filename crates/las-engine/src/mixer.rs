@@ -163,6 +163,18 @@ struct Track {
     quiet_out: usize,
 }
 
+/// Time constant of a live change, seconds.
+const LIVE_GLIDE: f64 = 0.015;
+
+/// A control of an insert that follows the user's hand while the song plays.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiveControl {
+    Volume,
+    Pan,
+    /// The dry and wet mix of the effect slot with this id.
+    SlotMix(String),
+}
+
 pub struct Mixer {
     tracks: Vec<Track>,
     order: Vec<usize>,
@@ -461,6 +473,32 @@ impl Mixer {
             "volume" => t.fader.ramp(points, first),
             "pan" => t.pan.ramp(points, first),
             _ => {}
+        }
+    }
+
+    /// Move a control of insert `index` to `value` while the user drags it: it glides
+    /// there from engine time `time` (seconds) in 15 ms, so a drag never zippers.
+    /// What was scheduled on it after `time` is forgotten.
+    pub fn set_live(&mut self, index: usize, control: &LiveControl, value: f64, time: f64) {
+        let Some(t) = self.tracks.get_mut(index) else {
+            return;
+        };
+        let glide = |p: &mut Param, v: f64| {
+            p.cancel_scheduled_values(time);
+            p.set_target_at_time(v, time, LIVE_GLIDE);
+        };
+        match control {
+            LiveControl::Volume => glide(&mut t.fader, value.clamp(0.0, 1.25)),
+            LiveControl::Pan => glide(&mut t.pan, value.clamp(-1.0, 1.0)),
+            LiveControl::SlotMix(id) => {
+                if let Some(s) = t.slots.iter_mut().find(|s| s.id == *id) {
+                    if s.fx.enabled {
+                        let m = value.clamp(0.0, 1.0);
+                        glide(&mut s.auto.wet, m);
+                        glide(&mut s.auto.dry, 1.0 - m);
+                    }
+                }
+            }
         }
     }
 
