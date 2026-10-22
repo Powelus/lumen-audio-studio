@@ -956,7 +956,26 @@ impl App {
             .as_ref()
             .map_or(120.0, |l| l.project.bpm);
         let busy = self.project.is_building();
-        ui.horizontal_centered(|ui| {
+        // the master knob keeps its place at the right; the rest wraps onto a second
+        // row when the window is too narrow for one, instead of running under it
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+            ui.spacing_mut().interact_size.y = TOOL_H;
+                if let Some(a) = &self.audio {
+                    let (l, r) = a.meters.peaks();
+                    meter(ui, r, vec2(8.0, 26.0));
+                    meter(ui, l, vec2(8.0, 26.0));
+                }
+                let mut vol = self.volume;
+                if knob(ui, &mut vol, 0.0..=1.0, 0.8, "Master", false, &|v| {
+                    format!("{:.0}%", v * 100.0)
+                }) {
+                    self.volume = vol;
+                    self.send(Command::Volume(vol as f32));
+                }
+            let row = egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true);
+            ui.with_layout(row, |ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
             // every control in the toolbar is as tall as the others and sits on the
             // same centre line
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
@@ -1208,20 +1227,6 @@ impl App {
             {
                 self.shell.open.show(crate::raise::Win::Export);
             }
-            // master
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(a) = &self.audio {
-                    let (l, r) = a.meters.peaks();
-                    meter(ui, r, vec2(8.0, 26.0));
-                    meter(ui, l, vec2(8.0, 26.0));
-                }
-                let mut vol = self.volume;
-                if knob(ui, &mut vol, 0.0..=1.0, 0.8, "Master", false, &|v| {
-                    format!("{:.0}%", v * 100.0)
-                }) {
-                    self.volume = vol;
-                    self.send(Command::Volume(vol as f32));
-                }
             });
         });
         let _ = p;
