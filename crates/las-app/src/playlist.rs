@@ -341,6 +341,21 @@ impl Default for PlaylistState {
 }
 
 impl PlaylistState {
+    /// Another project was opened: its loop, selection, waveforms and what was being
+    /// done go; the way the playlist is set up (zoom, snap, tool, the clipboard) stays.
+    pub fn forget_project(&mut self) {
+        let old = std::mem::take(self);
+        *self = Self {
+            zoom: old.zoom,
+            row: old.row,
+            snap: old.snap,
+            tool: old.tool,
+            clipboard: old.clipboard,
+            show_picker: old.show_picker,
+            ..Self::default()
+        };
+    }
+
     /// The stretch the song loops over now, if any.
     pub fn active_loop(&self) -> Option<(f64, f64)> {
         self.song_loop.filter(|_| self.loop_on)

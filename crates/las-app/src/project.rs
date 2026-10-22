@@ -93,6 +93,20 @@ pub struct ProjectState {
     pub count_in: Option<(u32, f64)>,
 }
 
+/// Where a saved project keeps its song loop.
+const LOOP_KEY: &str = "songLoop";
+
+/// The loop a project was saved with: start, end (ticks) and whether it was on.
+fn saved_loop(p: &Project) -> Option<(f64, f64, bool)> {
+    let v = p.extra.get(LOOP_KEY)?;
+    let (a, b) = (v.get("start")?.as_f64()?, v.get("end")?.as_f64()?);
+    let on = v
+        .get("on")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    (a.is_finite() && b.is_finite() && b > a && a >= 0.0).then_some((a, b, on))
+}
+
 impl ProjectState {
     pub fn open(&mut self, path: &str) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
@@ -133,6 +147,15 @@ impl ProjectState {
         self.last_edit = None;
         self.open_effect = None;
         self.open_auto = None;
+        self.playlist.forget_project();
+        self.roll.forget_project();
+        // the loop the song was saved with
+        if let Some(l) = &self.loaded {
+            if let Some((a, b, on)) = saved_loop(&l.project) {
+                self.playlist.song_loop = Some((a, b));
+                self.playlist.loop_on = on;
+            }
+        }
     }
 
     /// Whether the project has a file to be saved to.
@@ -441,7 +464,17 @@ impl ProjectState {
         if path.is_empty() {
             return Err("no file to save to".into());
         }
-        let bytes = encode(&l.project, &l.samples, true).map_err(|e| e.to_string())?;
+        // the song's loop goes with it (the playlist keeps it outside the project, as
+        // setting it is no edit)
+        let mut project = (*l.project).clone();
+        project.extra.remove(LOOP_KEY);
+        if let Some((a, b)) = self.playlist.song_loop {
+            project.extra.insert(
+                LOOP_KEY.into(),
+                serde_json::json!({ "start": a, "end": b, "on": self.playlist.loop_on }),
+            );
+        }
+        let bytes = encode(&project, &l.samples, true).map_err(|e| e.to_string())?;
         let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, bytes).map_err(|e| format!("{tmp}: {e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))?;

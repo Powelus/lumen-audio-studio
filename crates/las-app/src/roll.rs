@@ -663,6 +663,27 @@ impl Default for RollState {
     }
 }
 
+impl RollState {
+    /// Another project was opened: what pointed into the old one goes, the way the
+    /// roll is set up (zoom, snap, tool, the clipboard) stays.
+    pub fn forget_project(&mut self) {
+        let old = std::mem::take(self);
+        *self = Self {
+            zoom: old.zoom,
+            row: old.row,
+            snap: old.snap,
+            len: old.len,
+            tool: old.tool,
+            ghost: old.ghost,
+            scale: old.scale,
+            stamp: old.stamp,
+            clipboard: old.clipboard,
+            lane: old.lane,
+            ..Self::default()
+        };
+    }
+}
+
 fn snapped(t: f64, snap: f64) -> f64 {
     if snap <= 1.0 {
         t.round()

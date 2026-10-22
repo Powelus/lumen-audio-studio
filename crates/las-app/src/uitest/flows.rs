@@ -454,3 +454,277 @@ fn piano_roll_right_drag_erases_every_note_it_passes() {
         "a right drag erases what it passes"
     );
 }
+
+/// The visible part of the playlist's clip area.
+fn playlist_view(h: &Harness) -> eframe::egui::Rect {
+    let win = h.get("Playlist - Arrangement").rect;
+    let bars: Vec<_> = h
+        .nodes
+        .iter()
+        .filter(|n| n.role == eframe::egui::accesskit::Role::ScrollBar && win.contains_rect(n.rect))
+        .cloned()
+        .collect();
+    let v = bars
+        .iter()
+        .max_by(|a, b| a.rect.height().total_cmp(&b.rect.height()))
+        .expect("a scroll bar")
+        .rect;
+    let hz = bars
+        .iter()
+        .max_by(|a, b| a.rect.width().total_cmp(&b.rect.width()))
+        .expect("a scroll bar")
+        .rect;
+    eframe::egui::Rect::from_min_max(
+        eframe::egui::pos2(hz.left(), v.top()),
+        eframe::egui::pos2(v.left(), hz.top()),
+    )
+}
+
+/// Where a playlist clip is drawn: its middle, and its right edge.
+fn clip_at(h: &Harness, id: &str) -> (eframe::egui::Pos2, f32) {
+    let a = h.app.project.playlist.area.expect("the playlist was drawn");
+    let c = h
+        .project()
+        .playlist
+        .clips
+        .iter()
+        .find(|c| c.id == id)
+        .expect("the clip");
+    let x = a.left + (c.start + c.length / 2.0) as f32 * a.zoom;
+    let y = a.top + (c.track as f32 + 0.5) * a.row;
+    (
+        eframe::egui::pos2(x, y),
+        a.left + (c.start + c.length) as f32 * a.zoom,
+    )
+}
+
+fn playlist_harness() -> Harness {
+    let mut h = Harness::demo();
+    let o = &mut h.app.shell.open;
+    o.rack = false;
+    o.mixer = false;
+    o.roll = false;
+    h.run(3);
+    h
+}
+
+#[test]
+fn playlist_place_move_resize_duplicate_delete() {
+    use eframe::egui::{vec2, Key, Modifiers};
+    let mut h = playlist_harness();
+    let v = playlist_view(&h);
+    println!("view {v:?}");
+    let n0 = h.project().playlist.clips.len();
+    // the lowest track in view, after the song
+    let mut at = None;
+    for dx in [0.75f32, 0.85, 0.65, 0.95] {
+        let p = eframe::egui::pos2(v.left() + v.width() * dx, v.bottom() - 60.0);
+        h.click_at(p);
+        if h.project().playlist.clips.len() == n0 + 1 {
+            at = Some(p);
+            break;
+        }
+    }
+    let at = at.expect("a click on an empty spot places a clip");
+    let placed = h.project().playlist.clips.last().unwrap().clone();
+    // drag it right
+    let (mid, _) = clip_at(&h, &placed.id);
+    h.drag(mid, mid + vec2(100.0, 0.0));
+    let moved = h
+        .project()
+        .playlist
+        .clips
+        .iter()
+        .find(|c| c.id == placed.id)
+        .unwrap()
+        .clone();
+    assert!(
+        moved.start > placed.start,
+        "a drag moves the clip: {} -> {}",
+        placed.start,
+        moved.start
+    );
+    assert_eq!(
+        h.project().playlist.clips.len(),
+        n0 + 1,
+        "a drag adds nothing"
+    );
+    // Ctrl+B duplicates it after itself
+    let (mid, right) = clip_at(&h, &placed.id);
+    h.hover(mid);
+    h.key_with(Key::B, Modifiers::COMMAND);
+    assert_eq!(
+        h.project().playlist.clips.len(),
+        n0 + 2,
+        "Ctrl+B duplicates"
+    );
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(h.project().playlist.clips.len(), n0 + 1, "undo");
+    // a right click deletes it
+    h.right_click_at(mid);
+    assert_eq!(
+        h.project().playlist.clips.len(),
+        n0,
+        "a right click deletes the clip"
+    );
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(
+        h.project().playlist.clips.len(),
+        n0 + 1,
+        "undo brings it back"
+    );
+    // drag its right edge further right: it gets longer
+    let len = moved.length;
+    h.drag(
+        eframe::egui::pos2(right - 2.0, mid.y),
+        eframe::egui::pos2(right + 120.0, mid.y),
+    );
+    let c = h
+        .project()
+        .playlist
+        .clips
+        .iter()
+        .find(|c| c.id == placed.id)
+        .unwrap()
+        .clone();
+    assert!(
+        c.length > len,
+        "dragging the edge resizes: {len} -> {}",
+        c.length
+    );
+    assert_eq!(c.start, moved.start, "resizing keeps the start");
+}
+
+#[test]
+fn a_new_or_opened_project_does_not_keep_the_old_ones_loop_or_selection() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = playlist_harness();
+    let v = playlist_view(&h);
+    // a loop dragged along the ruler (just above the clips)
+    let a = h.app.project.playlist.area.unwrap();
+    let y = a.top - 8.0;
+    h.drag(
+        eframe::egui::pos2(v.left() + 50.0, y),
+        eframe::egui::pos2(v.left() + 300.0, y),
+    );
+    assert!(
+        h.app.project.playlist.song_loop.is_some(),
+        "a drag along the ruler sets a loop"
+    );
+    h.hover(v.center());
+    h.key_with(Key::A, Modifiers::COMMAND);
+    assert!(
+        !h.app.project.playlist.selected.is_empty(),
+        "Ctrl+A selects the clips"
+    );
+    h.app.project.dirty = false;
+    h.menu(&["File", "New Ctrl+N"]);
+    assert_eq!(h.project().name, "Untitled", "a new project");
+    assert_eq!(
+        h.app.project.playlist.song_loop, None,
+        "the old song's loop is gone"
+    );
+    assert!(!h.app.project.playlist.loop_on);
+    assert!(
+        h.app.project.playlist.selected.is_empty(),
+        "nothing selected"
+    );
+    assert!(h.app.project.roll.selected.is_empty());
+}
+
+#[test]
+fn a_saved_project_reopens_as_it_was_with_its_loop() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = playlist_harness();
+    let v = playlist_view(&h);
+    let a = h.app.project.playlist.area.unwrap();
+    let y = a.top - 8.0;
+    h.drag(
+        eframe::egui::pos2(v.left() + 50.0, y),
+        eframe::egui::pos2(v.left() + 300.0, y),
+    );
+    let lp = h.app.project.playlist.song_loop.expect("a loop");
+    // a preset picked on a synth channel, a step and a pattern
+    h.app.add_channel("zenith");
+    let ch = h.project().channels.len() - 1;
+    h.app.open_channel(ch);
+    h.run(3);
+    h.click(">");
+    h.menu(&["Patterns", "New pattern F4"]);
+    let dir = std::env::temp_dir().join(format!("las-uitest-save-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("song.las").to_string_lossy().into_owned();
+    h.app.project.save_to(&path).unwrap();
+    // a change saved with Ctrl+S
+    h.app.add_channel("vortex");
+    h.run(2);
+    h.key_with(Key::S, Modifiers::COMMAND);
+    assert!(!h.app.project.dirty, "Ctrl+S saved");
+    let saved = serde_json::to_value(h.project()).unwrap();
+    h.menu(&["File", "New Ctrl+N"]);
+    assert_eq!(h.app.project.playlist.song_loop, None);
+    h.app.open_project(&path);
+    h.run(3);
+    let mut back = serde_json::to_value(h.project()).unwrap();
+    let mut want = saved.clone();
+    for x in [&mut back, &mut want] {
+        x["meta"]["updatedAt"] = serde_json::json!(0);
+        if let Some(o) = x.as_object_mut() {
+            o.remove("songLoop");
+        }
+    }
+    let d = json_diff(&want, &back);
+    assert!(
+        d.is_empty(),
+        "the project comes back as it was saved: {d:#?}"
+    );
+    assert_eq!(h.app.project.playlist.song_loop, Some(lp), "and its loop");
+    assert!(h.app.project.playlist.loop_on);
+    h.app.open_channel(ch);
+    h.run(3);
+    let k = crate::app::index(h.app.inst);
+    let name = h.app.entries[k][h.app.presets[k]].name.clone();
+    assert_eq!(preset_title(&h), name);
+    assert_ne!(name, "Init", "the preset picked is shown again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Where two JSON values differ, as paths with both sides.
+fn json_diff(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
+    fn go(a: &serde_json::Value, b: &serde_json::Value, at: String, out: &mut Vec<String>) {
+        use serde_json::Value as V;
+        match (a, b) {
+            (V::Object(x), V::Object(y)) => {
+                for k in x.keys().chain(y.keys().filter(|k| !x.contains_key(*k))) {
+                    let n = V::Null;
+                    go(
+                        x.get(k).unwrap_or(&n),
+                        y.get(k).unwrap_or(&n),
+                        format!("{at}/{k}"),
+                        out,
+                    );
+                }
+            }
+            (V::Array(x), V::Array(y)) if x.len() == y.len() => {
+                for (i, (p, q)) in x.iter().zip(y).enumerate() {
+                    go(p, q, format!("{at}/{i}"), out);
+                }
+            }
+            (V::Number(x), V::Number(y))
+                if (x.as_f64().unwrap_or(0.0) - y.as_f64().unwrap_or(0.0)).abs() < 1e-9 => {}
+            _ if a == b => {}
+            _ => out.push(format!("{at}: {} != {}", short(a), short(b))),
+        }
+    }
+    fn short(v: &serde_json::Value) -> String {
+        let s = v.to_string();
+        if s.len() > 120 {
+            format!("{}...", &s[..120])
+        } else {
+            s
+        }
+    }
+    let mut out = Vec::new();
+    go(a, b, String::new(), &mut out);
+    out
+}
