@@ -331,7 +331,7 @@ fn drivers() -> Vec<String> {
 pub const HAS_ASIO: bool = cfg!(all(windows, feature = "asio"));
 
 /// What Automatic does, for Settings.
-pub const AUTO_HELP: &str = "Picks the best driver for you: your audio interface's ASIO driver, then FL Studio ASIO or ASIO4ALL, then Windows audio.";
+pub const AUTO_HELP: &str = "Picks the best driver for you: your audio interface's ASIO driver, then FlexASIO, then FL Studio ASIO or ASIO4ALL, then Windows audio.";
 
 /// ASIO drivers that wrap other drivers rather than belong to an audio interface.
 fn generic_asio(name: &str) -> bool {
@@ -354,7 +354,7 @@ fn generic_asio(name: &str) -> bool {
 }
 
 /// Which ASIO device Automatic opens, from the ASIO devices there are: the audio
-/// interface's own driver, else FL Studio ASIO, else ASIO4ALL. None: use the system's
+/// interface's own driver, else FlexASIO, else FL Studio ASIO, else ASIO4ALL. None: use the system's
 /// default driver (WASAPI on Windows).
 pub fn auto_asio(devices: &[String]) -> Option<String> {
     let has = |key: &str| {
@@ -367,6 +367,7 @@ pub fn auto_asio(devices: &[String]) -> Option<String> {
         .iter()
         .find(|d| !generic_asio(d))
         .cloned()
+        .or_else(|| has("flexasio"))
         .or_else(|| has("fl studio asio"))
         .or_else(|| has("flstudio asio"))
         .or_else(|| has("asio4all"))
@@ -418,6 +419,24 @@ pub fn device_lists(driver: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
     .unwrap_or_else(|e| {
         eprintln!("audio: listing devices: {e}");
         Default::default()
+    })
+}
+
+/// The ASIO devices there are, by name, read on the audio-control thread (to tell
+/// whether FlexASIO is installed). None when listing fails or crashes.
+pub fn asio_devices() -> Vec<String> {
+    crate::audioctl::run(|| {
+        catch_unwind(|| output_devices("ASIO")).unwrap_or_else(|p| {
+            eprintln!(
+                "audio: listing ASIO devices: {}",
+                crate::audioctl::panic_text(p)
+            );
+            Vec::new()
+        })
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("audio: listing ASIO devices: {e}");
+        Vec::new()
     })
 }
 
@@ -1811,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_ranks_the_interface_driver_then_fl_then_asio4all() {
+    fn automatic_ranks_the_interface_driver_then_flexasio_fl_and_asio4all() {
         let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let pick = |x: &[&str]| auto_asio(&v(x));
         assert_eq!(
@@ -1823,8 +1842,15 @@ mod tests {
             Some("FL Studio ASIO")
         );
         assert_eq!(pick(&["ASIO4ALL v2"]).as_deref(), Some("ASIO4ALL v2"));
-        assert_eq!(pick(&["Generic Low Latency ASIO Driver", "FlexASIO"]), None);
-        assert_eq!(pick(&["Realtek ASIO"]), None);
+        assert_eq!(
+            pick(&["ASIO4ALL v2", "FL Studio ASIO", "FlexASIO"]).as_deref(),
+            Some("FlexASIO")
+        );
+        assert_eq!(
+            pick(&["FlexASIO", "Focusrite USB ASIO"]).as_deref(),
+            Some("Focusrite USB ASIO")
+        );
+        assert_eq!(pick(&["Generic Low Latency ASIO Driver"]), None);
         assert_eq!(pick(&[]), None);
     }
 

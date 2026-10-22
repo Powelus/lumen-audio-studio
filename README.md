@@ -70,3 +70,7 @@ the same licence.
 
 Windows builds include ASIO support made with Steinberg's ASIO SDK
 (github.com/audiosdk/asio), used under its GPLv3 licence option.
+
+Windows builds also bundle the installer of FlexASIO (github.com/dechamps/FlexASIO,
+MIT licence, licence text in `drivers/FlexASIO-LICENSE.txt`), a free ASIO driver over
+Windows audio that Settings > Audio can install for you.
