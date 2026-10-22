@@ -1167,7 +1167,21 @@ fn settings_theme_and_windows_are_kept_after_a_restart() {
     h.menu(&["Options", "Settings..."]);
     h.run(3);
     assert!(!h.app.settings.count_in);
-    let cb = h.get("Count in one bar before recording");
+    // sections above it (FlexASIO on Windows) can push it below the window: scroll to it
+    let win = h
+        .find_all("Settings")
+        .into_iter()
+        .find(|n| n.role == eframe::egui::accesskit::Role::Window)
+        .map(|n| n.rect)
+        .unwrap();
+    let mut cb = h.get("Count in one bar before recording");
+    for _ in 0..30 {
+        if win.contains_rect(cb.rect) {
+            break;
+        }
+        h.wheel_at(win.center(), -120.0);
+        cb = h.get("Count in one bar before recording");
+    }
     h.click_at(cb.rect.center());
     assert!(h.app.settings.count_in, "the box is ticked");
     h.app.shell.open.settings = false;
