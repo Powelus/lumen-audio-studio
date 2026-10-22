@@ -841,3 +841,72 @@ fn windows_shrink_to_fit_when_the_interface_is_made_bigger() {
         );
     }
 }
+
+/// Open the quick search with Ctrl+K, type `q` and press Enter.
+fn quick(h: &mut Harness, q: &str) {
+    use eframe::egui::{Key, Modifiers};
+    h.key_with(Key::K, Modifiers::COMMAND);
+    assert!(h.app.wf.palette.open, "Ctrl+K opens the quick search");
+    h.type_text(q);
+    h.key(Key::Enter);
+    assert!(!h.app.wf.palette.open, "Enter runs and closes");
+}
+
+#[test]
+fn quick_search_runs_each_kind_of_result() {
+    let mut h = Harness::demo();
+    h.app.shell.open.mixer = false;
+    // an instrument: a new channel, opened
+    let n = h.project().channels.len();
+    quick(&mut h, "Add Vortex");
+    assert_eq!(h.project().channels.len(), n + 1);
+    assert_eq!(h.project().channels[n].plugin_id, "vortex");
+    assert_eq!(h.app.bound.map(|b| b.channel()), Some(n));
+    // an effect: on the selected insert, and the mixer opens
+    let ins = h.app.project.mixer_state.selected;
+    let before = h.project().mixer[ins].slots.iter().flatten().count();
+    quick(&mut h, "Reverb");
+    assert_eq!(
+        h.project().mixer[ins].slots.iter().flatten().count(),
+        before + 1
+    );
+    assert!(h.app.shell.open.mixer);
+    // a window
+    h.app.shell.open.roll = false;
+    quick(&mut h, "Piano roll");
+    assert!(h.app.shell.open.roll, "the piano roll opens");
+    // a factory sample: a new channel
+    let n = h.project().channels.len();
+    quick(&mut h, "Kick Deep");
+    assert_eq!(h.project().channels.len(), n + 1);
+    // an action
+    let p = h.project().patterns.len();
+    quick(&mut h, "New pattern");
+    assert_eq!(h.project().patterns.len(), p + 1);
+}
+
+#[test]
+fn a_preset_from_quick_search_never_turns_a_channel_into_another_synth() {
+    let mut h = Harness::demo();
+    h.app.add_channel("polaris");
+    let pol = h.project().channels.len() - 1;
+    h.app.open_channel(pol);
+    h.run(3);
+    let before = h.project().channels[pol].state.clone();
+    // a Mist preset, while a Polaris channel is open
+    let k = crate::app::index(crate::audio::Instrument::Mist);
+    let name = h.app.entries[k][1].name.clone();
+    quick(&mut h, &name);
+    h.run(3);
+    let after = &h.project().channels[pol];
+    assert_eq!(after.plugin_id, "polaris");
+    assert_eq!(after.state, before, "the Polaris channel keeps its sound");
+    // the preset went to a Mist channel, which is open
+    let b = h.app.bound.expect("a channel is open").channel();
+    assert_eq!(
+        h.project().channels[b].plugin_id,
+        "mist",
+        "a Mist channel has the preset"
+    );
+    assert_eq!(preset_title(&h), name);
+}

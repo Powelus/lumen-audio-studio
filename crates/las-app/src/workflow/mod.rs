@@ -257,8 +257,11 @@ impl App {
                     .hint("on the selected insert"),
             );
         }
+        // Polaris's list is that of the face last opened (Monolith, Zenith, TriOsc...)
+        let face = las_dsp::presets::bank(&self.face_bank)
+            .map_or_else(|| "Polaris".to_string(), |b| b.name.clone());
         for (k, list) in self.entries.iter().enumerate() {
-            let inst = ["Facet", "Mist", "Polaris"][k];
+            let inst = ["Facet", "Mist", face.as_str()][k];
             for (i, e) in list.iter().enumerate().skip(1) {
                 items.push(Item::new(e.name.clone(), "Preset", Cmd::Preset(k, i)).hint(inst));
             }
@@ -475,9 +478,41 @@ impl App {
                     crate::audio::Instrument::Mist,
                     crate::audio::Instrument::Polaris,
                 ][k.min(2)];
-                self.load_preset(inst, i);
-                self.switch(inst);
-                self.shell.open.synth = true;
+                // the synth the preset is for (Polaris's list is the face last opened)
+                let plugin = ["facet", "mist", self.face_bank.as_str()][k.min(2)].to_string();
+                let name = self.entries[k.min(2)].get(i).map(|e| e.name.clone());
+                if loaded {
+                    // into the open channel when it is that synth, else into a new
+                    // channel of it: never into a channel of another synth
+                    let open = self.bound.and_then(|b| match b {
+                        crate::inst::Bound::Synth(c) => Some(c),
+                        _ => None,
+                    });
+                    let fits = open.filter(|&c| {
+                        self.project
+                            .loaded
+                            .as_ref()
+                            .and_then(|l| l.project.channels.get(c))
+                            .is_some_and(|ch| ch.plugin_id == plugin)
+                    });
+                    let ch = match fits {
+                        Some(c) => c,
+                        None => {
+                            self.add_channel(&plugin);
+                            self.project.channel
+                        }
+                    };
+                    self.open_channel(ch);
+                    // opening may have rebuilt the list: find the preset by its name
+                    let at = name
+                        .and_then(|n| self.entries[k.min(2)].iter().position(|e| e.name == n))
+                        .unwrap_or(i);
+                    self.load_preset(inst, at);
+                } else {
+                    self.load_preset(inst, i);
+                    self.switch(inst);
+                    self.shell.open.synth = true;
+                }
             }
             Cmd::Sample(id, name) if loaded => self.add_factory_channel(&id, &name),
             Cmd::Recent(p) => {

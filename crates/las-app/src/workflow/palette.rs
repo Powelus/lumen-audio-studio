@@ -142,8 +142,23 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
     if qi < q.len() {
         return None;
     }
+    // the name typed in full wins, then a name it starts, then one it is part of
+    // (the letters picked one by one can otherwise score higher over word starts)
+    let (qs, ts): (String, String) = (
+        q.iter().collect(),
+        t.iter().filter(|c| !c.is_whitespace()).collect(),
+    );
+    let whole = if ts == qs {
+        1000
+    } else if ts.starts_with(&qs) {
+        300
+    } else if ts.contains(&qs) {
+        150
+    } else {
+        0
+    };
     // shorter texts and early matches win ties
-    Some(s * 4 - t.len() as i32 / 4 - last.unwrap_or(0) as i32 / 8)
+    Some(whole + s * 4 - t.len() as i32 / 4 - last.unwrap_or(0) as i32 / 8)
 }
 
 /// The entries matching `query`, best first (all of them, in order, for no query).
@@ -184,6 +199,18 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_typed_in_full_comes_first() {
+        let items = vec![
+            Item::new("Reverse Bloom", "Preset", Cmd::Demo),
+            Item::new("Reverb", "Effect", Cmd::Demo),
+            Item::new("Hall Reverb", "Effect", Cmd::Demo),
+        ];
+        assert_eq!(search(&items, "Reverb", 3)[0], 1);
+        assert_eq!(search(&items, "reverb", 3)[0], 1);
+        assert_eq!(search(&items, "hall rev", 3)[0], 2);
+    }
 
     #[test]
     fn letters_in_order_match_and_others_do_not() {
