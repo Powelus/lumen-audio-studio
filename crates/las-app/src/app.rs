@@ -311,6 +311,7 @@ impl App {
                 match w {
                     "rack" => o.rack = false,
                     "playlist" => o.playlist = false,
+                    "mixer" => o.mixer = false,
                     "browser" => app.shell.browser = false,
                     _ => {}
                 }
@@ -320,6 +321,14 @@ impl App {
         // silently, for screenshots on machines without sound
         if std::env::args().any(|a| a == "--demo-song") {
             app.open_demo();
+        }
+        // `--pattern 2` shows that pattern (in the rack and piano roll)
+        if let Some(n) = std::env::args()
+            .skip_while(|a| a != "--pattern")
+            .nth(1)
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            app.project.pattern = n;
         }
         // `--channel 1` opens that channel's instrument window (after the demo song, so
         // it is that song's channel); `--channel-tab envelope` picks the tab of a
