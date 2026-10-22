@@ -2,6 +2,14 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.59
+
+Channel settings, a sample editor and slicer, and arranging tools.
+
+- Channel settings: the sampler has Sample, Envelope, Misc and Arp tabs with start, pitch, root key, loop, reverse, draggable volume and filter envelopes, and an arpeggiator with chord presets. Every channel gets Arp from its right-click menu in the rack. A note's release now changes how long it fades out. Mod wheel, pitch bend and aftertouch reach the selected channel, Weave included. Nebula drive, width and detune can be automated, and every macro has automation and MIDI link menus. Instrument windows fit a 720p screen and scroll.
+- Sample editor and slicer: an Edison-style editor with a zoomable waveform, trim, delete, silence, fades, normalize, reverse, gain, undo and redo, preview and save as WAV; the original file is never changed. Slice to new channel finds the beats with an adjustable sensitivity, puts one slice on each key from middle C and makes a pattern that replays the loop. The tempo of a loop is detected, and the audio clip channel window shows its waveform.
+- Arranging: drag on the ruler to set the song loop (Loop button, Ctrl+Shift+L). Markers can be dragged, jumped to, renamed and deleted, with Alt+Left and Alt+Right to move between them. Clips get Make unique, Rename, Split by channel and select all alike, and patterns get Clone, Rename and Delete. Make automation clips from synth knobs, the tempo and a channel's level, pan and pitch, with FL curve types, tension handles and an LFO tool. Tempo automation is followed in playback and export, and Ctrl+Shift+F fits the song to the window.
+
 ## 0.2.0-alpha.58
 
 Speed, editing, the rack and mixer, and audio and MIDI.
