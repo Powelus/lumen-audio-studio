@@ -2,6 +2,15 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.58
+
+Speed, editing, the rack and mixer, and audio and MIDI.
+
+- Speed: audio is decoded once and kept in memory. Silent instruments, CLAP and VST3 plugins and mixer inserts sleep until they are needed again; turn this off with the Smart disable toggle in their right-click menus. The window no longer redraws all the time. Dragging audio onto the playlist lights the place it will land, and audio clips show their waveforms.
+- Piano roll: a Paint tool, an FL-style Draw tool, Ctrl+B to duplicate, Ctrl+D to deselect, copy and paste, arrow keys move notes, double-click a note for its properties, velocity, pan, fine pitch and release lanes, Ctrl+wheel zoom, and a clickable keyboard. Playlist: a picker panel, a single click places a clip, a Paint tool, trim from the left edge, Ctrl+B, and track colour, solo, rename, insert and delete.
+- Rack and mixer: a graph editor, patterns of any length, channel groups, an insert picker box, Alt+click to solo, and drag presets and samples onto channels. Each insert has a 3-band EQ, polarity and L/R swap; drag effects to reorder them, save and load effect chains, and the meters have peak hold and clip lights. Route the selected channel to an insert with Ctrl+L.
+- Audio and MIDI: device, sample rate and buffer settings with the latency shown and a test sound, a choice of MIDI input, note recording with count-in and quantize, Link to MIDI controller, export each mixer track as its own file, and audio clip fades, gain, reverse, normalize, pitch and stretch.
+
 ## 0.2.0-alpha.57
 
 Working the way FL Studio does.
