@@ -71,6 +71,8 @@ pub struct ProjectState {
     pub mixer_state: mixer::MixerState,
     /// The automation clip whose editor is open, and its state.
     pub open_auto: Option<String>,
+    /// The piano roll was asked for (a pattern clip was double clicked).
+    pub want_roll: bool,
     pub auto_state: AutoState,
     /// Where "Play song" starts, in ticks.
     pub start_tick: f64,
@@ -87,6 +89,8 @@ pub struct ProjectState {
     last_edit: Option<(String, std::time::Instant)>,
     /// The player no longer matches the project and is rebuilt when things are quiet.
     stale: bool,
+    /// Count in (beats, tempo) before the player that is being built starts.
+    pub count_in: Option<(u32, f64)>,
 }
 
 impl ProjectState {
@@ -186,6 +190,17 @@ impl ProjectState {
                     self.stale = true;
                 }
                 PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
+                PlEdit::ChoosePattern(id) => {
+                    if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
+                        self.pattern = i;
+                    }
+                }
+                PlEdit::OpenPattern(id) => {
+                    if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
+                        self.pattern = i;
+                        self.want_roll = true;
+                    }
+                }
                 PlEdit::AskRenameTrack(t) => {
                     let name = l
                         .project
@@ -516,7 +531,12 @@ impl App {
             .filter(|id| !self.project.playlist.waves.contains_key(id))
             .collect();
         if !missing.is_empty() {
-            let mut lib = las_engine::library::Library::new(22_050.0, &l.samples);
+            // at the rate the player uses, so the outline reuses the audio it decodes
+            let rate = self
+                .audio
+                .as_ref()
+                .map_or(44_100.0, |a| a.sample_rate as f64);
+            let mut lib = las_engine::library::Library::new(rate, &l.samples);
             for id in missing {
                 let wave = lib.get(&id).map_or_else(
                     || playlist::Wave {
@@ -529,14 +549,31 @@ impl App {
             }
         }
         ui.horizontal(|ui| {
-            for (t, name) in [
-                (playlist::Tool::Draw, "Draw"),
-                (playlist::Tool::Select, "Select"),
-                (playlist::Tool::Slice, "Slice"),
-                (playlist::Tool::Mute, "Mute"),
-                (playlist::Tool::Delete, "Delete"),
+            ui.toggle_value(&mut self.project.playlist.show_picker, "Picker")
+                .on_hover_text("Show or hide the list of patterns, audio clips and automation clips");
+            ui.separator();
+            for (t, name, tip) in [
+                (
+                    playlist::Tool::Draw,
+                    "Draw",
+                    "Click to place the picked clip, drag a clip to move it, drag an edge to resize it, Shift+drag to copy, right click to delete",
+                ),
+                (
+                    playlist::Tool::Paint,
+                    "Paint",
+                    "Drag along a track to place the picked clip again and again",
+                ),
+                (
+                    playlist::Tool::Select,
+                    "Select",
+                    "Drag a box to select clips, then drag them together",
+                ),
+                (playlist::Tool::Slice, "Slice", "Click a clip to cut it in two at the grid line"),
+                (playlist::Tool::Mute, "Mute", "Click a clip to mute or unmute it"),
+                (playlist::Tool::Delete, "Delete", "Click a clip to delete it"),
             ] {
-                ui.selectable_value(&mut self.project.playlist.tool, t, name);
+                ui.selectable_value(&mut self.project.playlist.tool, t, name)
+                    .on_hover_text(tip);
             }
             ui.separator();
             ui.label("Snap");
@@ -549,7 +586,8 @@ impl App {
                     }
                 });
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false));
+            ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false))
+                .on_hover_text("Ctrl+wheel zooms around the pointer");
             ui.label("Height");
             ui.add(egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
                 .on_hover_text("The height of the playlist's tracks");
@@ -562,7 +600,7 @@ impl App {
                 self.project.playlist.zoom = playlist::fit_zoom(&project, w);
             }
             ui.label(
-                RichText::new("Double click places the pattern, drag moves, right click for markers, loops and clip options, click the ruler to set the start. Drop a WAV file here for an audio clip.")
+                RichText::new("Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Right click the ruler for markers and loops. Drop a sound file here for an audio clip.")
                     .weak()
                     .size(11.0),
             );
@@ -590,12 +628,26 @@ impl App {
                 ui.selectable_value(&mut self.project.channel, i, &c.name);
             }
             ui.separator();
-            for (t, name) in [
-                (roll::Tool::Draw, "Draw"),
-                (roll::Tool::Select, "Select"),
-                (roll::Tool::Delete, "Delete"),
+            for (t, name, tip) in [
+                (
+                    roll::Tool::Draw,
+                    "Draw",
+                    "Click to add a note (with the last length used), drag a note to move it, drag its right edge to resize it, Shift+drag to copy it, right click to delete",
+                ),
+                (
+                    roll::Tool::Paint,
+                    "Paint",
+                    "Drag to paint a note on every grid step you pass (the snap sets the length)",
+                ),
+                (
+                    roll::Tool::Select,
+                    "Select",
+                    "Drag a box to select notes, then drag them together; Shift adds to the selection",
+                ),
+                (roll::Tool::Delete, "Delete", "Click or drag over notes to delete them"),
             ] {
-                ui.selectable_value(&mut self.project.roll.tool, t, name);
+                ui.selectable_value(&mut self.project.roll.tool, t, name)
+                    .on_hover_text(tip);
             }
             ui.separator();
             ui.label("Snap");
@@ -715,7 +767,8 @@ impl App {
             .response
             .on_hover_text("Each click draws this chord on the key clicked");
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false));
+            ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false))
+                .on_hover_text("Ctrl+wheel zooms in time around the pointer, Alt+wheel zooms the keys");
         });
         let edits = roll::draw(
             ui,
@@ -740,11 +793,27 @@ impl App {
         };
         self.stop_project();
         self.project.looping = matches!(mode, PlayMode::Pattern(_));
+        let rec = self.shell.record;
+        let s = &self.settings;
+        self.project.count_in = None;
+        if rec && s.count_in {
+            if let Some(l) = &self.project.loaded {
+                let p = &l.project;
+                self.project.count_in = Some((p.time_sig.0.clamp(1, 16), p.bpm.max(1.0)));
+            }
+        }
         self.project.start(mode, Start::At(from), rate);
-        if self.shell.record {
+        if rec && self.settings.record_notes {
+            self.begin_note_take(from);
+        }
+        if rec && self.settings.record_audio {
             if self.shell.recorder.is_none() {
-                match crate::record::Recorder::open() {
+                match crate::record::Recorder::open(&self.settings.audio.input) {
                     Ok(r) => self.shell.recorder = Some(r),
+                    // recording notes only is fine: just say so
+                    Err(e) if self.settings.record_notes => {
+                        self.shell.status = format!("Recording notes only ({e})");
+                    }
                     Err(e) => self.project.error = Some(format!("Recording: {e}")),
                 }
             }
@@ -753,6 +822,8 @@ impl App {
                 self.shell.record_from = if self.project.looping { 0.0 } else { from };
                 self.shell.status = "Recording...".into();
             }
+        } else if rec {
+            self.shell.status = "Recording notes: play your MIDI or computer keyboard".into();
         }
     }
 
@@ -760,6 +831,7 @@ impl App {
         if self.project.has_player {
             self.send(Command::PlayerStop);
         }
+        self.end_note_take();
         let take = self
             .shell
             .recorder
@@ -833,7 +905,14 @@ impl App {
                     a.send(Command::Metronome(metro));
                     match from {
                         Start::Ready => {}
-                        Start::At(t) => a.send(Command::PlayerPlay(t)),
+                        Start::At(t) => match self.project.count_in.take() {
+                            Some((beats, bpm)) => a.send(Command::CountIn {
+                                beats,
+                                bpm,
+                                from: t,
+                            }),
+                            None => a.send(Command::PlayerPlay(t)),
+                        },
                         Start::Resume => {
                             if a.meters.playing() {
                                 let t = a.meters.position();

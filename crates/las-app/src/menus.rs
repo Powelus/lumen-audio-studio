@@ -142,8 +142,7 @@ pub fn import_wav(
     name: &str,
     bytes: Vec<u8>,
 ) -> Result<usize, String> {
-    let audio =
-        las_engine::library::decode_wav(&bytes).ok_or("not a WAV file this app can read")?;
+    let (audio, bytes) = las_engine::library::import_audio(bytes)?;
     let id = las_project::create::uid("smp_");
     p.samples.push(las_project::SampleRef {
         id: id.clone(),
@@ -181,8 +180,7 @@ pub fn import_audio_clip(
     at: f64,
     track: usize,
 ) -> Result<usize, String> {
-    let audio =
-        las_engine::library::decode_wav(&bytes).ok_or("not a WAV file this app can read")?;
+    let (audio, bytes) = las_engine::library::import_audio(bytes)?;
     let seconds = audio.frames() as f64 / audio.sample_rate;
     let id = las_project::create::uid("smp_");
     p.samples.push(las_project::SampleRef {
@@ -243,7 +241,7 @@ impl App {
     /// Pick WAV files and add each as a sampler channel.
     pub(crate) fn import_dialog(&mut self) {
         let files = rfd::FileDialog::new()
-            .add_filter("WAV audio", &["wav", "wave"])
+            .add_filter("Audio", &las_engine::library::AUDIO_EXTENSIONS)
             .set_title("Import samples")
             .pick_files();
         for f in files.into_iter().flatten() {
@@ -272,7 +270,7 @@ impl App {
                 self.project.channel = at;
                 self.project.error = None;
             }
-            Err(e) => self.project.error = Some(format!("{}: {e}", path.display())),
+            Err(e) => self.shell.notice = Some(format!("{}: {e}", path.display())),
         }
     }
 
@@ -297,7 +295,7 @@ impl App {
                 self.project.channel = ch;
                 self.project.error = None;
             }
-            Err(e) => self.project.error = Some(format!("{}: {e}", path.display())),
+            Err(e) => self.shell.notice = Some(format!("{}: {e}", path.display())),
         }
     }
 

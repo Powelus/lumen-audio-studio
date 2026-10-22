@@ -5,7 +5,7 @@
 
 use crate::app::App;
 use crate::audio::{Command, Instrument, Preview};
-use crate::mixer;
+use crate::mixer::{self, MixEdit};
 use crate::steps::{self, StepState};
 use crate::theme::{self, pal};
 use crate::widgets::{knob, meter};
@@ -41,6 +41,330 @@ pub struct Windows {
     pub analyser: bool,
 }
 
+/// Something being dragged from the browser: a file of the user's, or a sample of
+/// the factory kit (its id and name).
+#[derive(Clone, Debug)]
+pub enum Dragged {
+    File(std::path::PathBuf),
+    Factory(&'static str, &'static str),
+    /// A preset of the browser's Presets tab: the synth it is for, and its name.
+    Preset(Instrument, String),
+}
+
+impl Dragged {
+    pub fn name(&self) -> String {
+        match self {
+            Dragged::File(p) => p
+                .file_stem()
+                .map_or("Sample".into(), |s| s.to_string_lossy().into_owned()),
+            Dragged::Factory(_, n) => (*n).to_string(),
+            Dragged::Preset(_, n) => n.clone(),
+        }
+    }
+}
+
+/// Give sampler channel `ch` the sample `id`, named after it.
+pub fn set_channel_sample(p: &mut las_project::Project, ch: usize, id: &str, name: &str) {
+    if let Some(c) = p.channels.get_mut(ch) {
+        c.sample_id = Some(id.to_string());
+        c.name = name.to_string();
+    }
+}
+
+/// A file name for an insert's chain: its name, or "Insert n".
+fn mixer_file_name(t: &las_project::MixerTrack, i: usize) -> String {
+    let n = if t.name.trim().is_empty() {
+        format!("Insert {i}")
+    } else {
+        t.name.trim().to_string()
+    };
+    n.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+impl App {
+    /// Something let go over the window: on a playlist track it becomes an audio clip
+    /// there (as in FL Studio), anywhere else a new sampler channel.
+    pub(crate) fn drop_item(&mut self, item: Dragged, at: Option<egui::Pos2>) {
+        if self.project.loaded.is_none() {
+            return;
+        }
+        // on a channel of the rack: a preset loads into it, a sample replaces a sampler's
+        let row = at
+            .filter(|_| self.shell.open.rack)
+            .and_then(|pos| self.shell.steps.row_at(pos));
+        if let Dragged::Preset(inst, name) = &item {
+            match row {
+                Some(ch) => self.drop_preset(ch, *inst, name),
+                None => {
+                    self.shell.notice = Some(
+                        "Drop a preset on a channel in the channel rack to load it there.".into(),
+                    )
+                }
+            }
+            return;
+        }
+        if let Dragged::File(p) = &item {
+            if !las_engine::library::is_audio_file(&p.to_string_lossy()) {
+                self.shell.notice = Some(format!(
+                    "{} is not an audio file this app can read. WAV, MP3, FLAC, OGG, AIFF and M4A work.",
+                    p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
+                ));
+                return;
+            }
+        }
+        if let Some(ch) = row {
+            if self.replace_sample(ch, &item) {
+                return;
+            }
+        }
+        let place = self
+            .shell
+            .open
+            .playlist
+            .then_some(())
+            .and(self.project.playlist.area)
+            .zip(at)
+            .and_then(|(a, pos)| a.place(pos));
+        match (item, place) {
+            (Dragged::File(p), Some((tick, track))) => self.import_clip_path(&p, tick, track),
+            (Dragged::File(p), None) => self.import_path(&p),
+            (Dragged::Factory(id, name), Some((tick, track))) => {
+                let Some(a) = las_engine::factory::render_factory(id, 44_100.0) else {
+                    return;
+                };
+                let bytes = las_engine::library::encode_wav(&a);
+                let mut result = Ok(0);
+                self.project.modify_with_samples(true, |p, samples| {
+                    result = crate::menus::import_audio_clip(p, samples, name, bytes, tick, track);
+                });
+                match result {
+                    Ok(ch) => self.project.channel = ch,
+                    Err(e) => self.shell.notice = Some(e),
+                }
+            }
+            (Dragged::Factory(id, name), None) => self.add_factory_channel(id, name),
+            (Dragged::Preset(..), _) => {}
+        }
+    }
+
+    /// While a sound is dragged over the playlist (from the browser or from the
+    /// system), the place it would land on is lit: the snapped start on the track
+    /// under the pointer, a bar long.
+    pub(crate) fn drop_highlight(&self, ctx: &egui::Context) {
+        let from_os = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if !from_os
+            && !egui::DragAndDrop::payload::<Dragged>(ctx)
+                .is_some_and(|d| !matches!(*d, Dragged::Preset(..)))
+        {
+            return;
+        }
+        let Some(area) = self
+            .project
+            .playlist
+            .area
+            .filter(|_| self.shell.open.playlist)
+        else {
+            return;
+        };
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos())) else {
+            return;
+        };
+        let Some((tick, track)) = area.place(pos) else {
+            return;
+        };
+        let x = area.left + tick as f32 * area.zoom;
+        let y = area.top + track as f32 * area.row;
+        let bar = f64::from(las_project::PPQ) * 4.0;
+        let w = (bar as f32 * area.zoom).max(24.0);
+        let r = egui::Rect::from_min_size(egui::pos2(x, y), vec2(w, area.row)).intersect(area.rect);
+        let accent = theme::pal().accent;
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("drop-highlight"),
+        ));
+        painter.rect_filled(r, 3.0, accent.gamma_multiply(0.25));
+        painter.rect_stroke(
+            r,
+            3.0,
+            egui::Stroke::new(1.5, accent),
+            egui::StrokeKind::Inside,
+        );
+        ctx.request_repaint();
+    }
+
+    /// Load the preset `name` of `inst` into channel `ch`, when that is its synth.
+    fn drop_preset(&mut self, ch: usize, inst: Instrument, name: &str) {
+        let Some(c) = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(ch))
+        else {
+            return;
+        };
+        let cname = c.name.clone();
+        if crate::inst::panel_for(&c.plugin_id) != Some(inst) {
+            self.shell.notice = Some(format!(
+                "{name} is a preset for another instrument than {cname}'s. Drop it on a channel of the same synth."
+            ));
+            return;
+        }
+        self.open_channel(ch);
+        let k = crate::app::index(inst);
+        match self.entries[k].iter().position(|e| e.name == name) {
+            Some(i) => {
+                self.load_preset(inst, i);
+                self.sync_bound();
+            }
+            None => {
+                self.shell.notice = Some(format!("{cname}'s synth has no preset called {name}."))
+            }
+        }
+    }
+
+    /// Put a dropped sample in sampler channel `ch` in place of its own. Returns
+    /// whether it did (false when the channel is not a sampler).
+    fn replace_sample(&mut self, ch: usize, item: &Dragged) -> bool {
+        let is_sampler = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(ch))
+            .is_some_and(|c| c.plugin_id == "sampler");
+        if !is_sampler {
+            return false;
+        }
+        match item {
+            Dragged::Factory(id, name) => {
+                let (id, name) = (*id, *name);
+                self.project.modify(true, |p| {
+                    if !p.samples.iter().any(|s| s.id == id) {
+                        p.samples.push(las_project::SampleRef {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            factory: Some(true),
+                            ..Default::default()
+                        });
+                    }
+                    set_channel_sample(p, ch, id, name);
+                });
+            }
+            Dragged::File(path) => {
+                let name = item.name();
+                let bytes = match std::fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.shell.notice = Some(format!("{}: {e}", path.display()));
+                        return true;
+                    }
+                };
+                let (audio, bytes) = match las_engine::library::import_audio(bytes) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        self.shell.notice = Some(format!("{}: {e}", path.display()));
+                        return true;
+                    }
+                };
+                self.project.modify_with_samples(true, |p, samples| {
+                    let id = las_project::create::uid("smp_");
+                    p.samples.push(las_project::SampleRef {
+                        id: id.clone(),
+                        name: name.clone(),
+                        duration: Some(audio.frames() as f64 / audio.sample_rate),
+                        ..Default::default()
+                    });
+                    samples.insert(
+                        id.clone(),
+                        las_project::Sample {
+                            name: name.clone(),
+                            mime: "audio/wav".into(),
+                            data: bytes,
+                        },
+                    );
+                    set_channel_sample(p, ch, &id, &name);
+                });
+            }
+            Dragged::Preset(..) => return false,
+        }
+        self.project.channel = ch;
+        true
+    }
+
+    /// While something is dragged from the browser, its name follows the pointer.
+    pub(crate) fn drag_label(&self, ctx: &egui::Context) {
+        self.drop_highlight(ctx);
+        let Some(item) = egui::DragAndDrop::payload::<Dragged>(ctx) else {
+            return;
+        };
+        let Some(pos) = ctx.pointer_hover_pos() else {
+            return;
+        };
+        egui::Area::new(egui::Id::unique("drag-label"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(pos + vec2(14.0, 10.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(format!("\u{266A} {}", item.name()));
+                    ui.label(
+                        RichText::new(
+                            if matches!(*item, Dragged::Preset(..)) {
+                                "Drop on a channel of the same synth in the channel rack"
+                            } else {
+                                "Drop on the playlist for a clip, on a sampler channel to replace its sample, anywhere else for a new channel"
+                            },
+                        )
+                        .size(11.0)
+                        .weak(),
+                    );
+                });
+            });
+    }
+
+    /// A message the user should see, with an OK button.
+    pub(crate) fn notice_window(&mut self, ctx: &egui::Context) {
+        let Some(msg) = self.shell.notice.clone() else {
+            return;
+        };
+        let mut ok = false;
+        egui::Window::new("Something went wrong")
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.label(&msg);
+                ui.add_space(6.0);
+                ok = ui.button("OK").clicked();
+            });
+        if ok {
+            self.shell.notice = None;
+        }
+    }
+}
+
+impl Windows {
+    /// Close the windows that were open in `before` and are closed in `after`.
+    pub fn close_from(&mut self, before: &Windows, after: &Windows) {
+        macro_rules! each {
+            ($($f:ident),*) => {$(
+                if before.$f && !after.$f {
+                    self.$f = false;
+                }
+            )*};
+        }
+        each!(rack, playlist, roll, mixer, synth, export, about, keys, history, settings, analyser);
+    }
+}
+
 /// What the export window holds.
 pub struct Export {
     pub path: String,
@@ -49,8 +373,15 @@ pub struct Export {
     pub pattern_only: bool,
     /// Render only the song loop (when there is one).
     pub loop_only: bool,
+    /// Each mixer track as its own file (stems), in the folder of `path`.
+    pub stems: bool,
     working: Option<Receiver<Result<String, String>>>,
     pub message: Option<Result<String, String>>,
+    /// How far the render has come, when it started, and the song's tempo and beats
+    /// per bar (for showing bars).
+    progress: Option<std::sync::Arc<las_engine::render::Progress>>,
+    started: Option<Instant>,
+    tempo: (f64, f64),
 }
 
 /// The formats the export window offers: label, FLAC, bits.
@@ -97,6 +428,10 @@ pub struct Shell {
     /// An action waiting for an answer about unsaved changes.
     pub pending: Option<crate::menus::Action>,
     /// The project File > Open recent is to open.
+    /// Bring the instrument window to the front on the next frame.
+    pub raise_synth: bool,
+    /// A message shown in a window until the user closes it.
+    pub notice: Option<String>,
     pub recent_target: Option<String>,
     placed: bool,
 }
@@ -141,12 +476,18 @@ impl Shell {
                 normalize: false,
                 pattern_only: false,
                 loop_only: false,
+                stems: false,
                 working: None,
                 message: None,
+                progress: None,
+                started: None,
+                tempo: (120.0, 4.0),
             },
             status: "Ready".into(),
             pending: None,
             recent_target: None,
+            raise_synth: false,
+            notice: None,
             placed: false,
         }
     }
@@ -464,15 +805,40 @@ impl App {
                 self.send(Command::PreviewStop);
             }
             let rec = self.shell.record;
-            if icon_button(
+            let what = match (self.settings.record_notes, self.settings.record_audio) {
+                (true, true) => "notes and audio",
+                (true, false) => "notes",
+                (false, true) => "audio",
+                (false, false) => "nothing (right click to choose)",
+            };
+            let r = icon_button(
                 ui,
                 Icon::Record,
                 rec,
-                "Record: play to capture the audio input",
-            )
-            .clicked()
-            {
+                &format!(
+                    "Record {what}: switch on, then press Play. Notes go into the current pattern on the selected channel.\nRight click for recording options."
+                ),
+            );
+            if r.clicked() {
                 self.shell.record = !rec;
+            }
+            let mut changed = false;
+            r.context_menu(|ui| {
+                let s = &mut self.settings;
+                ui.label(RichText::new("Recording").strong());
+                changed |= ui.checkbox(&mut s.record_notes, "Notes (MIDI and computer keyboard)").changed();
+                changed |= ui.checkbox(&mut s.record_audio, "Audio input").changed();
+                ui.separator();
+                changed |= ui
+                    .checkbox(&mut s.quantize_recording, "Quantize notes to the piano roll's snap")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut s.count_in, "Count in one bar")
+                    .on_hover_text("The metronome clicks one bar before recording starts")
+                    .changed();
+            });
+            if changed {
+                self.settings.save();
             }
             let metro = self.shell.metronome;
             if icon_button(ui, Icon::Metronome, metro, "Metronome").clicked() {
@@ -651,11 +1017,36 @@ impl App {
                         ))
                         .color(if load > 0.7 { p.hot } else { p.muted })
                     }
-                    None => {
-                        RichText::new(format!("No sound: {}", self.status_audio())).color(p.hot)
-                    }
+                    None => RichText::new("No sound: click to set up audio").color(p.hot),
                 };
-                ui.label(audio.size(12.0));
+                let tip = if self.audio.is_some() {
+                    "Click to choose the audio device in Settings".to_string()
+                } else {
+                    format!(
+                        "The audio output could not be opened: {}\nClick to choose a device in Settings.",
+                        self.status_audio()
+                    )
+                };
+                let r = ui
+                    .add(egui::Label::new(audio.size(12.0)).sense(Sense::click()))
+                    .on_hover_text(tip);
+                if r.clicked() {
+                    self.shell.open.settings = true;
+                }
+                if let Some(c) = self
+                    .audio
+                    .as_ref()
+                    .map(|a| a.meters.counting())
+                    .filter(|c| *c > 0)
+                {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Count-in {c}"))
+                            .size(12.0)
+                            .strong()
+                            .color(p.hot),
+                    );
+                }
                 ui.separator();
                 ui.label(
                     RichText::new(format!("Keys oct {}", self.octave))
@@ -720,8 +1111,56 @@ impl App {
                 });
                 ui.add_space(4.0);
                 self.preset_picker(ui);
+                ui.add_space(6.0);
+                self.preset_list(ui);
             }
             BrowserTab::Project => self.project_tab(ui),
+        }
+    }
+
+    /// The presets of the browser's synth, each one dragged onto a channel of that synth
+    /// to load it there (as in FL), or clicked to hear it.
+    fn preset_list(&mut self, ui: &mut Ui) {
+        let p = pal();
+        ui.label(
+            RichText::new("Drag one onto a channel of this synth in the rack")
+                .size(11.0)
+                .color(p.muted),
+        );
+        let inst = self.inst;
+        let k = crate::app::index(inst);
+        let mut pick = None;
+        egui::ScrollArea::vertical()
+            .id_salt("preset-list")
+            .show(ui, |ui| {
+                let mut shown = "";
+                for (i, e) in self.entries[k].iter().enumerate() {
+                    if !crate::presets::matches(e, &self.search) {
+                        continue;
+                    }
+                    if e.category != shown {
+                        shown = &e.category;
+                        ui.label(
+                            RichText::new(shown)
+                                .size(11.0)
+                                .strong()
+                                .color(p.accent_text),
+                        );
+                    }
+                    let r = ui
+                        .selectable_label(self.presets[k] == i, &e.name)
+                        .interact(Sense::click_and_drag())
+                        .on_hover_text(
+                            "Click to load it. Drag it onto a channel to load it there.",
+                        );
+                    r.dnd_set_drag_payload(Dragged::Preset(inst, e.name.clone()));
+                    if r.clicked() {
+                        pick = Some(i);
+                    }
+                }
+            });
+        if let Some(i) = pick {
+            self.load_preset(inst, i);
         }
     }
 
@@ -755,9 +1194,13 @@ impl App {
                     .show(ui, |ui| {
                         for s in items {
                             ui.horizontal(|ui| {
-                                let r = ui.selectable_label(false, s.name).on_hover_text(
-                                    "Click to hear it, double click to add it as a channel",
-                                );
+                                let r = ui
+                                    .selectable_label(false, s.name)
+                                    .interact(egui::Sense::click_and_drag())
+                                    .on_hover_text(
+                                        "Click to hear it. Drag it to the playlist or the rack. Double click adds it as a channel.",
+                                    );
+                                r.dnd_set_drag_payload(Dragged::Factory(s.id, s.name));
                                 if r.double_clicked() {
                                     add = Some((s.id, s.name));
                                 } else if r.clicked() {
@@ -935,6 +1378,7 @@ impl App {
             _ => (None, None),
         };
         let mut open = self.shell.open;
+        let before = open;
         let win = |title: &str, pos: egui::Pos2, size: egui::Vec2| {
             let mut w = egui::Window::new(title)
                 .constrain_to(area)
@@ -1015,8 +1459,25 @@ impl App {
                 _ => vec2(900.0, 680.0),
             };
             let first_pos = a.min + vec2(160.0, 30.0);
-            win("Synth", first_pos, size)
-                .id(egui::Id::unique(("synth-window", face)))
+            // the window is named after the channel it shows
+            let title = self
+                .bound
+                .and_then(|b| {
+                    self.project
+                        .loaded
+                        .as_ref()?
+                        .project
+                        .channels
+                        .get(b.channel())
+                        .map(|c| c.name.clone())
+                })
+                .unwrap_or_else(|| "Instrument".into());
+            let id = egui::Id::unique(("synth-window", face));
+            if std::mem::take(&mut self.shell.raise_synth) {
+                ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
+            }
+            win(&title, first_pos, size)
+                .id(id)
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
                     Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
@@ -1068,16 +1529,22 @@ impl App {
         }
         if open.export {
             egui::Window::new("Export audio")
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.content_rect().center())
                 .open(&mut open.export)
                 .resizable(false)
                 .collapsible(false)
                 .show(ctx, |ui| self.export_window(ui));
         }
-        self.shell.open = open;
+        // only what the windows' own close buttons changed is taken back: a window
+        // opened from inside another one (the rack's "Piano roll") stays open
+        self.shell.open.close_from(&before, &open);
         self.about_window(ctx);
         self.keys_window(ctx);
         self.history_window(ctx);
         self.settings_window(ctx);
+        self.notice_window(ctx);
+        self.drag_label(ctx);
         self.analyser_window(ctx);
         self.rename_dialog(ctx);
         self.discard_dialog(ctx);
@@ -1139,6 +1606,14 @@ impl App {
         });
         drop(project);
         self.project.channel = selected;
+        if let Some(n) = out.steps {
+            let pattern = self.project.pattern;
+            self.project.modify(true, |p| {
+                if let Some(pat) = p.patterns.get_mut(pattern) {
+                    pat.length = n as f64 * f64::from(las_project::TICKS_PER_STEP);
+                }
+            });
+        }
         if let Some(c) = out.open_roll {
             self.project.channel = c;
             self.shell.open.roll = true;
@@ -1242,7 +1717,55 @@ impl App {
                 .collect(),
             _ => Vec::new(),
         };
-        let edits = mixer::draw(ui, &project, &mut self.project.mixer_state, &peaks);
+        let ch = self.project.channel;
+        let selected = project.channels.get(ch).map(|c| (ch, c.name.as_str()));
+        let mut edits = mixer::draw(
+            ui,
+            &project,
+            &mut self.project.mixer_state,
+            &peaks,
+            selected,
+        );
+        // the effects chain files
+        let mut more = Vec::new();
+        edits.retain(|e| match e {
+            MixEdit::SaveChain(i) => {
+                if let Some(t) = project.mixer.get(*i) {
+                    let file = rfd::FileDialog::new()
+                        .add_filter("Effects chain", &["json"])
+                        .set_title("Save chain")
+                        .set_file_name(format!("{}.json", mixer_file_name(t, *i)))
+                        .save_file();
+                    if let Some(f) = file {
+                        if let Err(e) = std::fs::write(&f, mixer::chain_json(t)) {
+                            self.shell.notice = Some(format!("{}: {e}", f.display()));
+                        }
+                    }
+                }
+                false
+            }
+            MixEdit::LoadChain(i) => {
+                let file = rfd::FileDialog::new()
+                    .add_filter("Effects chain", &["json"])
+                    .set_title("Load chain")
+                    .pick_file();
+                if let Some(f) = file {
+                    match std::fs::read_to_string(&f)
+                        .map_err(|e| e.to_string())
+                        .and_then(|t| mixer::parse_chain(&t))
+                    {
+                        Ok(slots) => {
+                            more.push(MixEdit::Begin);
+                            more.push(MixEdit::SetChain { insert: *i, slots });
+                        }
+                        Err(e) => self.shell.notice = Some(format!("{}: {e}", f.display())),
+                    }
+                }
+                false
+            }
+            _ => true,
+        });
+        edits.extend(more);
         drop(project);
         self.project.edit_mixer(&edits);
     }
@@ -1312,7 +1835,8 @@ impl App {
     fn export_window(&mut self, ui: &mut Ui) {
         if self.shell.export.path.is_empty() {
             if let Some(l) = &self.project.loaded {
-                self.shell.export.path = format!("{}.wav", l.path.trim_end_matches(".las"));
+                let (_, kind, _) = FORMATS[self.shell.export.format];
+                self.shell.export.path = default_export_path(&l.path, kind);
             }
         }
         // a render that has finished
@@ -1326,8 +1850,76 @@ impl App {
         }
         let busy = self.shell.export.working.is_some();
         ui.horizontal(|ui| {
-            ui.label("File");
-            ui.add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(360.0));
+            ui.label("Render");
+            ui.selectable_value(&mut self.shell.export.stems, false, "Mix (one file)")
+                .on_hover_text("Everything you hear, in one file");
+            ui.selectable_value(
+                &mut self.shell.export.stems,
+                true,
+                "Each mixer track as its own file",
+            )
+            .on_hover_text(
+                "Stems: the master and every mixer track that plays something, each in its own file, for mixing elsewhere",
+            );
+        });
+        if self.shell.export.stems {
+            let (_, kind, _) = FORMATS[self.shell.export.format];
+            let dir = stem_dir(&self.shell.export.path);
+            let name = self.export_name();
+            ui.label(
+                RichText::new(format!(
+                    "Files go in {} as \"{name} - <track name>.{kind}\".",
+                    dir.display()
+                ))
+                .weak()
+                .size(11.5),
+            );
+        }
+        ui.horizontal(|ui| {
+            ui.label("Save to");
+            ui.add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0));
+            let stems = self.shell.export.stems;
+            if stems
+                && ui
+                    .add_enabled(!busy, egui::Button::new("Choose folder..."))
+                    .on_hover_text("Pick the folder the files go in")
+                    .clicked()
+            {
+                let (_, kind, _) = FORMATS[self.shell.export.format];
+                let mut dialog = rfd::FileDialog::new().set_title("Export stems to a folder");
+                let dir = stem_dir(&self.shell.export.path);
+                if dir.is_dir() {
+                    dialog = dialog.set_directory(&dir);
+                }
+                if let Some(d) = dialog.pick_folder() {
+                    let file = format!("{}.{kind}", self.export_name());
+                    self.shell.export.path = d.join(file).to_string_lossy().into_owned();
+                }
+            }
+            if !stems
+                && ui
+                    .add_enabled(!busy, egui::Button::new("Choose..."))
+                    .on_hover_text("Pick the folder and file name")
+                    .clicked()
+            {
+                let (name, kind, _) = FORMATS[self.shell.export.format];
+                let now = std::path::PathBuf::from(&self.shell.export.path);
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Export audio")
+                    .add_filter(name, &[kind]);
+                if let Some(dir) = now.parent().filter(|d| d.is_dir()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(file) = now.file_name() {
+                    dialog = dialog.set_file_name(file.to_string_lossy());
+                }
+                if let Some(mut p) = dialog.save_file() {
+                    if p.extension().is_none() {
+                        p.set_extension(kind);
+                    }
+                    self.shell.export.path = p.to_string_lossy().into_owned();
+                }
+            }
         });
         ui.horizontal(|ui| {
             ui.label("Format");
@@ -1347,7 +1939,13 @@ impl App {
                         }
                     }
                 });
-            ui.checkbox(&mut self.shell.export.normalize, "Normalize to -0.3 dB");
+            let label = if self.shell.export.stems {
+                "Normalize each file to -0.3 dB"
+            } else {
+                "Normalize to -0.3 dB"
+            };
+            ui.checkbox(&mut self.shell.export.normalize, label)
+                .on_hover_text("Make the loudest moment reach -0.3 dB");
         });
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.shell.export.pattern_only, false, "Song");
@@ -1365,18 +1963,56 @@ impl App {
             );
         });
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new("Render")).clicked() {
-                self.start_export();
+        if ui
+            .add_enabled(
+                !busy,
+                egui::Button::new(RichText::new("Render").strong()).min_size(vec2(120.0, 30.0)),
+            )
+            .clicked()
+        {
+            self.start_export();
+        }
+        if busy {
+            if let Some(p) = &self.shell.export.progress {
+                let e = &self.shell.export;
+                let f = p.fraction();
+                ui.add(
+                    egui::ProgressBar::new(f as f32)
+                        .text(format!("{:.0}%", f * 100.0))
+                        .desired_width(ui.available_width()),
+                );
+                let total = p.total.load(std::sync::atomic::Ordering::Relaxed) as f64 / 44_100.0;
+                let done = total * f;
+                let (bpm, beats) = e.tempo;
+                let bar = |s: f64| (s * bpm / 60.0 / beats).floor() as u64 + 1;
+                let elapsed = e.started.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                let left = if f > 0.02 {
+                    format!(", about {} left", clock(elapsed / f - elapsed))
+                } else {
+                    String::new()
+                };
+                ui.label(format!(
+                    "Bar {} of {}   {} of {}{left}",
+                    bar(done).min(bar(total)),
+                    bar(total),
+                    clock(done),
+                    clock(total),
+                ));
             }
-            if busy {
-                ui.spinner();
-                ui.label("Rendering...");
-            }
-        });
+        }
         match &self.shell.export.message {
             Some(Ok(m)) => {
-                ui.label(RichText::new(m).color(pal().ok));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(m).color(pal().ok));
+                    if ui.button("Show in folder").clicked() {
+                        if self.shell.export.stems {
+                            let dir = stem_dir(&self.shell.export.path);
+                            show_in_folder(&dir.join("x").to_string_lossy());
+                        } else {
+                            show_in_folder(&self.shell.export.path);
+                        }
+                    }
+                });
             }
             Some(Err(e)) => {
                 ui.label(RichText::new(e).color(pal().hot));
@@ -1390,8 +2026,9 @@ impl App {
             return;
         };
         let (project, samples) = (l.project.clone(), l.samples.clone());
+        let name = self.export_name();
         let e = &self.shell.export;
-        let (path, normalize) = (e.path.trim().to_string(), e.normalize);
+        let (path, normalize, stems) = (e.path.trim().to_string(), e.normalize, e.stems);
         let (_, kind, bits) = FORMATS[e.format];
         let mode = if e.pattern_only {
             Mode::Pattern {
@@ -1407,31 +2044,45 @@ impl App {
             Mode::Song
         };
         let (tx, rx) = channel();
+        let progress = std::sync::Arc::new(las_engine::render::Progress::default());
+        let watch = progress.clone();
+        self.shell.export.progress = Some(progress);
+        self.shell.export.started = Some(Instant::now());
+        self.shell.export.tempo = (project.bpm.max(1.0), f64::from(project.time_sig.0.max(1)));
         std::thread::spawn(move || {
+            las_engine::render::watch_progress(Some(watch));
             let run = || -> Result<String, String> {
+                if let Some(dir) = std::path::Path::new(&path).parent() {
+                    if !dir.as_os_str().is_empty() {
+                        std::fs::create_dir_all(dir)
+                            .map_err(|e| format!("{}: {e}", dir.display()))?;
+                    }
+                }
                 let opts = RenderOptions {
                     sample_rate: 44100.0,
                     mode,
                     ..Default::default()
                 };
+                if stems {
+                    let dir = stem_dir(&path);
+                    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                    let all = las_engine::render_stems(&project, &samples, &opts)?;
+                    let files = stem_files(&name, &project, kind);
+                    let mut secs = 0.0;
+                    for (stem, file) in all.iter().zip(&files) {
+                        let to = dir.join(file);
+                        let bytes = encode(&stem.audio, normalize, kind, bits)?;
+                        std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+                        secs = stem.audio.seconds();
+                    }
+                    return Ok(format!(
+                        "{} files ({secs:.1} s each) in {}",
+                        all.len().min(files.len()),
+                        dir.display()
+                    ));
+                }
                 let r = las_engine::render_mix_with(&project, &samples, &opts)?;
-                let chans = [&r.left[..], &r.right[..]];
-                let scaled;
-                let chans: [&[f32]; 2] = if normalize {
-                    scaled = las_engine::export::normalize(&chans, -0.3);
-                    [&scaled[0], &scaled[1]]
-                } else {
-                    chans
-                };
-                let rate = r.sample_rate as u32;
-                let bytes = if kind == "flac" {
-                    las_engine::export::encode_flac(&chans, rate, bits)?
-                } else if kind == "mp3" {
-                    las_engine::export::encode_mp3(&chans, rate, bits)?
-                } else {
-                    let depth = las_engine::export::BitDepth::from_bits(bits).ok_or("bad depth")?;
-                    las_engine::export::encode_wav(&chans, rate, depth, bits == 16)
-                };
+                let bytes = encode(&r, normalize, kind, bits)?;
                 std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
                 Ok(format!("{path}: {:.1} s", r.seconds()))
             };
@@ -1442,9 +2093,193 @@ impl App {
     }
 }
 
+impl App {
+    /// The name exports are called by: the project's file name, or "Untitled".
+    pub(crate) fn export_name(&self) -> String {
+        let from_file = std::path::Path::new(&self.project.path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty());
+        from_file.unwrap_or_else(|| "Untitled".into())
+    }
+}
+
+/// A render as the bytes of a file of the chosen format.
+fn encode(
+    r: &las_engine::Rendered,
+    normalize: bool,
+    kind: &str,
+    bits: u32,
+) -> Result<Vec<u8>, String> {
+    let chans = [&r.left[..], &r.right[..]];
+    let scaled;
+    let chans: [&[f32]; 2] = if normalize {
+        scaled = las_engine::export::normalize(&chans, -0.3);
+        [&scaled[0], &scaled[1]]
+    } else {
+        chans
+    };
+    let rate = r.sample_rate as u32;
+    Ok(if kind == "flac" {
+        las_engine::export::encode_flac(&chans, rate, bits)?
+    } else if kind == "mp3" {
+        las_engine::export::encode_mp3(&chans, rate, bits)?
+    } else {
+        let depth = las_engine::export::BitDepth::from_bits(bits).ok_or("bad depth")?;
+        las_engine::export::encode_wav(&chans, rate, depth, bits == 16)
+    })
+}
+
+/// The folder stems go in: the folder of the export path (or the path itself when it
+/// is a folder).
+pub fn stem_dir(path: &str) -> std::path::PathBuf {
+    let p = std::path::PathBuf::from(path.trim());
+    if p.is_dir() {
+        return p;
+    }
+    p.parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map_or_else(|| std::path::PathBuf::from("."), |d| d.to_path_buf())
+}
+
+/// A name that is safe as a file name on every system.
+fn safe_name(s: &str) -> String {
+    let t: String = s
+        .chars()
+        .map(|c| {
+            if "/\\:*?\"<>|".contains(c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let t = t.trim().trim_end_matches('.').to_string();
+    if t.is_empty() {
+        "_".into()
+    } else {
+        t
+    }
+}
+
+/// The file names of the stems `render_stems` makes, in its order (the master, then each
+/// mixer track that plays): "<project> - <track name>.<ext>". Tracks with the same name
+/// get their number added.
+pub fn stem_files(project_name: &str, project: &las_project::Project, ext: &str) -> Vec<String> {
+    let inserts = las_engine::used_inserts(project);
+    let name_of = |i: usize| {
+        project
+            .mixer
+            .get(i)
+            .map(|t| t.name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("Insert {i}"))
+    };
+    let mut names = vec!["Master".to_string()];
+    for &i in &inserts {
+        let n = name_of(i);
+        let twice = n == "Master" || inserts.iter().filter(|&&j| name_of(j) == n).count() > 1;
+        names.push(if twice { format!("{n} ({i})") } else { n });
+    }
+    names
+        .iter()
+        .map(|n| format!("{} - {}.{ext}", safe_name(project_name), safe_name(n)))
+        .collect()
+}
+
+/// Minutes and seconds.
+fn clock(s: f64) -> String {
+    let s = s.max(0.0).round() as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Where an export goes when the user has not chosen: next to the project, or in the
+/// Music folder for a project not yet saved.
+fn default_export_path(project: &str, kind: &str) -> String {
+    if !project.is_empty() {
+        return format!("{}.{kind}", project.trim_end_matches(".las"));
+    }
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let music = home.join("Music");
+    let dir = if music.is_dir() { music } else { home };
+    dir.join(format!("Untitled.{kind}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Open the file manager at a file.
+fn show_in_folder(path: &str) {
+    let p = std::path::Path::new(path);
+    let _ = if cfg!(windows) {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", p.display()))
+            .spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg("-R").arg(p).spawn()
+    } else {
+        std::process::Command::new("xdg-open")
+            .arg(p.parent().unwrap_or(p))
+            .spawn()
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_opened_from_inside_another_stays_open() {
+        let mut now = Shell::new().open;
+        let before = now;
+        // the rack's menu opened the piano roll while the windows were drawn
+        now.roll = true;
+        let mut after = before;
+        // and the user closed the playlist with its X in the same frame
+        after.playlist = false;
+        now.close_from(&before, &after);
+        assert!(now.roll);
+        assert!(!now.playlist);
+        assert!(now.rack);
+    }
+
+    #[test]
+    fn export_paths_and_clocks_read_well() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(195.4), "3:15");
+        assert_eq!(default_export_path("/a/song.las", "mp3"), "/a/song.mp3");
+        assert!(default_export_path("", "wav").ends_with("Untitled.wav"));
+    }
+
+    #[test]
+    fn stems_are_named_after_the_project_and_their_tracks() {
+        let mut p = las_project::create::empty_project("x");
+        for name in ["Kick", "Bass", "Kick"] {
+            let i = las_project::create::add_channel(&mut p, "sampler");
+            let t = p.channels[i].mixer_track;
+            p.mixer[t].name = name.into();
+        }
+        let files = stem_files("My Song", &p, "wav");
+        assert_eq!(
+            files,
+            vec![
+                "My Song - Master.wav",
+                "My Song - Kick (1).wav",
+                "My Song - Bass.wav",
+                "My Song - Kick (3).wav",
+            ]
+        );
+        // one file for each stem the engine renders
+        let stems = las_engine::used_inserts(&p).len() + 1;
+        assert_eq!(files.len(), stems);
+        assert_eq!(safe_name("a/b:c?"), "a_b_c_");
+        assert_eq!(
+            stem_dir("/tmp/x/song.wav"),
+            std::path::PathBuf::from("/tmp/x")
+        );
+    }
 
     #[test]
     fn taps_make_a_tempo() {

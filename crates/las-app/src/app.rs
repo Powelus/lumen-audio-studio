@@ -71,9 +71,13 @@ pub enum View {
 
 pub struct App {
     pub(crate) audio: Option<Audio>,
-    pub(crate) _midi: Option<midir::MidiInputConnection<()>>,
+    /// MIDI input: the keyboards and controllers listened to.
+    pub(crate) midi: crate::midi::MidiHub,
     pub(crate) status: String,
-    pub(crate) midi_name: Option<String>,
+    /// The notes of the take being recorded, when recording.
+    pub(crate) take: crate::noterec::NoteTake,
+    /// The device lists Settings shows (read when it opens, and on Refresh).
+    pub(crate) devices: Option<crate::settings::Devices>,
     pub(crate) inst: Instrument,
     /// Defaults and the current patch of each instrument: Facet, Mist, Polaris.
     pub(crate) defaults: [Value; 3],
@@ -146,20 +150,27 @@ fn full_defaults() -> [Value; 3] {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         style(&cc.egui_ctx);
-        let (audio, midi, status, midi_name) = match Audio::start() {
+        let settings = crate::settings::Settings::load();
+        let mut midi = crate::midi::MidiHub::new();
+        midi.set_repaint(&cc.egui_ctx);
+        let (audio, status) = match Audio::start_with(&settings.audio) {
             Ok((audio, tx)) => {
-                let status = format!("{} at {} Hz", audio.device, audio.sample_rate);
-                let m = crate::midi::connect(tx);
-                let name = m.as_ref().map(|(_, n)| n.clone());
-                (Some(audio), m.map(|(c, _)| c), status, name)
+                midi.set_sender(Some(tx));
+                let status = audio
+                    .note
+                    .clone()
+                    .unwrap_or_else(|| format!("{} at {} Hz", audio.device, audio.sample_rate));
+                (Some(audio), status)
             }
-            Err(e) => (None, None, e, None),
+            Err(e) => (None, e),
         };
+        midi.connect(&settings.midi_input);
         let mut app = Self {
             audio,
-            _midi: midi,
+            midi,
             status,
-            midi_name,
+            take: Default::default(),
+            devices: None,
             inst: Instrument::Polaris,
             defaults: full_defaults(),
             patches: full_defaults(),
@@ -187,7 +198,7 @@ impl App {
             bound: None,
             synth_dirty: false,
             quit: false,
-            settings: crate::settings::Settings::load(),
+            settings,
             folders: Default::default(),
             autosaved: Default::default(),
             analyser: None,
@@ -287,6 +298,25 @@ impl App {
         if std::env::args().any(|a| a == "--demo-song") {
             app.open_demo();
         }
+        // `--demo-audio` adds an audio clip to the playlist (screenshots of waveforms)
+        if std::env::args().any(|a| a == "--demo-audio") {
+            let frames = 44_100 * 8;
+            let a = las_engine::factory::Audio {
+                channels: vec![(0..frames)
+                    .map(|i| {
+                        let t = i as f32 / 44_100.0;
+                        let beat = (t * 2.0).fract();
+                        (t * 220.0 * std::f32::consts::TAU).sin() * (-beat * 6.0).exp() * 0.8
+                    })
+                    .collect()],
+                sample_rate: 44_100.0,
+            };
+            let wav = las_engine::library::encode_wav(&a);
+            app.project.modify_with_samples(true, |p, samples| {
+                let track = p.playlist.tracks.len().min(6).saturating_sub(1);
+                let _ = crate::menus::import_audio_clip(p, samples, "Demo audio", wav, 0.0, track);
+            });
+        }
         if std::env::args().any(|a| a == "--analyser-demo") {
             app.analyser_demo();
         }
@@ -298,7 +328,7 @@ impl App {
         app
     }
 
-    fn load_preset(&mut self, inst: Instrument, i: usize) {
+    pub(crate) fn load_preset(&mut self, inst: Instrument, i: usize) {
         let k = index(inst);
         let Some(e) = self.entries[k].get(i) else {
             return;
@@ -1526,6 +1556,9 @@ impl App {
     /// A key played from the screen or the computer keyboard: the project's selected
     /// channel while its page is open, otherwise the synth on the other pages.
     pub(crate) fn note(&mut self, key: u8, vel: f64, on: bool) {
+        if self.shell.keys_to_project() {
+            self.record_key(key, vel, on);
+        }
         let c = if self.shell.keys_to_project() && self.project.has_player {
             Command::PlayerNote {
                 channel: self.project.channel,
@@ -1621,10 +1654,11 @@ impl App {
                 "Computer keys A to ; play {}. Z and X change octave.",
                 note_name((12 * (self.octave + 1)).clamp(0, 127) as u8)
             ));
-            if let Some(m) = &self.midi_name {
-                ui.label(format!("MIDI: {m}"));
+            if self.midi.names.is_empty() {
+                ui.label("No MIDI keyboard connected")
+                    .on_hover_text("Plug one in, then choose it in Settings > MIDI");
             } else {
-                ui.label("No MIDI keyboard found");
+                ui.label(format!("MIDI: {}", self.midi.names.join(", ")));
             }
         });
         let mut held: Vec<u8> = self.typed.iter().map(|(_, n)| *n).collect();
@@ -1642,6 +1676,30 @@ impl App {
     }
 }
 
+impl App {
+    /// When the window must be drawn again by itself: often while sound plays (meters,
+    /// the playhead), now and then while something works in the background, and
+    /// otherwise only when the user does something, so an idle program costs nothing.
+    pub(crate) fn next_repaint(&self) -> Option<Duration> {
+        let sounding = self.audio.as_ref().is_some_and(|a| {
+            let (l, r) = a.meters.peaks();
+            a.meters.playing()
+                || a.meters.voices() > 0
+                || l.max(r) > 1e-4
+                || (0..32).any(|i| a.meters.insert_peak(i) > 1e-4)
+        });
+        let demo = self.analyser.as_ref().is_some_and(|a| a.demo.is_some());
+        if sounding || demo || self.shell.recorder.is_some() {
+            return Some(Duration::from_millis(33));
+        }
+        if !self.editors.is_empty() || self.project.is_building() {
+            return Some(Duration::from_millis(50));
+        }
+        // a slow heartbeat: autosave, a MIDI keyboard played while nothing else moves
+        Some(Duration::from_secs(1))
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.scale_ui(ctx);
@@ -1656,33 +1714,26 @@ impl eframe::App for App {
                 .collect()
         });
         self.poll_project(ctx);
+        self.poll_midi();
         self.sync_bound();
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // something dragged from the browser and let go
+        if ctx.input(|i| i.pointer.any_released())
+            && egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ctx)
+        {
+            if let Some(item) = egui::DragAndDrop::take_payload::<crate::shell::Dragged>(ctx) {
+                self.drop_item((*item).clone(), drop_at);
+            }
         }
         for path in dropped {
             if path.extension().is_some_and(|e| e == "las") {
                 self.open_project(&path.to_string_lossy());
                 continue;
             }
-            if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("wave"))
-                && self.project.loaded.is_some()
-            {
-                // on the playlist a file becomes an audio clip, elsewhere a sampler channel
-                let place = self
-                    .shell
-                    .open
-                    .playlist
-                    .then_some(())
-                    .and(self.project.playlist.area)
-                    .zip(drop_at)
-                    .and_then(|(a, pos)| a.place(pos));
-                match place {
-                    Some((tick, track)) => self.import_clip_path(&path, tick, track),
-                    None => self.import_path(&path),
-                }
+            if self.project.loaded.is_some() {
+                self.drop_item(crate::shell::Dragged::File(path), drop_at);
                 continue;
             }
             match self.load_wav(&path) {
@@ -1697,11 +1748,15 @@ impl eframe::App for App {
             a.collect_garbage();
         }
         self.serve_editors();
+        if std::mem::take(&mut self.project.want_roll) {
+            self.shell.open.roll = true;
+        }
         self.autosave();
         self.feed_analyser();
         self.remember_windows();
-        // meters move on their own
-        ctx.request_repaint_after(Duration::from_millis(16));
+        if let Some(wait) = self.next_repaint() {
+            ctx.request_repaint_after(wait);
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -1721,7 +1776,7 @@ impl eframe::App for App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button("\u{2699} Settings")
-                            .on_hover_text("Folders, autosave and the size of everything")
+                            .on_hover_text("Audio and MIDI devices, recording, folders, autosave and the size of everything")
                             .clicked()
                         {
                             self.shell.open.settings = true;
@@ -1759,6 +1814,7 @@ impl eframe::App for App {
             .show(ui, |ui| ui.max_rect())
             .inner;
         self.windows(&ctx, area);
+        self.learn_banner(&ctx);
     }
 }
 

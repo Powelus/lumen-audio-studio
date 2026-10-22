@@ -24,6 +24,34 @@ pub type Extra = Map<String, Value>;
 fn yes() -> bool {
     true
 }
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Gains (dB) of an insert's built-in EQ bands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InsertEq {
+    pub low: f64,
+    pub mid: f64,
+    pub high: f64,
+}
+
+impl InsertEq {
+    /// Frequencies of the bands, Hz.
+    pub const FREQS: [f64; 3] = [100.0, 1000.0, 8000.0];
+    /// The most a band boosts or cuts, dB.
+    pub const RANGE: f64 = 18.0;
+
+    pub fn is_flat(&self) -> bool {
+        self.low == 0.0 && self.mid == 0.0 && self.high == 0.0
+    }
+
+    pub fn gains(&self) -> [f64; 3] {
+        [self.low, self.mid, self.high]
+    }
+}
+
 fn one() -> f64 {
     1.0
 }
@@ -51,6 +79,9 @@ pub struct Note {
     /// Fine pitch, cents.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fine: Option<f64>,
+    /// Release velocity, 0 to 1 (FL's note release); 0.5 when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slide: Option<bool>,
     /// Entered with the step sequencer.
@@ -179,6 +210,9 @@ pub struct PlaylistTrack {
     pub name: String,
     pub color: String,
     pub mute: bool,
+    /// Only soloed tracks play while any track is soloed.
+    #[serde(skip_serializing_if = "is_false")]
+    pub solo: bool,
     pub height: f64,
     #[serde(flatten)]
     pub extra: Extra,
@@ -219,14 +253,14 @@ pub enum StretchMode {
     Resample,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stretch {
     pub bpm: f64,
     pub mode: StretchMode,
 }
 
 /// Non-destructive edits of one audio clip.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioClipEdit {
     /// dB.
@@ -249,6 +283,9 @@ pub struct AudioClipEdit {
     pub pitch: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stretch: Option<Stretch>,
+    /// Bring the loudest peak of the source to 0 dB (before the clip gain).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalize: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -357,7 +394,7 @@ impl AutomationClip {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EffectSlot {
     pub id: Id,
@@ -408,6 +445,16 @@ pub struct MixerTrack {
     pub output: Option<usize>,
     #[serde(rename = "fxBypass")]
     pub fx_bypass: bool,
+    /// The insert's built-in three-band EQ, like FL's: gains in dB of a low shelf
+    /// (100 Hz), a peak (1 kHz) and a high shelf (8 kHz). Absent means flat.
+    #[serde(skip_serializing_if = "InsertEq::is_flat")]
+    pub eq: InsertEq,
+    /// Invert the polarity (phase) of both sides.
+    #[serde(skip_serializing_if = "is_false")]
+    pub invert: bool,
+    /// Swap the left and right sides.
+    #[serde(rename = "swapLR", skip_serializing_if = "is_false")]
+    pub swap: bool,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -439,6 +486,22 @@ pub struct ProjectMeta {
 pub struct Playlist {
     pub tracks: Vec<PlaylistTrack>,
     pub clips: Vec<Clip>,
+}
+
+impl Playlist {
+    /// For each track (as many as the tracks listed or used by a clip), whether it is
+    /// silent: muted, or not soloed while another track is.
+    pub fn silent_tracks(&self) -> Vec<bool> {
+        let used = self.clips.iter().map(|c| c.track + 1).max().unwrap_or(0);
+        let n = self.tracks.len().max(used);
+        let any_solo = self.tracks.iter().any(|t| t.solo);
+        (0..n)
+            .map(|i| match self.tracks.get(i) {
+                Some(t) => t.mute || (any_solo && !t.solo),
+                None => any_solo,
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -30,6 +30,37 @@ pub enum Mode {
     Range { from: f64, to: f64 },
 }
 
+/// How far a render on this thread has come: frames done of frames in all, for a
+/// progress bar. Set it with [`watch_progress`] before rendering.
+#[derive(Default, Debug)]
+pub struct Progress {
+    pub done: std::sync::atomic::AtomicU64,
+    pub total: std::sync::atomic::AtomicU64,
+}
+
+impl Progress {
+    /// From 0 to 1.
+    pub fn fraction(&self) -> f64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let t = self.total.load(Relaxed);
+        if t == 0 {
+            0.0
+        } else {
+            (self.done.load(Relaxed) as f64 / t as f64).min(1.0)
+        }
+    }
+}
+
+thread_local! {
+    static PROGRESS: std::cell::RefCell<Option<std::sync::Arc<Progress>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Report the progress of renders made on this thread to `p`.
+pub fn watch_progress(p: Option<std::sync::Arc<Progress>>) {
+    PROGRESS.with(|c| *c.borrow_mut() = p);
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderOptions {
     pub sample_rate: f64,
@@ -118,6 +149,7 @@ pub(crate) struct Engine {
     br: Vec<f32>,
     vol: Vec<f32>,
     pan: Vec<f32>,
+    mono: Vec<f32>,
 }
 
 /// The clip's value at `t`, its stored points ramped, between clip ticks `from` and `to`.
@@ -188,10 +220,18 @@ impl Engine {
             return;
         };
         let edit = clip.audio.as_ref();
+        // normalize brings the source's peak to 0 dB, then the clip gain applies
+        let mut gain = plan.gain;
+        if edit.and_then(|e| e.normalize) == Some(true) {
+            let peak = f64::from(self.library.peak(&sample_id));
+            if peak > 1e-6 {
+                gain /= peak;
+            }
+        }
         let playback = ClipPlayback {
             buffer,
             rate: plan.rate,
-            gain: plan.gain,
+            gain,
             clip_pos: info.clip_pos,
             clip_len: info.clip_len,
             fade_in: info.fade_in,
@@ -703,7 +743,7 @@ impl Engine {
                 Vec::new()
             };
             // a channel whose settings cannot be read is silent; the rest still plays
-            let inst =
+            let mut inst =
                 match Instrument::new(&c.plugin_id, &c.state, sr, &mut tables, sample, pad_samples)
                 {
                     Ok(i) => i,
@@ -720,6 +760,7 @@ impl Engine {
                         .map_err(|e| format!("{}: {}", c.name, e.0))?
                     }
                 };
+            inst.set_smart_disable(smart_disable(&c.extra));
             index.insert(c.id.clone(), channels.len());
             channels.push(ChannelRt {
                 inst,
@@ -731,7 +772,7 @@ impl Engine {
                 pitch_line: Timeline::default(),
             });
         }
-        let muted_tracks: Vec<bool> = project.playlist.tracks.iter().map(|t| t.mute).collect();
+        let muted_tracks: Vec<bool> = project.playlist.silent_tracks();
         let mixer = Mixer::new(&project.mixer, project.master_volume, sr, BLOCK);
         let mut e = Engine {
             sr,
@@ -757,6 +798,7 @@ impl Engine {
             br: vec![0.0; BLOCK],
             vol: vec![0.0; BLOCK],
             pan: vec![0.0; BLOCK],
+            mono: Vec::with_capacity(BLOCK),
         };
         let bpm0 = tempo_at(&e.project, 0.0, song);
         for ch in &mut e.channels {
@@ -796,6 +838,9 @@ impl Engine {
             ch.inst.set_position(beat, a.bpm);
             let (l, r) = (&mut self.bl[..n], &mut self.br[..n]);
             ch.inst.render(t0, l, r);
+            if ch.inst.is_asleep() {
+                continue;
+            }
             let mono = ch.inst.is_mono();
             let (vol, pan) = (&mut self.vol, &mut self.pan);
             ch.volume.fill(frame, vol, sr);
@@ -808,8 +853,10 @@ impl Engine {
             }
             if mono {
                 // a mono signal pans with the mono law, even in the middle
-                let src = l.to_vec();
-                mono_pan_a(&src, pan, l, r);
+                let src = &mut self.mono;
+                src.clear();
+                src.extend_from_slice(l);
+                mono_pan_a(src, pan, l, r);
             } else if pan.iter().any(|&p| p != 0.0) {
                 stereo_pan_a(l, r, pan);
             }
@@ -828,10 +875,27 @@ impl Engine {
         }
     }
 
+    /// The channels and the inserts that are running (not asleep, see smart disable).
+    pub fn awake(&self) -> (Vec<usize>, Vec<usize>) {
+        let ch = (0..self.channels.len())
+            .filter(|&i| !self.channels[i].inst.is_silent() && !self.channels[i].inst.is_asleep())
+            .collect();
+        let ins = (0..self.mixer.len())
+            .filter(|&i| !self.mixer.is_asleep(i))
+            .collect();
+        (ch, ins)
+    }
+
     /// The peak level of each insert, master first.
     pub fn insert_peaks(&self) -> &[f32] {
         &self.peaks
     }
+}
+
+/// Whether a channel or an effect slot may sleep while it is quiet (FL's "smart
+/// disable"): on unless the project says `"smartDisable": false`.
+pub fn smart_disable(extra: &las_project::Extra) -> bool {
+    extra.get("smartDisable") != Some(&serde_json::Value::Bool(false))
 }
 
 /// Render the project and return each tap's output, trimmed by its plugin delay.
@@ -889,7 +953,16 @@ fn render_taps(
         .collect();
     let (mut ml, mut mr) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);
     let mut frame = 0usize;
+    let progress = PROGRESS.with(|c| c.borrow().clone());
+    if let Some(p) = &progress {
+        p.total
+            .store(total as u64, std::sync::atomic::Ordering::Relaxed);
+    }
     while frame < total {
+        if let Some(p) = &progress {
+            p.done
+                .store(frame as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         let n = BLOCK.min(total - frame);
         sched.render_block(frame, &mut ml[..n], &mut mr[..n]);
         for (tap, (out_l, out_r)) in taps.iter().zip(outs.iter_mut()) {
@@ -906,6 +979,10 @@ fn render_taps(
             }
         }
         frame += n;
+    }
+    if let Some(p) = &progress {
+        p.done
+            .store(total as u64, std::sync::atomic::Ordering::Relaxed);
     }
     // plugin delay moves the output later: trim it from the start
     let mixer = &sched.mixer;

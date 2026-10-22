@@ -49,6 +49,8 @@ pub struct ParamsOut {
     pub changes: Vec<(u32, f64)>,
     /// A parameter to automate: its id, name and where it is now (0 to 1).
     pub automate: Option<(u32, String, f64)>,
+    /// A parameter to link to a MIDI controller, as `automate`.
+    pub link: Option<(u32, String, f64)>,
 }
 
 /// Sliders for the parameters of the plugin `state` names. Right click one to automate it.
@@ -82,9 +84,17 @@ pub fn params_ui(ui: &mut Ui, state: &Value) -> ParamsOut {
                     out.changes.push((p.id, p.default));
                 }
                 r.context_menu(|ui| {
+                    let at = ((v - p.min) / (p.max - p.min)).clamp(0.0, 1.0);
                     if ui.button("Create automation clip").clicked() {
-                        let at = ((v - p.min) / (p.max - p.min)).clamp(0.0, 1.0);
                         out.automate = Some((p.id, p.name.clone(), at));
+                        ui.close();
+                    }
+                    if ui
+                        .button("Link to MIDI controller...")
+                        .on_hover_text("Then move a knob or slider on your MIDI keyboard: it will move this control")
+                        .clicked()
+                    {
+                        out.link = Some((p.id, p.name.clone(), at));
                         ui.close();
                     }
                 });
@@ -142,6 +152,22 @@ impl App {
             Ok(editor) => self.editors.push(OpenEditor { owner, editor }),
             Err(e) => self.error = Some(format!("{}: {e}", info.name)),
         }
+    }
+
+    /// Open the own window of the plugin a channel plays; whether one is open now.
+    pub(crate) fn open_plugin_window(&mut self, channel: usize) -> bool {
+        let Some((id, name, state)) = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(channel))
+            .map(|c| (c.id.clone(), c.name.clone(), c.state.clone()))
+        else {
+            return false;
+        };
+        let owner = Owner::Channel(id);
+        self.open_editor(owner.clone(), &state, &name);
+        self.editors.iter().any(|e| e.owner == owner)
     }
 
     /// Show values changed in the generic controls in the plugin's window too.
@@ -239,16 +265,24 @@ impl App {
         }
         self.editor_button(ui, Owner::Channel(channel_id.clone()), &state, &name);
         ui.separator();
-        let ParamsOut { changes, automate } = egui::ScrollArea::vertical()
+        let ParamsOut {
+            changes,
+            automate,
+            link,
+        } = egui::ScrollArea::vertical()
             .show(ui, |ui| params_ui(ui, &state))
             .inner;
         self.tell_editor(&Owner::Channel(channel_id.clone()), &changes);
-        if let Some((id, pname, start)) = automate {
-            self.project.create_automation(&crate::auto::AutoRequest {
-                target: crate::auto::plugin_target(&channel_id, &format!("p.{id}")),
-                name: format!("{name} {pname}"),
-                start,
-            });
+        let req = |(id, pname, start): (u32, String, f64)| crate::auto::AutoRequest {
+            target: crate::auto::plugin_target(&channel_id, &format!("p.{id}")),
+            name: format!("{name} {pname}"),
+            start,
+        };
+        if let Some(a) = automate {
+            self.project.create_automation(&req(a));
+        }
+        if let Some(a) = link {
+            crate::midilearn::learn(req(a));
         }
         if !changes.is_empty() {
             self.project.modify_coalesced("hosted", move |p| {
@@ -292,16 +326,24 @@ impl App {
             });
         });
         ui.separator();
-        let ParamsOut { changes, automate } = egui::ScrollArea::vertical()
+        let ParamsOut {
+            changes,
+            automate,
+            link,
+        } = egui::ScrollArea::vertical()
             .show(ui, |ui| params_ui(ui, &state))
             .inner;
         self.tell_editor(&owner, &changes);
-        if let Some((id, pname, start)) = automate {
-            self.project.create_automation(&crate::auto::AutoRequest {
-                target: crate::auto::effect_target(insert, &slot_id, &format!("p.{id}")),
-                name: format!("{} {pname}", name_of(&state)),
-                start,
-            });
+        let req = |(id, pname, start): (u32, String, f64)| crate::auto::AutoRequest {
+            target: crate::auto::effect_target(insert, &slot_id, &format!("p.{id}")),
+            name: format!("{} {pname}", name_of(&state)),
+            start,
+        };
+        if let Some(a) = automate {
+            self.project.create_automation(&req(a));
+        }
+        if let Some(a) = link {
+            crate::midilearn::learn(req(a));
         }
         if remove {
             self.project.modify(true, |p| {

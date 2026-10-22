@@ -86,6 +86,9 @@ pub fn mixer_track(index: usize, name: Option<&str>) -> MixerTrack {
         sends: Vec::new(),
         output: if index == 0 { None } else { Some(0) },
         fx_bypass: false,
+        eq: Default::default(),
+        invert: false,
+        swap: false,
         extra: Extra::new(),
     }
 }
@@ -204,6 +207,7 @@ pub fn playlist_track(index: usize) -> PlaylistTrack {
         name: format!("Track {}", index + 1),
         color: "#2a3145".into(),
         mute: false,
+        solo: false,
         height: 56.0,
         extra: Extra::new(),
     }

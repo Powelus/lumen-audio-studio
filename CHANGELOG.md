@@ -2,6 +2,27 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.58
+
+Speed, editing, the rack and mixer, and audio and MIDI.
+
+- Speed: audio is decoded once and kept in memory. Silent instruments, CLAP and VST3 plugins and mixer inserts sleep until they are needed again; turn this off with the Smart disable toggle in their right-click menus. The window no longer redraws all the time. Dragging audio onto the playlist lights the place it will land, and audio clips show their waveforms.
+- Piano roll: a Paint tool, an FL-style Draw tool, Ctrl+B to duplicate, Ctrl+D to deselect, copy and paste, arrow keys move notes, double-click a note for its properties, velocity, pan, fine pitch and release lanes, Ctrl+wheel zoom, and a clickable keyboard. Playlist: a picker panel, a single click places a clip, a Paint tool, trim from the left edge, Ctrl+B, and track colour, solo, rename, insert and delete.
+- Rack and mixer: a graph editor, patterns of any length, channel groups, an insert picker box, Alt+click to solo, and drag presets and samples onto channels. Each insert has a 3-band EQ, polarity and L/R swap; drag effects to reorder them, save and load effect chains, and the meters have peak hold and clip lights. Route the selected channel to an insert with Ctrl+L.
+- Audio and MIDI: device, sample rate and buffer settings with the latency shown and a test sound, a choice of MIDI input, note recording with count-in and quantize, Link to MIDI controller, export each mixer track as its own file, and audio clip fades, gain, reverse, normalize, pitch and stretch.
+
+## 0.2.0-alpha.57
+
+Working the way FL Studio does.
+
+- Double click a channel in the rack and its window opens and comes to the front: the sampler, the synths, Nebula, Weave. A CLAP or VST3 plugin opens its own window. The window is named after the channel.
+- Right click a channel, Piano roll now opens the piano roll. A window opened from inside another one was being closed again in the same moment; that is fixed for every window.
+- Double click a pattern clip in the playlist to open it in the piano roll.
+- Drop audio files from your computer: MP3, FLAC, OGG, AIFF, M4A and WAV all work. On a playlist track a file becomes an audio clip where you drop it; anywhere else it becomes a sampler channel. Imported audio is kept in the project as WAV, so it plays the same everywhere.
+- Drag samples from the browser (the factory kit and your own folders) to the playlist or the rack the same way. Their name follows the pointer while you drag.
+- When a file cannot be used, a message says so instead of a line in the status bar.
+- Export: choose where to save with Choose..., then Render shows a progress bar with the percentage, the bar and the time it has reached, and about how long is left. Show in folder opens the folder when it is done. A project not saved yet exports to your Music folder.
+
 ## 0.2.0-alpha.56
 
 Faster start, an icon, and a tidier download.

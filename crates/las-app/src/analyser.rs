@@ -166,7 +166,7 @@ pub struct Analyser {
     peak_l: f32,
     peak_r: f32,
     /// A render of the project fed in at playing speed, when there is no audio device.
-    demo: Option<(Arc<las_engine::render::Rendered>, Instant, usize)>,
+    pub(crate) demo: Option<(Arc<las_engine::render::Rendered>, Instant, usize)>,
     /// That render while it is being made.
     pending: Option<std::sync::mpsc::Receiver<las_engine::render::Rendered>>,
 }
@@ -642,7 +642,7 @@ impl App {
                 }
             });
         self.shell.open.analyser = open;
-        ctx.request_repaint();
+        // the analyser moves while sound plays; App::next_repaint asks for that
     }
 }
 
