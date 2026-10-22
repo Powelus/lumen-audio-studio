@@ -35,6 +35,8 @@ mod skin;
 mod skin_tables;
 mod steps;
 mod theme;
+#[cfg(test)]
+mod uitest;
 mod weave_ui;
 mod widgets;
 mod workflow;

@@ -153,12 +153,22 @@ fn full_defaults() -> [Value; 3] {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::new_with(cc, true)
+    }
+
+    /// The app, with or without opening the sound device (tests run without one).
+    pub(crate) fn new_with(cc: &eframe::CreationContext<'_>, sound: bool) -> Self {
         style(&cc.egui_ctx);
         let wf = crate::workflow::Workflow::start();
         let settings = crate::settings::Settings::load();
         let mut midi = crate::midi::MidiHub::new();
         midi.set_repaint(&cc.egui_ctx);
-        let (audio, status) = match Audio::start_with(&settings.audio) {
+        let started = if sound {
+            Audio::start_with(&settings.audio)
+        } else {
+            Err("no sound device (test)".to_string())
+        };
+        let (audio, status) = match started {
             Ok((audio, tx)) => {
                 midi.set_sender(Some(tx));
                 let status = audio
@@ -1751,9 +1761,36 @@ impl App {
         if redo {
             self.project.redo();
         }
+        // the function keys the menus name, as in FL Studio: each toggles its window
+        let typing = ctx.egui_wants_keyboard_input();
+        let f = |k: egui::Key| {
+            !typing && ctx.input(|i| !i.modifiers.command && !i.modifiers.alt && i.key_pressed(k))
+        };
+        if f(egui::Key::F4) && self.project.loaded.is_some() {
+            self.new_pattern();
+        }
+        let o = &mut self.shell.open;
+        if f(egui::Key::F5) {
+            o.playlist = !o.playlist;
+        }
+        if f(egui::Key::F6) {
+            o.rack = !o.rack;
+        }
+        if f(egui::Key::F7) {
+            o.roll = !o.roll;
+        }
+        if f(egui::Key::F9) {
+            o.mixer = !o.mixer;
+        }
+        if f(egui::Key::F8) {
+            self.shell.browser = !self.shell.browser;
+        }
     }
 
     fn keys(&mut self, ctx: &egui::Context) {
+        // letters typed into a text box (a name, the preset search) are not notes; a
+        // key let go still ends its note
+        let typing = ctx.egui_wants_keyboard_input();
         let events = ctx.input(|i| i.events.clone());
         for e in events {
             if let egui::Event::Key {
@@ -1765,6 +1802,9 @@ impl App {
             } = e
             {
                 if modifiers.command || modifiers.alt {
+                    continue;
+                }
+                if typing && pressed {
                     continue;
                 }
                 if let Some((_, semis)) = KEY_MAP.iter().find(|(k, _)| *k == key) {

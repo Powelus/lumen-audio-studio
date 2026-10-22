@@ -1424,6 +1424,7 @@ impl App {
     /// The floating windows. `area` is the workspace they sit in.
     pub(crate) fn windows(&mut self, ctx: &egui::Context, area: Rect) {
         let a = area.shrink(6.0);
+        self.shell.steps.room_bottom = Some(area.bottom());
         let first = !self.shell.placed;
         self.shell.placed = true;
         let (song_head, pat_head) = match self.audio.as_ref() {
@@ -1465,7 +1466,8 @@ impl App {
             win(
                 "Channel Rack",
                 a.min + vec2(170.0, 80.0),
-                vec2(740.0, 300.0),
+                // tall enough for a song's channels; more scroll
+                vec2(740.0, (a.height() - 120.0).clamp(300.0, 560.0)),
             )
             .open(&mut open.rack)
             .show(ctx, |ui| {
@@ -1654,6 +1656,7 @@ impl App {
             &mut self.shell.steps,
             playhead,
         );
+        let footer_top = ui.cursor().top();
         ui.separator();
         ui.horizontal(|ui| {
             ui.menu_button("+ Add channel", |ui| {
@@ -1687,6 +1690,8 @@ impl App {
                 }
             });
         });
+        // how tall the buttons under the rows are, so the rows leave them room
+        self.shell.steps.footer = ui.cursor().top() - footer_top;
         drop(project);
         self.project.channel = selected;
         if let Some(n) = out.steps {
