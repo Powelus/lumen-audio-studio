@@ -139,6 +139,9 @@ pub fn set(p: &mut Project, target: &Value, v: f64, range_of: RangeOf) -> bool {
             let Some(c) = p.channels.iter_mut().find(|c| c.id == id) else {
                 return false;
             };
+            if c.plugin_id == las_engine::weave::WEAVE_ID {
+                return set_weave_param(&mut c.state, &param, v);
+            }
             if set_param(&mut c.state, &param) {
                 return true;
             }
@@ -193,6 +196,39 @@ fn set_instrument_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) 
     true
 }
 
+/// Set parameter `p.<id>` of the Weave patch a channel's state holds to `v` (0 to 1
+/// over the parameter's range, as Weave's automation does).
+fn set_weave_param(state: &mut Value, path: &str, v: f64) -> bool {
+    let Some(id) = path.strip_prefix("p.").and_then(|x| x.parse::<u32>().ok()) else {
+        return false;
+    };
+    let mut patch = las_engine::weave::patch_of(state);
+    let (node, index) = las_dsp::modular::split_param_id(id);
+    let Some(n) = patch.nodes.iter_mut().find(|n| n.id == node) else {
+        return false;
+    };
+    let Some(ps) = n.kind.spec().params.get(index) else {
+        return false;
+    };
+    n.params.insert(ps.name.to_string(), ps.denormalize(v));
+    if !state.is_object() {
+        *state = serde_json::json!({});
+    }
+    state["patch"] = patch.to_json();
+    true
+}
+
+/// The channel (by index) of a Weave parameter a link moves, if it is one.
+fn weave_channel(p: &Project, target: &Value) -> Option<usize> {
+    if target.get("kind").and_then(Value::as_str) != Some("plugin") {
+        return None;
+    }
+    let id = target.get("channelId").and_then(Value::as_str)?;
+    p.channels
+        .iter()
+        .position(|c| c.id == id && c.plugin_id == las_engine::weave::WEAVE_ID)
+}
+
 /// The range of a hosted plugin's parameter, from the plugin's own list.
 fn hosted_range(state: &Value, id: u32) -> Option<(f64, f64)> {
     let list = las_host::params_of(crate::hosted::plugin_id(state));
@@ -227,11 +263,33 @@ impl crate::app::App {
         if linked.is_empty() {
             return;
         }
-        self.project.modify_coalesced("midi-controller", |p| {
+        // Weave takes new values while it plays, without a new player
+        let weave: Vec<usize> = linked
+            .iter()
+            .filter_map(|t| weave_channel(&l.project, t))
+            .collect();
+        let live = weave.len() == linked.len() && self.project.takes_live_edits();
+        let f = |p: &mut Project| {
             for t in &linked {
                 set(p, t, v, &hosted_range);
             }
-        });
+        };
+        if live {
+            self.project.modify_coalesced_live("midi-controller", f);
+            for ch in weave {
+                let patch = self
+                    .project
+                    .loaded
+                    .as_ref()
+                    .and_then(|l| l.project.channels.get(ch))
+                    .map(|c| las_engine::weave::patch_of(&c.state));
+                if let Some(patch) = patch {
+                    self.send_weave_live(ch, &patch);
+                }
+            }
+        } else {
+            self.project.modify_coalesced("midi-controller", f);
+        }
     }
 
     /// While a control waits for a knob: a note saying so, with Cancel.
@@ -354,6 +412,40 @@ mod tests {
             assert!(set(&mut p, &t, v, &no_range), "{m}");
             assert!((p.channels[i].state["macros"][m].as_f64().unwrap() - v).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn a_knob_moves_a_weave_parameter_over_its_range() {
+        use las_dsp::modular::{param_id, Kind, Patch};
+        let mut p = las_project::create::empty_project("x");
+        let i = las_project::create::add_channel(&mut p, "weave");
+        let ch = p.channels[i].id.clone();
+        let patch = Patch::default();
+        // the default patch's filter: node 4, parameter 1 (its cutoff, on a log scale)
+        let n = patch.node(4).unwrap();
+        assert_eq!(n.kind, Kind::Filter);
+        let ps = n.kind.spec().params[1];
+        let t = plugin_target(&ch, &format!("p.{}", param_id(4, 1)));
+        assert!(set(&mut p, &t, 0.0, &no_range));
+        let got = las_engine::weave::patch_of(&p.channels[i].state);
+        assert!((got.node(4).unwrap().params[ps.name] - ps.min).abs() < 1e-9);
+        assert!(set(&mut p, &t, 0.5, &no_range));
+        let got = las_engine::weave::patch_of(&p.channels[i].state);
+        assert!((got.node(4).unwrap().params[ps.name] - ps.denormalize(0.5)).abs() < 1e-6);
+        assert_eq!(weave_channel(&p, &t), Some(i));
+        // a module that is not there, or a parameter it does not have
+        assert!(!set(
+            &mut p,
+            &plugin_target(&ch, &format!("p.{}", param_id(99, 0))),
+            0.5,
+            &no_range
+        ));
+        assert!(!set(
+            &mut p,
+            &plugin_target(&ch, &format!("p.{}", param_id(4, 60))),
+            0.5,
+            &no_range
+        ));
     }
 
     #[test]

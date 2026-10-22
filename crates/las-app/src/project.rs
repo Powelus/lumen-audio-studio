@@ -415,6 +415,19 @@ impl ProjectState {
     /// Change the project, starting an undo step only when this is a different kind of
     /// change from the last one or more than a moment after it: a knob drag is one step.
     pub fn modify_coalesced(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
+        let fresh = self.coalesce(key);
+        self.modify(fresh, f);
+    }
+
+    /// As [`Self::modify_coalesced`], for an edit the player was told about already
+    /// (see [`Self::modify_live`]).
+    pub fn modify_coalesced_live(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
+        let fresh = self.coalesce(key);
+        self.modify_live(fresh, f);
+    }
+
+    /// Whether an edit of kind `key` starts an undo step of its own.
+    fn coalesce(&mut self, key: &str) -> bool {
         let now = std::time::Instant::now();
         let fresh = match &self.last_edit {
             Some((k, t)) => {
@@ -423,7 +436,7 @@ impl ProjectState {
             None => true,
         };
         self.last_edit = Some((key.to_string(), now));
-        self.modify(fresh, f);
+        fresh
     }
 
     /// The steps undo and redo can reach, each described by what it changed: the

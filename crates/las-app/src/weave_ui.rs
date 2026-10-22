@@ -358,7 +358,7 @@ impl App {
     }
 
     /// Tell the player about new values of a Weave patch, so they are heard at once.
-    fn send_weave_live(&mut self, channel: usize, patch: &Patch) {
+    pub(crate) fn send_weave_live(&mut self, channel: usize, patch: &Patch) {
         #[cfg(test)]
         self.weave.sent.push((channel, patch.clone()));
         if let Some(a) = &mut self.audio {
@@ -1018,9 +1018,9 @@ impl App {
                     value_text(n.kind, ps, ps.max)
                 );
                 let how = if n.kind.choices(ps.name).is_some() {
-                    "Click to choose, wheel to step, right click to automate"
+                    "Click to choose, wheel to step, right click to automate or link to a MIDI knob"
                 } else {
-                    "Drag up or down to set (shift for fine), wheel to nudge, double click to reset, right click to automate"
+                    "Drag up or down to set (shift for fine), wheel to nudge, double click to reset, right click to automate or link to a MIDI knob"
                 };
                 let note = why
                     .map(|w| format!("\nNot heard now: {w}"))
@@ -1036,6 +1036,11 @@ impl App {
                         automate = Some((pid, alabel.clone(), at));
                         ui.close();
                     }
+                    crate::midilearn::menu_item(ui, || crate::auto::AutoRequest {
+                        target: crate::auto::plugin_target(&channel_id, &format!("p.{pid}")),
+                        name: format!("{name} {alabel}"),
+                        start: at,
+                    });
                     if ui.button("Reset to default").clicked() {
                         v = ps.default;
                         changed = true;
