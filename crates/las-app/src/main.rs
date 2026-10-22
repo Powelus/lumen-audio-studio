@@ -10,6 +10,7 @@ mod audio;
 mod auto;
 mod clipedit;
 mod faces;
+mod flexasio;
 mod fxui;
 mod hosted;
 mod inst;

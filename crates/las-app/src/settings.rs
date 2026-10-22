@@ -130,6 +130,8 @@ pub struct Devices {
     pub outputs: Vec<String>,
     pub inputs: Vec<String>,
     pub midi: Vec<String>,
+    /// The ASIO devices there are (Windows), to tell whether FlexASIO is installed.
+    pub asio: Vec<String>,
 }
 
 impl Devices {
@@ -139,6 +141,11 @@ impl Devices {
             outputs: crate::audio::output_devices(driver),
             inputs: crate::audio::input_devices(driver),
             midi: crate::midi::ports(),
+            asio: if crate::audio::HAS_ASIO {
+                crate::audio::output_devices("ASIO")
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -736,6 +743,19 @@ impl App {
                 }
                 ui.end_row();
             });
+        if cfg!(windows) && crate::audio::HAS_ASIO {
+            let fx = crate::flexasio::settings_ui(ui, &dev.asio);
+            if fx.installed_now {
+                // read the devices again and play through FlexASIO
+                out.refresh = true;
+                out.restart = true;
+                let a = &mut self.settings.audio;
+                a.driver = "ASIO".into();
+                a.output = crate::flexasio::DEVICE.into();
+                a.input.clear();
+            }
+            out.restart |= fx.restart;
+        }
         if dev.outputs.is_empty() && dev.inputs.is_empty() {
             ui.label(
                 RichText::new(
