@@ -40,11 +40,19 @@ fn known(plugin_id: &str, path: &str) -> Option<ParamDef> {
         ("sampler", "velToVol") => def(path, 0.0, 1.0, 0.7, json!({})),
         ("sampler", "boost") => def(path, -24.0, 12.0, 0.0, json!({})),
         ("audioclip", "gain") => def(path, -24.0, 12.0, 0.0, json!({})),
-        ("nebula", "macros.cutoff" | "macros.res" | "macros.attack" | "macros.release") => def(
+        (
+            "nebula",
+            "macros.cutoff" | "macros.res" | "macros.attack" | "macros.release" | "macros.drive"
+            | "macros.width" | "macros.detune",
+        ) => def(
             path,
             0.0,
             1.0,
-            if path.ends_with("res") { 0.0 } else { 0.5 },
+            if path.ends_with("res") || path.ends_with("drive") {
+                0.0
+            } else {
+                0.5
+            },
             json!({}),
         ),
         ("nebula", "master") => def(path, 0.0, 1.2, 0.8, json!({})),

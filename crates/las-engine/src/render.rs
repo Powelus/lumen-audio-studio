@@ -446,6 +446,7 @@ impl Engine {
                 fine,
                 n.note.pan,
                 n.note.step == Some(true),
+                n.note.release.unwrap_or(0.5),
             );
         }
     }
@@ -483,6 +484,18 @@ impl Engine {
     pub(crate) fn note_off(&mut self, channel: usize, key: f64, time: f64) {
         if let Some(ch) = self.channels.get_mut(channel) {
             ch.inst.note_off(key, time);
+        }
+    }
+
+    pub(crate) fn controller(
+        &mut self,
+        channel: usize,
+        cc: las_dsp::engine::Cc,
+        value: f64,
+        time: f64,
+    ) {
+        if let Some(ch) = self.channels.get_mut(channel) {
+            ch.inst.controller(cc, value, time);
         }
     }
 

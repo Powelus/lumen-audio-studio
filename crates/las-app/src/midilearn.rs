@@ -139,7 +139,10 @@ pub fn set(p: &mut Project, target: &Value, v: f64, range_of: RangeOf) -> bool {
             let Some(c) = p.channels.iter_mut().find(|c| c.id == id) else {
                 return false;
             };
-            return set_param(&mut c.state, &param);
+            if set_param(&mut c.state, &param) {
+                return true;
+            }
+            return set_instrument_param(&c.plugin_id.clone(), &mut c.state, &param, v);
         }
         "effect" => {
             let slot_id = s("slotId");
@@ -152,6 +155,40 @@ pub fn set(p: &mut Project, target: &Value, v: f64, range_of: RangeOf) -> bool {
             return set_param(&mut slot.state, &param);
         }
         _ => return false,
+    }
+    true
+}
+
+/// Set a built-in instrument's parameter (a dotted path into its state, such as
+/// `macros.drive`) to `v`, 0 to 1 over the range automation gives it.
+fn set_instrument_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) -> bool {
+    use las_engine::fxauto::map_automation;
+    use las_engine::pluginparams::plugin_param_def;
+    const BUILT_IN: [&str; 10] = [
+        "sampler", "nebula", "polaris", "vortex", "monolith", "zenith", "triosc", "facet",
+        "mist", "lumapad",
+    ];
+    if path.is_empty() || path.starts_with("p.") || !BUILT_IN.contains(&plugin_id) {
+        return false;
+    }
+    let def = plugin_param_def(plugin_id, path);
+    let Some(&(_, x)) = map_automation(Some(&def), &[(0.0, v)]).first() else {
+        return false;
+    };
+    if !state.is_object() {
+        *state = serde_json::json!({});
+    }
+    let mut at = state;
+    let parts: Vec<&str> = path.split('.').collect();
+    for (i, k) in parts.iter().enumerate() {
+        if i + 1 == parts.len() {
+            at[*k] = serde_json::json!(x);
+        } else {
+            if !at.get(*k).is_some_and(Value::is_object) {
+                at[*k] = serde_json::json!({});
+            }
+            at = &mut at[*k];
+        }
     }
     true
 }
@@ -305,6 +342,18 @@ mod tests {
         assert_eq!(crate::hosted::value_of(&p.channels[i].state, 7, 0.0), 125.0);
         assert!(!set(&mut p, &plugin_target(&ch, "p.8"), 0.25, &range));
         assert!(!set(&mut p, &plugin_target(&ch, "cutoff"), 0.25, &range));
+    }
+
+    #[test]
+    fn a_knob_moves_nebulas_drive_width_and_detune_macros() {
+        let mut p = las_project::create::empty_project("x");
+        let i = las_project::create::add_channel(&mut p, "nebula");
+        let ch = p.channels[i].id.clone();
+        for (m, v) in [("drive", 0.75), ("width", 0.25), ("detune", 1.0)] {
+            let t = plugin_target(&ch, &format!("macros.{m}"));
+            assert!(set(&mut p, &t, v, &no_range), "{m}");
+            assert!((p.channels[i].state["macros"][m].as_f64().unwrap() - v).abs() < 1e-9);
+        }
     }
 
     #[test]

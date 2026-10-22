@@ -28,6 +28,7 @@ fn from_unit(t: f64, r: &RangeInclusive<f64>, log: bool) -> f64 {
 }
 
 thread_local! {
+    static LAST_KNOB: std::cell::RefCell<Option<egui::Response>> = const { std::cell::RefCell::new(None) };
     static KNOB_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
 }
 
@@ -203,11 +204,18 @@ fn knob_scaled(
         FontId::proportional(11.0 * k.sqrt()),
         skin.map_or(crate::theme::pal().muted, |s| s.text),
     );
-    resp.on_hover_text(format!(
+    let resp = resp.on_hover_text(format!(
         "{label}: {}\nDrag, Shift for fine, double-click to reset",
         show(*value)
     ));
+    LAST_KNOB.with(|c| *c.borrow_mut() = Some(resp));
     changed
+}
+
+/// The response of the knob drawn last on this thread, for adding a right click menu
+/// to it.
+pub fn last_knob() -> Option<egui::Response> {
+    LAST_KNOB.with(|c| c.borrow_mut().take())
 }
 
 /// A level meter for a peak value (0 to 1 and a little above).

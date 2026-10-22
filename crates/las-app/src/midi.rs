@@ -194,6 +194,13 @@ impl Shared {
                     vel,
                     on,
                 },
+                (Command::Controller { cc, value }, _) if ch != SYNTH => {
+                    Command::PlayerController {
+                        channel: ch,
+                        cc,
+                        value,
+                    }
+                }
                 (c, _) => c,
             };
             if let Ok(mut a) = self.audio.lock() {
@@ -342,6 +349,16 @@ mod tests {
                 channel: 2,
                 key: 64,
                 on: true,
+                ..
+            })
+        ));
+        // the mod wheel goes to the selected channel too
+        hub.feed(&[0xB0, 1, 127]);
+        assert!(matches!(
+            rx.pop(),
+            Ok(Command::PlayerController {
+                channel: 2,
+                cc: Cc::Mw,
                 ..
             })
         ));

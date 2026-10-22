@@ -325,7 +325,9 @@ impl Sampler {
         }
     }
 
-    /// Play a note: `duration` gates it, `None` lets the sample ring out.
+    /// Play a note: `duration` gates it, `None` lets the sample ring out; `rel_scale`
+    /// stretches the release (the note's release).
+    #[allow(clippy::too_many_arguments)]
     pub fn play_note(
         &mut self,
         key: i32,
@@ -334,6 +336,7 @@ impl Sampler {
         duration: Option<f64>,
         fine: f64,
         pan: f64,
+        rel_scale: f64,
     ) {
         let Some(buf) = self.sample.clone() else {
             return;
@@ -360,7 +363,7 @@ impl Sampler {
             n("attack", 0.001),
             n("decay", 0.3),
             n("sustain", 1.0),
-            n("release", 0.08),
+            n("release", 0.08) * rel_scale,
         );
         let (start, end) = (n("start", 0.0), n("end", 1.0));
         self.voices.push(make_voice(

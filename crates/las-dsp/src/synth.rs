@@ -999,6 +999,11 @@ impl SynthEngine {
     }
 
     pub fn note_off(&mut self, key: f64) {
+        self.note_off_scaled(key, 1.0);
+    }
+
+    /// Let go of a key with its release `scale` times as long as the patch's.
+    pub fn note_off_scaled(&mut self, key: f64, scale: f64) {
         self.held_keys.retain(|k| *k != key);
         let voice = self.patch.voice;
         if voice.mono && !self.held_keys.is_empty() {
@@ -1020,7 +1025,7 @@ impl SynthEngine {
             if v.active && !v.released && v.key == key {
                 v.released = true;
                 for e in &mut v.env {
-                    e.release();
+                    e.release_scaled(scale);
                 }
             }
         }
@@ -1473,6 +1478,7 @@ impl SynthEngine {
                         ..
                     } => self.note_on(key, vel, fine, pan),
                     Event::Off { key, .. } => self.note_off(key),
+                    Event::OffScaled { key, scale, .. } => self.note_off_scaled(key, scale),
                     Event::AllOff { .. } => self.all_off(),
                     Event::Cc { cc, value, .. } => match cc {
                         Cc::Mw => self.mw = value,
