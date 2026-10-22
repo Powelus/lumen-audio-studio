@@ -207,6 +207,17 @@ impl App {
                 self.load_fx_list(inst, &fx);
                 self.bound = Some(Bound::Synth(channel));
                 self.sync_bank();
+                // the preset list shows the channel's own preset, not the one last
+                // picked on another channel of this synth
+                let name = state.get("preset").and_then(Value::as_str);
+                let list = &self.entries[k];
+                self.presets[k] = name
+                    .and_then(|n| list.iter().position(|e| e.name == n))
+                    .or_else(|| {
+                        list.iter()
+                            .position(|e| merge_patch(&base, &e.patch) == self.patches[k])
+                    })
+                    .unwrap_or(0);
                 self.view = crate::app::View::Sound;
             }
             None if plugin == "sampler" => self.bound = Some(Bound::Sampler(channel)),
@@ -241,6 +252,10 @@ impl App {
         let k = index(self.inst);
         let patch = self.patches[k].clone();
         let items = self.fx[k].clone();
+        let preset = self.entries[k]
+            .get(self.presets[k])
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
         self.project.modify_coalesced("synth", move |p| {
             if let Some(c) = p.channels.get_mut(ch) {
                 if !c.state.is_object() {
@@ -249,6 +264,7 @@ impl App {
                 let old_fx = c.state.get("fx").cloned().unwrap_or(Value::Null);
                 c.state["patch"] = patch;
                 c.state["fx"] = fx_to_json(&items, &old_fx);
+                c.state["preset"] = json!(preset);
             }
         });
     }

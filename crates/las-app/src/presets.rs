@@ -20,8 +20,18 @@ pub struct Entry {
     pub fx: Vec<Value>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The config folder of the interaction test running on this thread.
+    pub static TEST_CONFIG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The folder for the app's own files.
 pub fn config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(d) = TEST_CONFIG.with(|c| c.borrow().clone()) {
+        return Some(d);
+    }
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {

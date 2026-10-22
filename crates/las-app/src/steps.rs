@@ -290,6 +290,10 @@ pub struct StepState {
     new_group: String,
     /// Where each shown channel's row was drawn (for things dropped on it).
     pub rows: Vec<(usize, Rect)>,
+    /// The bottom of the room the windows have (above the status bar).
+    pub room_bottom: Option<f32>,
+    /// The height of what the rack shows under the rows (from the last frame).
+    pub footer: f32,
 }
 
 impl StepState {
@@ -638,8 +642,21 @@ pub fn draw(
     state.rows.clear();
     let dragging = egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ui.ctx());
     let width = cell_offset(steps);
-    egui::ScrollArea::horizontal()
+    // the channels scroll up and down too, so the rack never grows past the screen
+    // and its buttons under the rows stay in reach however many channels there are
+    // (a window's own room is not bounded by the screen, so the screen bounds it: the
+    // room the panels leave, less the row of buttons under the rows and the frame)
+    let bottom = state
+        .room_bottom
+        .unwrap_or_else(|| ui.ctx().content_rect().bottom() - 30.0);
+    let footer = state.footer.max(30.0);
+    let screen_room = bottom - ui.cursor().top() - footer - 16.0;
+    let room = (ui.available_height() - footer)
+        .min(screen_room)
+        .max(ROW * 3.0);
+    egui::ScrollArea::both()
         .auto_shrink([false, true])
+        .max_height(room)
         .id_salt("steps")
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
@@ -870,7 +887,8 @@ pub fn draw(
                     }
                 });
                 let rr = row.response.rect;
-                state.rows.push((i, rr));
+                // a row scrolled out of sight is no drop target
+                state.rows.push((i, rr.intersect(ui.clip_rect())));
                 if dragging && ui.rect_contains_pointer(rr) {
                     ui.painter().rect_stroke(
                         rr.expand(1.0),
@@ -1112,7 +1130,8 @@ fn channel_menu(
                     .hint_text("New group")
                     .desired_width(110.0),
             );
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let enter =
+                (r.has_focus() || r.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let name = state.new_group.trim().to_string();
             if (ui.button("Add").clicked() || enter) && !name.is_empty() {
                 out.chans.push(ChanEdit::Begin);

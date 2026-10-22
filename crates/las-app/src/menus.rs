@@ -41,7 +41,8 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Delete", "Delete the selected notes"),
             ("Ctrl+A", "Select all notes"),
             ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut, paste"),
-            ("Ctrl+D", "Duplicate the selection after itself"),
+            ("Ctrl+B", "Duplicate the selection after itself"),
+            ("Ctrl+D", "Deselect"),
             ("Left / Right", "Nudge the selection"),
             ("Up / Down", "Transpose the selection"),
             ("Shift+click", "Add to or remove from the selection"),
@@ -55,7 +56,8 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "Ctrl+C / Ctrl+X / Ctrl+V",
                 "Copy, cut, paste at the start marker",
             ),
-            ("Ctrl+D", "Duplicate the selection after itself"),
+            ("Ctrl+B", "Duplicate the selection after itself"),
+            ("Ctrl+D", "Deselect"),
             ("Double-click", "Place the chosen pattern"),
             ("Right-click", "Markers, loops, clip colour, make unique"),
             ("Click the ruler", "Move the start marker"),
@@ -445,10 +447,14 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(220.0));
-                r.request_focus();
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                // Enter confirms: the box keeps the focus (it asks for it every frame),
+                // so the key is what counts, not the box losing the focus
+                if (r.has_focus() || r.lost_focus())
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                {
                     ok = true;
                 }
+                r.request_focus();
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     cancel = true;
                 }

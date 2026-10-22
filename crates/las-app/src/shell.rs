@@ -498,6 +498,9 @@ pub struct Export {
     pub loop_only: bool,
     /// Each mixer track as its own file (stems), in the folder of `path`.
     pub stems: bool,
+    /// The project (its file, and its name) the path was made for, while the user has
+    /// not typed or chosen one: another project gets a path of its own.
+    pub made_for: Option<(String, String)>,
     working: Option<Receiver<Result<String, String>>>,
     pub message: Option<Result<String, String>>,
     /// How far the render has come, when it started, and the song's tempo and beats
@@ -520,6 +523,11 @@ pub const FORMATS: [(&str, &str, u32); 7] = [
 ];
 
 pub struct Shell {
+    /// The size of the screen last frame (to notice it getting smaller).
+    pub last_screen: Option<Rect>,
+    /// The height of the keyboard under the synth panels (from the last frame), so the
+    /// panels scroll in what is left and the window fits the screen.
+    pub synth_footer: f32,
     pub tab: BrowserTab,
     pub browser: bool,
     pub open: Windows,
@@ -609,6 +617,7 @@ impl Shell {
                 pattern_only: false,
                 loop_only: false,
                 stems: false,
+                made_for: None,
                 working: None,
                 message: None,
                 progress: None,
@@ -623,6 +632,8 @@ impl Shell {
             file_hover: None,
             notice: None,
             placed: false,
+            synth_footer: 0.0,
+            last_screen: None,
         }
     }
 }
@@ -1619,7 +1630,29 @@ impl App {
 
     /// The floating windows. `area` is the workspace they sit in.
     pub(crate) fn windows(&mut self, ctx: &egui::Context, area: Rect) {
+        // the screen got smaller (a smaller window, a larger interface scale): windows
+        // that no longer fit are laid out afresh, at their first places and sizes, so
+        // no edge, title or close button is left out of reach
+        let screen = ctx.content_rect();
+        let shrank = self.shell.last_screen.is_some_and(|s| {
+            screen.width() < s.width() - 1.0 || screen.height() < s.height() - 1.0
+        });
+        self.shell.last_screen = Some(screen);
+        if shrank {
+            let off = ctx.memory(|m| {
+                m.layer_ids()
+                    .filter(|l| l.order == egui::Order::Middle)
+                    .filter_map(|l| m.area_rect(l.id))
+                    .any(|r| !screen.expand(1.0).contains_rect(r))
+            });
+            if off {
+                ctx.memory_mut(|m| m.reset_areas());
+                ctx.data_mut(|d| d.clear());
+                self.shell.placed = false;
+            }
+        }
         let a = area.shrink(6.0);
+        self.shell.steps.room_bottom = Some(area.bottom());
         let first = !self.shell.placed;
         self.shell.placed = true;
         let (song_head, pat_head) = match self.audio.as_ref() {
@@ -1637,9 +1670,13 @@ impl App {
         let mut open = self.shell.open;
         let before = open;
         let win = |title: &str, pos: egui::Pos2, size: egui::Vec2| {
+            // never bigger than the room the windows have: what does not fit scrolls or
+            // is cut, and every edge stays in reach to resize
             let mut w = egui::Window::new(title)
                 .constrain_to(area)
                 .resizable(true)
+                .max_width(area.width() - 16.0)
+                .max_height(area.height() - 12.0)
                 .default_size(size);
             if first {
                 w = w.default_pos(pos);
@@ -1665,7 +1702,8 @@ impl App {
             win(
                 "Channel Rack",
                 a.min + vec2(170.0, 80.0),
-                vec2(740.0, 300.0),
+                // tall enough for a song's channels; more scroll
+                vec2(740.0, (a.height() - 120.0).clamp(300.0, 560.0)),
             )
             .id(Win::Rack.id())
             .open(&mut open.rack)
@@ -1865,6 +1903,7 @@ impl App {
             &mut self.shell.steps,
             playhead,
         );
+        let footer_top = ui.cursor().top();
         ui.separator();
         ui.horizontal(|ui| {
             ui.menu_button("+ Add channel", |ui| {
@@ -1898,6 +1937,8 @@ impl App {
                 }
             });
         });
+        // how tall the buttons under the rows are, so the rows leave them room
+        self.shell.steps.footer = ui.cursor().top() - footer_top;
         drop(project);
         self.project.channel = selected;
         if let Some(n) = out.steps {
@@ -2021,13 +2062,13 @@ impl App {
         self.reference_bar(ui);
         let ch = self.project.channel;
         let selected = project.channels.get(ch).map(|c| (ch, c.name.as_str()));
-        let mut edits = mixer::draw(
-            ui,
-            &project,
-            &mut self.project.mixer_state,
-            &peaks,
-            selected,
-        );
+        // the strips scroll up and down when the window is lower than they are (a
+        // small screen, or a large interface scale)
+        let state = &mut self.project.mixer_state;
+        let mut edits = egui::ScrollArea::vertical()
+            .id_salt("mixer-scroll")
+            .show(ui, |ui| mixer::draw(ui, &project, state, &peaks, selected))
+            .inner;
         // the effects chain files
         let mut more = Vec::new();
         edits.retain(|e| match e {
@@ -2137,31 +2178,40 @@ impl App {
             ui.selectable_value(&mut self.view, crate::app::View::Effects, label);
         });
         ui.separator();
-        egui::ScrollArea::both().show(ui, |ui| {
-            if self.view == crate::app::View::Effects {
-                self.effects_view(ui);
-                return;
-            }
-            match self.inst {
-                Instrument::Facet => self.synth(ui),
-                Instrument::Mist => self.mist_panel(ui),
-                Instrument::Polaris => match self.face_id().as_str() {
-                    "monolith" => self.monolith_panel(ui),
-                    "zenith" => self.zenith_panel(ui),
-                    "triosc" => self.triosc_panel(ui),
-                    _ => self.polaris_panel(ui),
-                },
-            }
-        });
+        let footer = self.shell.synth_footer.max(60.0);
+        egui::ScrollArea::both()
+            .max_height((ui.available_height() - footer).max(160.0))
+            .show(ui, |ui| {
+                if self.view == crate::app::View::Effects {
+                    self.effects_view(ui);
+                    return;
+                }
+                match self.inst {
+                    Instrument::Facet => self.synth(ui),
+                    Instrument::Mist => self.mist_panel(ui),
+                    Instrument::Polaris => match self.face_id().as_str() {
+                        "monolith" => self.monolith_panel(ui),
+                        "zenith" => self.zenith_panel(ui),
+                        "triosc" => self.triosc_panel(ui),
+                        _ => self.polaris_panel(ui),
+                    },
+                }
+            });
+        let top = ui.cursor().top();
         ui.separator();
         self.keyboard(ui);
+        self.shell.synth_footer = ui.cursor().top() - top;
     }
 
     fn export_window(&mut self, ui: &mut Ui) {
-        if self.shell.export.path.is_empty() {
-            if let Some(l) = &self.project.loaded {
-                let (_, kind, _) = FORMATS[self.shell.export.format];
-                self.shell.export.path = default_export_path(&l.path, kind);
+        if let Some(l) = &self.project.loaded {
+            let now = (l.path.clone(), l.project.name.clone());
+            let e = &mut self.shell.export;
+            let stale = e.made_for.as_ref().is_some_and(|m| *m != now);
+            if e.path.is_empty() || stale {
+                let (_, kind, _) = FORMATS[e.format];
+                e.path = default_export_path(&now.0, &now.1, kind);
+                e.made_for = Some(now);
             }
         }
         // a render that has finished
@@ -2202,7 +2252,12 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label("Save to");
-            ui.add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0));
+            if ui
+                .add(egui::TextEdit::singleline(&mut self.shell.export.path).desired_width(320.0))
+                .changed()
+            {
+                self.shell.export.made_for = None;
+            }
             let stems = self.shell.export.stems;
             if stems
                 && ui
@@ -2219,6 +2274,7 @@ impl App {
                 if let Some(d) = dialog.pick_folder() {
                     let file = format!("{}.{kind}", self.export_name());
                     self.shell.export.path = d.join(file).to_string_lossy().into_owned();
+                    self.shell.export.made_for = None;
                 }
             }
             if !stems
@@ -2243,6 +2299,7 @@ impl App {
                         p.set_extension(kind);
                     }
                     self.shell.export.path = p.to_string_lossy().into_owned();
+                    self.shell.export.made_for = None;
                 }
             }
         });
@@ -2425,7 +2482,26 @@ impl App {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty());
-        from_file.unwrap_or_else(|| "Untitled".into())
+        let from_name = self
+            .project
+            .loaded
+            .as_ref()
+            .map(|l| {
+                l.project
+                    .name
+                    .trim()
+                    .chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || " -_()".contains(c) {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .filter(|s| !s.trim().is_empty());
+        from_file.or(from_name).unwrap_or_else(|| "Untitled".into())
     }
 }
 
@@ -2519,18 +2595,34 @@ fn clock(s: f64) -> String {
 }
 
 /// Where an export goes when the user has not chosen: next to the project, or in the
-/// Music folder for a project not yet saved.
-fn default_export_path(project: &str, kind: &str) -> String {
+/// Music folder for a project not yet saved (named after the song).
+fn default_export_path(project: &str, name: &str, kind: &str) -> String {
     if !project.is_empty() {
         return format!("{}.{kind}", project.trim_end_matches(".las"));
     }
+    let name: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || " -_()".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = if name.trim().is_empty() {
+        "Untitled".to_string()
+    } else {
+        name.trim().to_string()
+    };
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
         .unwrap_or_default();
     let music = home.join("Music");
     let dir = if music.is_dir() { music } else { home };
-    dir.join(format!("Untitled.{kind}"))
+    dir.join(format!("{name}.{kind}"))
         .to_string_lossy()
         .into_owned()
 }
@@ -2574,8 +2666,14 @@ mod tests {
     fn export_paths_and_clocks_read_well() {
         assert_eq!(clock(0.0), "0:00");
         assert_eq!(clock(195.4), "3:15");
-        assert_eq!(default_export_path("/a/song.las", "mp3"), "/a/song.mp3");
-        assert!(default_export_path("", "wav").ends_with("Untitled.wav"));
+        assert_eq!(
+            default_export_path("/a/song.las", "x", "mp3"),
+            "/a/song.mp3"
+        );
+        assert!(default_export_path("", "", "wav").ends_with("Untitled.wav"));
+        assert!(default_export_path("", "Lumen Nights (demo)", "wav")
+            .ends_with("Lumen Nights (demo).wav"));
+        assert!(default_export_path("", "a/b:c", "wav").ends_with("a_b_c.wav"));
     }
 
     #[test]

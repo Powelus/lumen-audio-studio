@@ -54,6 +54,9 @@ pub enum RenameTarget {
 
 #[derive(Default)]
 pub struct ProjectState {
+    /// Counts the projects made the open one (new, opened, from a template), so the
+    /// windows that belonged to the last one can close.
+    pub generation: u64,
     pub path: String,
     pub loaded: Option<Loaded>,
     building: Option<Building>,
@@ -91,6 +94,20 @@ pub struct ProjectState {
     stale: bool,
     /// Count in (beats, tempo) before the player that is being built starts.
     pub count_in: Option<(u32, f64)>,
+}
+
+/// Where a saved project keeps its song loop.
+const LOOP_KEY: &str = "songLoop";
+
+/// The loop a project was saved with: start, end (ticks) and whether it was on.
+fn saved_loop(p: &Project) -> Option<(f64, f64, bool)> {
+    let v = p.extra.get(LOOP_KEY)?;
+    let (a, b) = (v.get("start")?.as_f64()?, v.get("end")?.as_f64()?);
+    let on = v
+        .get("on")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    (a.is_finite() && b.is_finite() && b > a && a >= 0.0).then_some((a, b, on))
 }
 
 impl ProjectState {
@@ -133,6 +150,16 @@ impl ProjectState {
         self.last_edit = None;
         self.open_effect = None;
         self.open_auto = None;
+        self.generation += 1;
+        self.playlist.forget_project();
+        self.roll.forget_project();
+        // the loop the song was saved with
+        if let Some(l) = &self.loaded {
+            if let Some((a, b, on)) = saved_loop(&l.project) {
+                self.playlist.song_loop = Some((a, b));
+                self.playlist.loop_on = on;
+            }
+        }
     }
 
     /// Whether the project has a file to be saved to.
@@ -446,7 +473,17 @@ impl ProjectState {
         if path.is_empty() {
             return Err("no file to save to".into());
         }
-        let bytes = encode(&l.project, &l.samples, true).map_err(|e| e.to_string())?;
+        // the song's loop goes with it (the playlist keeps it outside the project, as
+        // setting it is no edit)
+        let mut project = (*l.project).clone();
+        project.extra.remove(LOOP_KEY);
+        if let Some((a, b)) = self.playlist.song_loop {
+            project.extra.insert(
+                LOOP_KEY.into(),
+                serde_json::json!({ "start": a, "end": b, "on": self.playlist.loop_on }),
+            );
+        }
+        let bytes = encode(&project, &l.samples, true).map_err(|e| e.to_string())?;
         let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, bytes).map_err(|e| format!("{tmp}: {e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))?;
@@ -572,7 +609,7 @@ impl App {
                 self.project.playlist.waves.insert(id, Arc::new(wave));
             }
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.toggle_value(&mut self.project.playlist.show_picker, "Picker")
                 .on_hover_text("Show or hide the list of patterns, audio clips and automation clips");
             ui.separator();
@@ -610,10 +647,11 @@ impl App {
                     }
                 });
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false))
+            // a fixed size, so a wrapped toolbar wraps it like the rest
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.playlist.zoom, 0.03..=0.6).show_value(false))
                 .on_hover_text("Ctrl+wheel zooms around the pointer");
             ui.label("Height");
-            ui.add(egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.playlist.row, 24.0..=96.0).show_value(false))
                 .on_hover_text("The height of the playlist's tracks");
             let has_loop = self.project.playlist.song_loop.is_some();
             let mut on = self.project.playlist.loop_on;
@@ -634,11 +672,11 @@ impl App {
                 let w = ui.clip_rect().width().max(400.0);
                 self.project.playlist.zoom = playlist::fit_zoom(&project, w);
             }
-            ui.label(
-                RichText::new("Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Drag along the ruler to loop, right click it for markers; Alt+Left/Right jump between markers. Drop a sound file here for an audio clip.")
-                    .weak()
-                    .size(11.0),
-            );
+            // the help fills what room is left and is cut short there (the whole of it
+            // on hover), so it never makes the window wider than the screen
+            const HELP: &str = "Click places the picked clip, drag moves, drag an edge to resize, right click deletes, Ctrl+B duplicates. Drag along the ruler to loop, right click it for markers; Alt+Left/Right jump between markers. Drop a sound file here for an audio clip.";
+            ui.add(egui::Label::new(RichText::new(HELP).weak().size(11.0)).truncate())
+                .on_hover_text(HELP);
         });
         let edits = playlist::draw(
             ui,
@@ -668,9 +706,22 @@ impl App {
         let project = l.project.clone();
         // the channels to pick from, and the snap and zoom, sit above the roll
         ui.horizontal_wrapped(|ui| {
-            for (i, c) in project.channels.iter().enumerate() {
-                ui.selectable_value(&mut self.project.channel, i, &c.name);
-            }
+            // the channel whose notes show, picked from a list as in FL (a button for
+            // each channel would make the toolbar wider than the screen in a big song)
+            let current = project
+                .channels
+                .get(self.project.channel)
+                .map_or_else(String::new, |c| c.name.clone());
+            egui::ComboBox::from_id_salt("roll-channel")
+                .selected_text(current)
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for (i, c) in project.channels.iter().enumerate() {
+                        ui.selectable_value(&mut self.project.channel, i, &c.name);
+                    }
+                })
+                .response
+                .on_hover_text("The channel whose notes the roll shows and edits");
             ui.separator();
             for (t, name, tip) in [
                 (
@@ -811,7 +862,7 @@ impl App {
             .response
             .on_hover_text("Each click draws this chord on the key clicked");
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false))
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.project.roll.zoom, 0.1..=2.0).show_value(false))
                 .on_hover_text("Ctrl+wheel zooms in time around the pointer, Alt+wheel zooms the keys");
         });
         let edits = roll::draw(

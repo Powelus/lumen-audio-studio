@@ -846,7 +846,7 @@ impl App {
                         (
                             m.id.clone(),
                             format!(
-                                "CC {} (channel {})  \u{2192}  {}",
+                                "CC {} (channel {})  \u{27a1}  {}",
                                 m.cc,
                                 m.channel + 1,
                                 crate::auto::describe_target(&l.project, &m.target)
