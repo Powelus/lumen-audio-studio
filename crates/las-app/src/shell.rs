@@ -160,7 +160,10 @@ impl App {
     /// under the pointer, a bar long.
     pub(crate) fn drop_highlight(&self, ctx: &egui::Context) {
         let from_os = ctx.input(|i| !i.raw.hovered_files.is_empty());
-        if !from_os && egui::DragAndDrop::payload::<Dragged>(ctx).is_none() {
+        if !from_os
+            && !egui::DragAndDrop::payload::<Dragged>(ctx)
+                .is_some_and(|d| !matches!(*d, Dragged::Preset(..)))
+        {
             return;
         }
         let Some(area) = self
