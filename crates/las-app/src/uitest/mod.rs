@@ -5,6 +5,7 @@
 
 mod flows;
 mod glyphs;
+mod weave;
 
 use crate::app::App;
 use eframe::egui::{self, accesskit, pos2, Event, Key, Modifiers, PointerButton, Pos2, Rect};
@@ -280,6 +281,46 @@ impl Harness {
         self.step();
         self.set_modifiers(Modifiers::NONE);
         self.step();
+    }
+
+    /// Press the main button at `at` (and keep it down).
+    pub fn press_at(&mut self, at: Pos2) {
+        self.hover(at);
+        self.press(at, PointerButton::Primary, self.modifiers, true);
+        self.step();
+    }
+
+    /// Move the pointer to `to` in steps, a frame each, with the button as it is.
+    pub fn move_to(&mut self, to: Pos2, steps: usize) {
+        let from = self.pointer;
+        for i in 1..=steps {
+            let p = from + (to - from) * (i as f32 / steps as f32);
+            self.pointer = p;
+            self.events.push(Event::PointerMoved(p));
+            self.step();
+        }
+    }
+
+    /// Let go of the main button where the pointer is.
+    pub fn release(&mut self) {
+        let at = self.pointer;
+        self.press(at, PointerButton::Primary, self.modifiers, false);
+        self.step();
+        self.step();
+    }
+
+    /// Turn the mouse wheel by `points` (positive is up) over `at`.
+    pub fn wheel_at(&mut self, at: Pos2, points: f32) {
+        self.hover(at);
+        self.events.push(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, points),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: self.modifiers,
+        });
+        // the wheel is smoothed over a few frames
+        self.run(12);
     }
 
     /// Click the widget labelled `label`.

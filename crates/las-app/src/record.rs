@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 /// The input device, open and ready to capture.
 pub struct Recorder {
-    _stream: cpal::Stream,
+    /// The input stream, kept on the audio-control thread.
+    _stream: crate::audioctl::StreamHandle,
     capture: Arc<AtomicBool>,
     samples: Consumer<f32>,
     pub channels: usize,
@@ -24,6 +25,12 @@ impl Recorder {
     /// Open the input device of that name (or the default one, for "" or one that is
     /// not there).
     pub fn open(name: &str, driver: &str) -> Result<Self, String> {
+        let (name, driver) = (name.to_string(), driver.to_string());
+        crate::audioctl::run(move || Self::open_here(&name, &driver))?
+    }
+
+    /// [`Recorder::open`], on the audio-control thread.
+    fn open_here(name: &str, driver: &str) -> Result<Self, String> {
         let device = crate::audio::pick_input(name, driver).ok_or("no audio input device found")?;
         let supported = device
             .default_input_config()
@@ -47,7 +54,7 @@ impl Recorder {
             .play()
             .map_err(|e| format!("cannot start the input: {e}"))?;
         Ok(Self {
-            _stream: stream,
+            _stream: crate::audioctl::StreamHandle::keep(stream),
             capture,
             samples: rx,
             channels,

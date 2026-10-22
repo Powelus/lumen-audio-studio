@@ -94,6 +94,8 @@ pub struct ProjectState {
     stale: bool,
     /// Count in (beats, tempo) before the player that is being built starts.
     pub count_in: Option<(u32, f64)>,
+    /// The audio thread's panics seen so far (see [`crate::audio::Meters::faults`]).
+    faults_seen: u32,
 }
 
 /// Where a saved project keeps its song loop.
@@ -345,6 +347,20 @@ impl ProjectState {
         f(Arc::make_mut(&mut l.project));
         self.dirty = true;
         self.stale = true;
+    }
+
+    /// An edit the player has already been told about (a Weave patch's values, sent
+    /// live): the project changes, and the player is built again only if one is being
+    /// built now (it would not have the edit) or there is none.
+    pub fn modify_live(&mut self, begin: bool, f: impl FnOnce(&mut Project)) {
+        let stale = self.stale;
+        self.modify(begin, f);
+        self.stale = stale || self.building.is_some() || !self.has_player;
+    }
+
+    /// Whether a player that takes live edits is playing the project now.
+    pub fn takes_live_edits(&self) -> bool {
+        self.has_player && self.building.is_none()
     }
 
     /// Carry out channel setting edits (level, pan, mute, swing).
@@ -903,10 +919,13 @@ impl App {
         }
         if rec && self.settings.record_audio {
             if self.shell.recorder.is_none() {
-                match crate::record::Recorder::open(
-                    &self.settings.audio.input,
-                    &self.settings.audio.driver,
-                ) {
+                // under Automatic, the driver the output opened on (one ASIO driver
+                // serves both ways)
+                let driver = match (&self.audio, self.settings.audio.driver.as_str()) {
+                    (Some(a), "") if a.driver.eq_ignore_ascii_case("asio") => a.driver.clone(),
+                    _ => self.settings.audio.driver.clone(),
+                };
+                match crate::record::Recorder::open(&self.settings.audio.input, &driver) {
                     Ok(r) => self.shell.recorder = Some(r),
                     // recording notes only is fine: just say so
                     Err(e) if self.settings.record_notes => {
@@ -970,6 +989,18 @@ impl App {
         // project, and if the song is playing it carries on from where it is
         if let Some(r) = &mut self.shell.recorder {
             r.drain();
+        }
+        // a panic on the audio thread dropped the player: say so and build a new one
+        if let Some(f) = self.audio.as_ref().map(|a| a.meters.faults()) {
+            if f != self.project.faults_seen {
+                self.project.faults_seen = f;
+                self.project.has_player = false;
+                self.project.stale = true;
+                self.project.error = Some(
+                    "The audio engine hit an error and was restarted. If it happens again, please report it."
+                        .into(),
+                );
+            }
         }
         let quiet = !ctx.input(|i| i.pointer.any_down());
         if self.project.stale && quiet && self.project.building.is_none() {

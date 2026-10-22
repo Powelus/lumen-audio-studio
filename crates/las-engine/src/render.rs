@@ -481,6 +481,17 @@ impl Engine {
         }
     }
 
+    pub(crate) fn weave_patch(
+        &mut self,
+        channel: usize,
+        patch: Box<las_dsp::modular::Patch>,
+    ) -> Box<las_dsp::modular::Patch> {
+        match self.channels.get_mut(channel) {
+            Some(ch) => ch.inst.weave_patch(patch),
+            None => patch,
+        }
+    }
+
     pub(crate) fn note_off(&mut self, channel: usize, key: f64, time: f64) {
         if let Some(ch) = self.channels.get_mut(channel) {
             ch.inst.note_off(key, time);

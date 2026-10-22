@@ -704,6 +704,50 @@ impl Patch {
     }
 
     /// Whether a cable joins ports that exist.
+    /// Why a module's parameter is not heard as the patch is now (`None` when it is):
+    /// a control that only works with another setting, or that a cable overrides.
+    pub fn idle_reason(&self, node: &Node, param: &str) -> Option<&'static str> {
+        let plugged = |input: &str| {
+            self.cables
+                .iter()
+                .any(|c| c.to == node.id && c.input == input && self.is_valid(c))
+        };
+        let wave = node.param("wave") as usize;
+        match (node.kind, param) {
+            (Kind::Osc, "pw") if wave != 3 && wave != 4 => {
+                Some("only the square and morph waves have a pulse width")
+            }
+            (Kind::Osc, "morph") if wave != 4 => Some("only the morph wave morphs"),
+            (Kind::Osc, "detune" | "spread") if node.param("voices") < 2.0 => {
+                Some("needs 2 or more unison voices")
+            }
+            (Kind::Seq, "rate") if plugged("clock") => Some("the clock input sets the pace"),
+            (Kind::Hold, "rate") if plugged("trig") => Some("the trig input sets the pace"),
+            (Kind::Seq, n) if n.starts_with("step_") => {
+                let k: f64 = n[5..].parse().unwrap_or(1.0);
+                (k > node.param("length")).then_some("past the sequence's length")
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `other` has the same modules (ids and kinds, in order) and the same
+    /// cables (ends and order) as this patch: it differs only in values (parameters,
+    /// cable amounts, voices, mono, glide, volume, places), so a playing synth can take
+    /// it live with [`Modular::apply_live`].
+    pub fn same_shape(&self, other: &Patch) -> bool {
+        self.nodes.len() == other.nodes.len()
+            && self.cables.len() == other.cables.len()
+            && self
+                .nodes
+                .iter()
+                .zip(&other.nodes)
+                .all(|(a, b)| a.id == b.id && a.kind == b.kind)
+            && self.cables.iter().zip(&other.cables).all(|(a, b)| {
+                a.from == b.from && a.to == b.to && a.output == b.output && a.input == b.input
+            })
+    }
+
     pub fn is_valid(&self, c: &Cable) -> bool {
         let (Some(a), Some(b)) = (self.node(c.from), self.node(c.to)) else {
             return false;
@@ -2293,11 +2337,25 @@ pub struct Controls {
     pub pressure: f32,
 }
 
+/// How many voices a patch lets play: 1 in mono, else its `voices` (1 to
+/// [`MAX_VOICES`]).
+fn poly_of(p: &Patch) -> usize {
+    if p.mono {
+        1
+    } else {
+        p.voices.clamp(1, MAX_VOICES)
+    }
+}
+
 /// The modular synth.
 pub struct Modular {
     patch: Patch,
     graph: Graph,
+    /// Always [`MAX_VOICES`] of them, made up front, so the number that plays can
+    /// change at any time (live, while keys are held) without making any.
     voices: Vec<Voice>,
+    /// How many of `voices` new notes may take (1 in mono).
+    poly: usize,
     sr: f64,
     clock: u64,
     controls: Controls,
@@ -2310,18 +2368,14 @@ pub struct Modular {
 impl Modular {
     pub fn new(patch: &Patch, sr: f64) -> Self {
         let graph = Graph::compile(patch);
-        let count = if patch.mono {
-            1
-        } else {
-            patch.voices.clamp(1, MAX_VOICES)
-        };
-        let voices = (0..count)
+        let voices = (0..MAX_VOICES)
             .map(|v| Voice::new(&graph, v as u32, sr))
             .collect();
         Self {
             patch: patch.clone(),
             graph,
             voices,
+            poly: poly_of(patch),
             sr,
             clock: 0,
             controls: Controls::default(),
@@ -2334,33 +2388,81 @@ impl Modular {
         &self.patch
     }
 
-    /// Take a new patch. A patch that only moved parameters or settings keeps the
-    /// voices playing; one with other modules or cables starts them again.
+    /// Take a new patch. A patch of the same shape (see [`Patch::same_shape`]) keeps
+    /// the voices playing; one with other modules or cables starts them again.
     pub fn set_patch(&mut self, patch: &Patch) {
-        let same_shape = patch.cables == self.patch.cables
-            && patch.voices == self.patch.voices
-            && patch.mono == self.patch.mono
-            && patch.nodes.len() == self.patch.nodes.len()
-            && patch
-                .nodes
-                .iter()
-                .zip(&self.patch.nodes)
-                .all(|(a, b)| a.id == b.id && a.kind == b.kind);
-        if same_shape {
-            for node in &patch.nodes {
-                for p in node.kind.spec().params {
-                    self.set_param(node.id, p.name, node.param(p.name));
-                }
-            }
-            self.patch = patch.clone();
-            let g = Graph::compile(patch);
-            self.graph.glide = g.glide;
-            self.graph.volume = g.volume;
+        if self.patch.same_shape(patch) {
+            drop(self.apply_live(Box::new(patch.clone())));
         } else {
             let controls = self.controls;
             *self = Self::new(patch, self.sr);
             self.controls = controls;
         }
+    }
+
+    /// Take a patch of the same shape as the one playing, while it plays: parameters,
+    /// cable amounts, voices, mono, legato, glide and volume move at once and the
+    /// voices sounding carry on. This neither allocates nor frees, so the audio thread
+    /// can call it: the patch it replaces comes back, to be dropped elsewhere. A patch
+    /// of another shape is not taken and comes back as it was.
+    pub fn apply_live(&mut self, mut patch: Box<Patch>) -> Box<Patch> {
+        if !self.patch.same_shape(&patch) {
+            return patch;
+        }
+        for (k, c) in self.graph.nodes.iter_mut().enumerate() {
+            let Some(node) = self.graph.ids.get(k).and_then(|&id| patch.node(id)) else {
+                continue;
+            };
+            let spec = c.kind.spec();
+            for (pi, ps) in spec.params.iter().enumerate() {
+                if let (Some(b), Some(v)) = (c.base.get_mut(pi), c.value.get_mut(pi)) {
+                    *b = ps.normalize(node.param(ps.name));
+                    *v = ps.denormalize(*b);
+                }
+            }
+            // the cables into this module, in the order compile put them in
+            for (k_in, sources) in c.sources.iter_mut().enumerate() {
+                let into = patch.cables.iter().filter(|cb| {
+                    cb.to == node.id
+                        && patch.is_valid(cb)
+                        && node.kind.input_index(&cb.input) == Some(k_in)
+                });
+                for (src, cb) in sources.iter_mut().zip(into) {
+                    src.1 = cb.amount as f32;
+                }
+            }
+        }
+        self.graph.glide = if patch.mono {
+            patch.glide.clamp(0.0, MAX_GLIDE)
+        } else {
+            0.0
+        };
+        self.graph.volume = patch.volume.clamp(0.0, 2.0) as f32;
+        let was_mono = self.patch.mono;
+        std::mem::swap(&mut self.patch, &mut patch);
+        self.set_poly(poly_of(&self.patch), was_mono != self.patch.mono);
+        patch
+    }
+
+    /// Let `poly` voices take notes. Voices past it let go of their keys and ring out;
+    /// a switch between mono and poly lets go of every key.
+    fn set_poly(&mut self, poly: usize, switched: bool) {
+        self.poly = poly.clamp(1, MAX_VOICES);
+        if switched {
+            self.held.clear();
+            for v in &mut self.voices {
+                v.gate = false;
+            }
+            return;
+        }
+        for v in self.voices.iter_mut().skip(self.poly) {
+            v.gate = false;
+        }
+    }
+
+    /// How many voices may play at once now.
+    pub fn polyphony(&self) -> usize {
+        self.poly
     }
 
     /// Move one parameter of a module, in its own units.
@@ -2375,7 +2477,14 @@ impl Modular {
             c.value[pi] = spec.params[pi].denormalize(c.base[pi]);
         }
         if let Some(n) = self.patch.nodes.iter_mut().find(|n| n.id == node) {
-            n.params.insert(name.to_string(), value);
+            // no new string for a parameter the patch already names (automation moves
+            // parameters on the audio thread)
+            match n.params.get_mut(name) {
+                Some(v) => *v = value,
+                None => {
+                    n.params.insert(name.to_string(), value);
+                }
+            }
         }
     }
 
@@ -2394,7 +2503,9 @@ impl Modular {
             }
             let legato = self.patch.legato;
             let last = self.last_pitch;
-            let v = &mut self.voices[0];
+            let Some(v) = self.voices.first_mut() else {
+                return;
+            };
             let slide = legato && v.active && v.gate;
             if !v.active {
                 v.clear();
@@ -2410,19 +2521,37 @@ impl Modular {
             self.last_pitch = Some((f64::from(key) - 60.0) / 12.0);
             return;
         }
-        // the same key again, a free voice, or the oldest
-        let v = self
-            .voices
+        // the same key again, a free voice, or one to take over (of the first `poly`)
+        let poly = self.poly.clamp(1, self.voices.len().max(1));
+        let pool = &self.voices[..poly.min(self.voices.len())];
+        let v = pool
             .iter()
             .position(|v| v.active && v.key == key)
-            .or_else(|| self.voices.iter().position(|v| !v.active))
+            .or_else(|| pool.iter().position(|v| !v.active))
+            // then the oldest of the ones ringing out, then the oldest held
+            .or_else(|| {
+                pool.iter()
+                    .enumerate()
+                    .filter(|(_, v)| !v.gate)
+                    .min_by_key(|(_, v)| v.age)
+                    .map(|(i, _)| i)
+            })
             .unwrap_or_else(|| {
-                (0..self.voices.len())
-                    .min_by_key(|&i| self.voices[i].age)
-                    .unwrap_or(0)
+                pool.iter()
+                    .enumerate()
+                    .min_by_key(|(_, v)| v.age)
+                    .map_or(0, |(i, _)| i)
             });
         let last = self.last_pitch;
-        let voice = &mut self.voices[v];
+        // a voice past `poly` (it was ringing out) that has the key again stops
+        for o in self.voices.iter_mut().skip(poly) {
+            if o.active && o.key == key {
+                o.gate = false;
+            }
+        }
+        let Some(voice) = self.voices.get_mut(v) else {
+            return;
+        };
         if !voice.active {
             voice.clear();
             voice.pitch = last.unwrap_or((f64::from(key) - 60.0) / 12.0);
@@ -2441,7 +2570,9 @@ impl Modular {
         if self.patch.mono {
             self.held.retain(|&k| k != key);
             let legato = self.patch.legato;
-            let v = &mut self.voices[0];
+            let Some(v) = self.voices.first_mut() else {
+                return;
+            };
             if v.active && v.key == key {
                 match self.held.last() {
                     // back to the key still held
@@ -3217,6 +3348,120 @@ mod tests {
     }
 
     #[test]
+    fn the_voice_count_changes_live_at_any_time_while_keys_play() {
+        // every count from 0 to past the most, up and down, mono and back, with keys
+        // held and keys coming and going: nothing panics and the voices that may take
+        // notes never pass the count
+        for (_, base) in factory() {
+            let mut m = Modular::new(&base, SR);
+            let (mut l, mut r) = (vec![0.0; 97], vec![0.0; 97]);
+            let mut key = 40u8;
+            for step in 0..80usize {
+                let mut p = m.patch().clone();
+                p.voices = [0, 1, 2, 7, 32, 33, 3, 1, 100, 5][step % 10];
+                p.mono = step % 7 == 3;
+                drop(m.apply_live(Box::new(p.clone())));
+                assert_eq!(m.polyphony(), poly_of(&p));
+                for _ in 0..3 {
+                    m.note_on(key, 0.8);
+                    key = 40 + (key - 39) % 40;
+                }
+                m.note_off(key.wrapping_sub(2));
+                m.render(&mut l, &mut r);
+                let gated = m.voices.iter().filter(|v| v.active && v.gate).count();
+                assert!(gated <= m.polyphony(), "{gated} > {}", m.polyphony());
+                assert!(l.iter().chain(&r).all(|x| x.is_finite()));
+            }
+        }
+    }
+
+    #[test]
+    fn fewer_voices_let_the_extra_ones_ring_out_and_more_take_new_keys() {
+        let mut p = sine_patch();
+        p.voices = 8;
+        let mut m = Modular::new(&p, SR);
+        for k in 60..68 {
+            m.note_on(k, 1.0);
+        }
+        run(&mut m, 480);
+        assert_eq!(m.voices.iter().filter(|v| v.gate).count(), 8);
+        p.voices = 2;
+        drop(m.apply_live(Box::new(p.clone())));
+        // two still held, the rest let go (and still sounding, for now)
+        assert_eq!(m.voices.iter().filter(|v| v.gate).count(), 2);
+        assert!(m.active_voices() > 2);
+        m.note_on(80, 1.0);
+        assert_eq!(m.voices.iter().filter(|v| v.gate).count(), 2);
+        p.voices = 6;
+        drop(m.apply_live(Box::new(p)));
+        for k in 81..85 {
+            m.note_on(k, 1.0);
+        }
+        assert_eq!(m.voices.iter().filter(|v| v.gate).count(), 6);
+    }
+
+    #[test]
+    fn the_patch_settings_change_the_sound_live() {
+        // volume, glide, legato, mono, voices and a cable's amount, each taken by a
+        // playing synth (no rebuild) and heard
+        fn take(base: &Patch, f: impl Fn(&mut Patch)) -> Vec<f32> {
+            let mut m = Modular::new(base, SR);
+            let mut p = base.clone();
+            f(&mut p);
+            let back = m.apply_live(Box::new(p.clone()));
+            assert_eq!(*back, *base, "the old patch comes back");
+            assert_eq!(m.patch(), &p);
+            m.note_on(60, 1.0);
+            let (mut a, _) = run(&mut m, 2_400);
+            m.note_on(72, 1.0);
+            let (b, _) = run(&mut m, 4_800);
+            a.extend(b);
+            a
+        }
+        let base = Patch::default();
+        let plain = take(&base, |_| {});
+        let differs = |x: &[f32]| x.iter().zip(&plain).any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(differs(&take(&base, |p| p.volume = 0.3)), "volume");
+        assert!(differs(&take(&base, |p| p.voices = 1)), "voices");
+        assert!(differs(&take(&base, |p| p.mono = true)), "mono");
+        let mono = |p: &mut Patch| p.mono = true;
+        let mono_plain = take(&base, mono);
+        let glide = take(&base, |p| {
+            p.mono = true;
+            p.glide = 0.3;
+        });
+        assert!(
+            glide
+                .iter()
+                .zip(&mono_plain)
+                .any(|(a, b)| (a - b).abs() > 1e-4),
+            "glide"
+        );
+        let legato = take(&base, |p| {
+            p.mono = true;
+            p.legato = true;
+        });
+        assert!(
+            legato
+                .iter()
+                .zip(&mono_plain)
+                .any(|(a, b)| (a - b).abs() > 1e-4),
+            "legato"
+        );
+        assert!(
+            differs(&take(&base, |p| p.cables[0].amount = 0.25)),
+            "a cable's amount"
+        );
+        // another shape is not taken
+        let mut m = Modular::new(&base, SR);
+        let mut other = base.clone();
+        other.cables.pop();
+        let back = m.apply_live(Box::new(other.clone()));
+        assert_eq!(*back, other);
+        assert_eq!(m.patch(), &base);
+    }
+
+    #[test]
     fn patches_round_trip_and_bad_cables_are_left_out() {
         let mut p = Patch::default();
         p.cables.push(Cable::new(2, "nothing", 4, "in", 1.0));
@@ -3954,5 +4199,159 @@ mod tests {
         assert!(x(1) < x(2) && x(2) < x(4) && x(4) < x(5) && x(5) < x(6));
         // modules in one column do not overlap
         assert_ne!(p.node(2).unwrap().pos, p.node(3).unwrap().pos);
+    }
+}
+
+#[cfg(test)]
+mod control_audit {
+    //! Every control of every module, turned while a note plays, changes the sound.
+    use super::*;
+
+    const SR: f64 = 48_000.0;
+
+    /// A patch that puts module `k` (id 3) where it is heard: an oscillator into its
+    /// audio inputs, the keys into its pitch and gate, its outputs to the output.
+    fn rig(k: Kind) -> Patch {
+        let mut nodes = vec![
+            Node::new(1, Kind::Keys, [0.0; 2]),
+            Node::new(2, Kind::Osc, [0.0; 2]),
+            Node::new(100, Kind::Output, [0.0; 2]).with("level", 1.0),
+        ];
+        let mut cables = vec![Cable::new(1, "pitch", 2, "pitch", 1.0)];
+        if k == Kind::Output {
+            cables.push(Cable::new(2, "out", 100, "left", 1.0));
+            cables.push(Cable::new(2, "right", 100, "right", 1.0));
+            return Patch::new(nodes, cables, 4);
+        }
+        if k == Kind::Keys {
+            // the keys' pitch is heard through the oscillator, their gate as it is
+            cables.push(Cable::new(2, "out", 100, "left", 1.0));
+            cables.push(Cable::new(1, "gate", 100, "right", 1.0));
+            return Patch::new(nodes, cables, 4);
+        }
+        nodes.push(Node::new(3, k, [0.0; 2]));
+        let spec = k.spec();
+        for inp in spec.inputs {
+            let from = match (k, inp.name) {
+                // a sequencer plugged into a clock follows it, not its own rate
+                // and a sample and hold plugged into a trigger follows it, not its rate
+                (Kind::Seq, _) | (Kind::Compare, "b") | (Kind::Hold, "trig") => None,
+                (_, "pitch") => Some((1, "pitch")),
+                (_, "gate" | "trig") => Some((1, "gate")),
+                (_, "in" | "a" | "b" | "c" | "d") => Some((2, "out")),
+                _ => None,
+            };
+            if let Some((n, o)) = from {
+                cables.push(Cable::new(n, o, 3, inp.name, 1.0));
+            }
+        }
+        // every output is heard, on one side or the other
+        for (j, o) in spec.outputs.iter().enumerate() {
+            let side = if j % 2 == 0 { "left" } else { "right" };
+            cables.push(Cable::new(3, o, 100, side, 1.0));
+        }
+        if spec.outputs.len() == 1 {
+            cables.push(Cable::new(3, spec.outputs[0], 100, "right", 1.0));
+        }
+        Patch::new(nodes, cables, 4)
+    }
+
+    /// What else a control needs set to be heard (as the editor says when it is not).
+    fn context(k: Kind, name: &str) -> &'static [(&'static str, f64)] {
+        match (k, name) {
+            (Kind::Osc, "pw") => &[("wave", 3.0)],
+            (Kind::Osc, "morph") => &[("wave", 4.0)],
+            (Kind::Osc, "detune" | "spread") => &[("voices", 3.0)],
+            // every step comes round within the notes, each at its own pitch
+            (Kind::Seq, "length") => &[
+                ("rate", 50.0),
+                ("step_1", 0.1),
+                ("step_2", 0.2),
+                ("step_3", 0.3),
+                ("step_4", 0.4),
+                ("step_5", 0.5),
+                ("step_6", 0.6),
+                ("step_7", 0.7),
+                ("step_8", 0.8),
+            ],
+            (Kind::Seq, _) => &[("rate", 50.0)],
+            _ => &[],
+        }
+    }
+
+    /// Two notes (the second a fifth up, while the first is held), then both let go,
+    /// with the pitch bent and the wheel up.
+    fn play(p: &Patch) -> Vec<f32> {
+        let mut m = Modular::new(p, SR);
+        m.set_controls(Controls {
+            wheel: 0.5,
+            bend: 0.5,
+            pressure: 0.5,
+        });
+        let mut out = Vec::new();
+        let mut chunk = |m: &mut Modular, n: usize| {
+            let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+            m.render(&mut l, &mut r);
+            for (a, b) in l.iter().zip(&r) {
+                out.push(*a);
+                out.push(*b);
+            }
+        };
+        m.note_on(60, 0.7);
+        chunk(&mut m, 12_000);
+        m.note_on(67, 0.9);
+        chunk(&mut m, 12_000);
+        m.note_off(60);
+        m.note_off(67);
+        chunk(&mut m, 24_000);
+        out
+    }
+
+    /// The values a control is tried at: every step, or its ends and middle.
+    fn tries(ps: &ParamSpec) -> Vec<f64> {
+        if ps.steps > 0 {
+            (0..ps.steps).map(|i| ps.min + f64::from(i)).collect()
+        } else {
+            vec![ps.min, ps.denormalize(0.5), ps.max]
+        }
+    }
+
+    #[test]
+    fn every_control_of_every_module_changes_the_sound() {
+        let mut dead = Vec::new();
+        for k in Kind::ALL {
+            let mut base = rig(k);
+            let id = match k {
+                Kind::Output => 100,
+                Kind::Keys => 1,
+                _ => 3,
+            };
+            // a wide oscillator, so that stereo controls have stereo to work on
+            if let Some(n) = base.nodes.iter_mut().find(|n| n.id == 2) {
+                n.params.insert("voices".into(), 3.0);
+            }
+            for ps in k.spec().params {
+                let sounds: Vec<Vec<f32>> = tries(ps)
+                    .into_iter()
+                    .map(|v| {
+                        let mut p = base.clone();
+                        if let Some(n) = p.nodes.iter_mut().find(|n| n.id == id) {
+                            for (c, cv) in context(k, ps.name) {
+                                n.params.insert((*c).to_string(), *cv);
+                            }
+                            n.params.insert(ps.name.to_string(), v);
+                        }
+                        play(&p)
+                    })
+                    .collect();
+                let differs = sounds
+                    .windows(2)
+                    .all(|w| w[0].iter().zip(&w[1]).any(|(a, b)| (a - b).abs() > 1e-4));
+                if !differs {
+                    dead.push(format!("{k:?}.{}", ps.name));
+                }
+            }
+        }
+        assert!(dead.is_empty(), "controls that change nothing: {dead:?}");
     }
 }

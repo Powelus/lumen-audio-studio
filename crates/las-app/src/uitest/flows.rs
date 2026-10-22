@@ -1167,7 +1167,21 @@ fn settings_theme_and_windows_are_kept_after_a_restart() {
     h.menu(&["Options", "Settings..."]);
     h.run(3);
     assert!(!h.app.settings.count_in);
-    let cb = h.get("Count in one bar before recording");
+    // sections above it (FlexASIO on Windows) can push it below the window: scroll to it
+    let win = h
+        .find_all("Settings")
+        .into_iter()
+        .find(|n| n.role == eframe::egui::accesskit::Role::Window)
+        .map(|n| n.rect)
+        .unwrap();
+    let mut cb = h.get("Count in one bar before recording");
+    for _ in 0..30 {
+        if win.contains_rect(cb.rect) {
+            break;
+        }
+        h.wheel_at(win.center(), -120.0);
+        cb = h.get("Count in one bar before recording");
+    }
     h.click_at(cb.rect.center());
     assert!(h.app.settings.count_in, "the box is ticked");
     h.app.shell.open.settings = false;
@@ -1415,4 +1429,43 @@ fn opening_another_project_closes_the_old_ones_instrument_windows() {
     h.app.open_channel(0);
     h.run(3);
     assert!(h.app.shell.open.synth);
+}
+
+#[test]
+fn a_rack_row_with_piano_roll_notes_previews_them_and_a_click_opens_the_roll() {
+    let mut h = Harness::demo();
+    h.app.shell.open.rack = true;
+    h.app.shell.open.roll = false;
+    // give the first channel a long note at another key, so it is no plain step
+    let pattern = h.app.project.pattern;
+    let id = h.project().channels[0].id.clone();
+    h.app.project.modify(true, |p| {
+        let t = f64::from(las_project::TICKS_PER_STEP);
+        let mut n = crate::roll::new_note(67, 2.0 * t, 6.0 * t);
+        n.step = None;
+        p.patterns[pattern].notes.entry(id).or_default().push(n);
+    });
+    h.run(3);
+    let first = h.project().channels[0].name.clone();
+    let preview = h.get(&format!("Piano roll notes of {first}"));
+    h.click_at(preview.rect.center());
+    h.run(3);
+    assert!(
+        h.app.shell.open.roll,
+        "a click on the preview opens the roll"
+    );
+    assert_eq!(h.app.project.channel, 0);
+    let before = h.project().patterns[pattern]
+        .notes
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
+    h.click_at(preview.rect.center());
+    h.run(2);
+    let after = h.project().patterns[pattern]
+        .notes
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
+    assert_eq!(before, after, "the preview toggles no steps");
 }

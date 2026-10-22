@@ -131,6 +131,15 @@ jobs:
           # the plugin host sits next to the app, which starts it for each plugin
           cp "target/${{ matrix.target }}/release/lumen${{ matrix.ext }}" "target/${{ matrix.target }}/release/lumen-plugin-host${{ matrix.ext }}" LICENSE README.md CHANGELOG.md "dist/$name/"
           cp -r examples "dist/$name/examples"
+          # Windows: the FlexASIO driver installer (MIT, github.com/dechamps/FlexASIO), which
+          # Settings > Audio offers to install; pinned to one release and its checksum
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            fx=1.10b
+            mkdir -p "dist/$name/drivers"
+            curl -fsSL --retry 4 --retry-delay 5 -o "dist/$name/drivers/FlexASIO-$fx.exe" "https://github.com/dechamps/FlexASIO/releases/download/flexasio-$fx/FlexASIO-$fx.exe"
+            echo "fe496bcc08d6c421c6244c8a60ac7b538560bda138000fd1a54ab8ebce031209  dist/$name/drivers/FlexASIO-$fx.exe" | sha256sum -c -
+            curl -fsSL --retry 4 --retry-delay 5 -o "dist/$name/drivers/FlexASIO-LICENSE.txt" "https://raw.githubusercontent.com/dechamps/FlexASIO/flexasio-$fx/LICENSE.txt"
+          fi
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then
             7z a -tzip "$name.zip" "$name" >/dev/null

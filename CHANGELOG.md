@@ -2,6 +2,26 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.61
+
+Sound works again on Windows.
+
+- Fixed "No sound: the audio output could not be opened" on Windows. If the driver you chose does not open, Lumen now tries Windows audio on the default device and then every other output, so you get sound whenever any output works.
+- Audio now runs on its own thread: opening the output, listing devices, recording and closing never happen on the window's thread, and a driver that crashes or hangs can no longer stop the app from finding another output.
+- Automatic falls back to Windows audio when no ASIO driver is installed, and leaves the onboard Realtek ASIO driver alone.
+- The app's icon is shown at the left of the toolbar.
+- The menu bar and the toolbar line up: the same side margins, and every toolbar control has the same height on one centre line.
+- When there is no sound, Settings shows what went wrong for each output it tried, with a Copy details button for bug reports. Other messages no longer replace it.
+- Weave no longer freezes when you drag Voices or any other whole-number knob.
+- Every Weave control changes the sound live while you drag it, and one drag is one undo step.
+- Weave knobs and sliders: hold Shift for fine steps, use the mouse wheel, double-click to reset, and see the value in a bubble while you drag.
+- Weave cables are easier to grab, drop and remove.
+- Weave controls that do nothing in the current setting are dimmed, and hovering them tells you why.
+- An audio error in Weave now shows a message and writes a crash log instead of stopping the app.
+- FlexASIO is bundled on Windows, with an Install button in Settings. Choose Shared (the default) or Exclusive mode. Lumen never overwrites FlexASIO settings you made yourself.
+- Automatic now picks, in this order: your audio interface's ASIO driver, FlexASIO, FL Studio ASIO, ASIO4ALL, then Windows audio.
+- Rack rows show a mini piano roll of each channel's notes. Click it to open the piano roll.
+
 ## 0.2.0-alpha.60
 
 Quick search, capturing what you played, rendering, and safer projects.

@@ -677,6 +677,18 @@ impl Instrument {
         }
     }
 
+    /// Take a Weave patch live (see [`crate::external::Instrument::weave_patch`]);
+    /// the patch that comes back is to be freed off the audio thread.
+    pub fn weave_patch(
+        &mut self,
+        patch: Box<las_dsp::modular::Patch>,
+    ) -> Box<las_dsp::modular::Patch> {
+        match &mut self.core {
+            Core::Hosted(h) => h.weave_patch(patch),
+            _ => patch,
+        }
+    }
+
     /// Whether the output is a mono signal (a channel then pans it with the
     /// mono law, which is 3 dB down in the middle).
     pub fn is_mono(&self) -> bool {

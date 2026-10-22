@@ -74,6 +74,9 @@ pub struct App {
     /// MIDI input: the keyboards and controllers listened to.
     pub(crate) midi: crate::midi::MidiHub,
     pub(crate) status: String,
+    /// Why the audio output did not open (empty while it plays). Kept apart from
+    /// `status`, which other messages overwrite.
+    pub(crate) audio_error: String,
     /// The notes of the take being recorded, when recording.
     pub(crate) take: crate::noterec::NoteTake,
     /// The device lists Settings shows (read when it opens, and on Refresh).
@@ -170,22 +173,26 @@ impl App {
         } else {
             Err("no sound device (test)".to_string())
         };
-        let (audio, status) = match started {
+        let (audio, status, audio_error) = match started {
             Ok((audio, tx)) => {
                 midi.set_sender(Some(tx));
                 let status = audio
                     .note
                     .clone()
                     .unwrap_or_else(|| format!("{} at {} Hz", audio.device, audio.sample_rate));
-                (Some(audio), status)
+                (Some(audio), status, String::new())
             }
-            Err(e) => (None, e),
+            Err(e) => {
+                eprintln!("audio: {e}");
+                (None, e.clone(), e)
+            }
         };
         midi.connect(&settings.midi_input);
         let mut app = Self {
             audio,
             midi,
             status,
+            audio_error,
             take: Default::default(),
             devices: None,
             inst: Instrument::Polaris,
@@ -304,6 +311,7 @@ impl App {
                 match w {
                     "rack" => o.rack = false,
                     "playlist" => o.playlist = false,
+                    "mixer" => o.mixer = false,
                     "browser" => app.shell.browser = false,
                     _ => {}
                 }
@@ -313,6 +321,14 @@ impl App {
         // silently, for screenshots on machines without sound
         if std::env::args().any(|a| a == "--demo-song") {
             app.open_demo();
+        }
+        // `--pattern 2` shows that pattern (in the rack and piano roll)
+        if let Some(n) = std::env::args()
+            .skip_while(|a| a != "--pattern")
+            .nth(1)
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            app.project.pattern = n;
         }
         // `--channel 1` opens that channel's instrument window (after the demo song, so
         // it is that song's channel); `--channel-tab envelope` picks the tab of a
@@ -1995,6 +2011,8 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        /// The left and right margin of the menu bar and the toolbar.
+        const TOP_MARGIN_X: i8 = 10;
         let ctx = ui.ctx().clone();
         self.paint_theme(&ctx);
         let p = crate::theme::pal();
@@ -2003,7 +2021,8 @@ impl eframe::App for App {
             .frame(
                 egui::Frame::new()
                     .fill(p.bg)
-                    .inner_margin(egui::Margin::symmetric(8, 2)),
+                    // the same side margins as the toolbar under it, so both line up
+                    .inner_margin(egui::Margin::symmetric(TOP_MARGIN_X, 2)),
             )
             .show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
@@ -2023,7 +2042,7 @@ impl eframe::App for App {
             .frame(
                 egui::Frame::new()
                     .fill(p.panel2)
-                    .inner_margin(egui::Margin::symmetric(10, 8)),
+                    .inner_margin(egui::Margin::symmetric(TOP_MARGIN_X, 6)),
             )
             .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status")

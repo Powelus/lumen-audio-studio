@@ -96,6 +96,10 @@ impl Instrument for Weave {
         }
         self.synth.set_controls(self.controls);
     }
+
+    fn weave_patch(&mut self, patch: Box<Patch>) -> Box<Patch> {
+        self.synth.apply_live(patch)
+    }
 }
 
 #[cfg(test)]

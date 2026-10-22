@@ -7,9 +7,11 @@
 mod analyser;
 mod app;
 mod audio;
+mod audioctl;
 mod auto;
 mod clipedit;
 mod faces;
+mod flexasio;
 mod fxui;
 mod hosted;
 mod inst;
@@ -42,11 +44,40 @@ mod weave_ui;
 mod widgets;
 mod workflow;
 
+/// A panic anywhere (the window, the audio thread, a background job) is written to
+/// `crash.log` in the config folder as well as to stderr, which a Windows build does
+/// not show: so a crash never goes unexplained.
+fn install_panic_log() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let text = format!(
+            "lumen {} panicked on thread {}: {info}\n{}\n",
+            env!("CARGO_PKG_VERSION"),
+            thread.name().unwrap_or("?"),
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Some(dir) = presets::config_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"))
+            {
+                let _ = f.write_all(text.as_bytes());
+            }
+        }
+        default(info);
+    }));
+}
+
 fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("lumen {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    install_panic_log();
     // plugins are looked for in the background; the browser lists what is found
     las_host::install();
     {
