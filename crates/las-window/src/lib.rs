@@ -173,6 +173,24 @@ mod imp {
     }
 }
 
+/// The system's mouse cursor, in physical pixels of the screen, where the system
+/// can say (Windows). egui hears no pointer moves while files are dragged in from
+/// Explorer, so the app reads it from here to place a drop.
+#[cfg(windows)]
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos only writes the POINT it is given.
+    (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+}
+
+/// The system's mouse cursor: not read on this system (the pointer events are right).
+#[cfg(not(windows))]
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    None
+}
+
 #[cfg(windows)]
 mod imp {
     use std::ffi::c_void;

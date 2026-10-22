@@ -2069,6 +2069,7 @@ dependencies = [
  "las-engine",
  "las-host",
  "las-project",
+ "las-window",
  "memory-stats",
  "midir",
  "rfd",

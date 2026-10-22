@@ -25,6 +25,7 @@ mod playlist;
 mod presets;
 mod project;
 mod rack;
+mod raise;
 mod record;
 mod roll;
 mod sampleedit;

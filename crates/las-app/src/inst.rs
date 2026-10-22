@@ -43,6 +43,23 @@ impl Bound {
     }
 }
 
+/// Whether keys played live (computer keyboard, on-screen piano, MIDI) go to the
+/// project's channel rather than the standalone synth. The standalone synth only
+/// stands in for a channel whose window is a synth panel (it holds that channel's
+/// patch, edited without a rebuild); every other instrument window (Nebula, LumaPad,
+/// Weave, the sampler, ...) plays its channel, so a preset or edit there is heard at
+/// once instead of the standalone synth's old sound.
+pub fn keys_to_project(synth_open: bool, bound: Option<Bound>) -> bool {
+    !synth_open || !matches!(bound, None | Some(Bound::Synth(_)))
+}
+
+impl crate::app::App {
+    /// Whether keys played live go to the project's channel; see [`keys_to_project`].
+    pub(crate) fn keys_to_project(&self) -> bool {
+        keys_to_project(self.shell.open.synth, self.bound)
+    }
+}
+
 /// The synth panel that edits a plugin, if there is one. The wavetable family
 /// (Polaris, Vortex, Monolith, Zenith, TriOsc) shares one patch format.
 pub fn panel_for(plugin_id: &str) -> Option<Instrument> {
@@ -168,8 +185,7 @@ impl App {
         let (plugin, state) = (c.plugin_id.clone(), c.state.clone());
         self.project.channel = channel;
         // the window opens and comes to the front, as a double click does in FL Studio
-        self.shell.open.synth = true;
-        self.shell.raise_synth = true;
+        self.shell.open.show(crate::raise::Win::Synth);
         match panel_for(&plugin) {
             Some(inst) => {
                 let k = index(inst);
@@ -210,7 +226,7 @@ impl App {
         }
         // loading is not an edit
         self.synth_dirty = false;
-        self.shell.open.synth = true;
+        self.shell.open.show(crate::raise::Win::Synth);
     }
 
     /// Write the synth panels' patch and rack back into the bound channel.
@@ -386,6 +402,25 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_play_the_channel_unless_a_synth_panel_stands_in_for_it() {
+        assert!(keys_to_project(false, None));
+        assert!(keys_to_project(false, Some(Bound::Synth(0))));
+        assert!(!keys_to_project(true, None));
+        assert!(!keys_to_project(true, Some(Bound::Synth(0))));
+        // Nebula's window open: a preset picked there is heard from the channel
+        for b in [
+            Bound::Nebula(1),
+            Bound::Pads(1),
+            Bound::Weave(1),
+            Bound::Sampler(1),
+            Bound::Basic(1),
+            Bound::Hosted(1),
+        ] {
+            assert!(keys_to_project(true, Some(b)), "{b:?}");
+        }
+    }
 
     #[test]
     fn the_wavetable_family_shares_the_polaris_panel() {

@@ -621,7 +621,7 @@ impl App {
         let mut an = Analyser::new(44_100.0);
         an.pending = Some(rx);
         self.analyser = Some(an);
-        self.shell.open.analyser = true;
+        self.shell.open.show(crate::raise::Win::Analyser);
     }
 
     pub(crate) fn analyser_window(&mut self, ctx: &egui::Context) {
@@ -630,7 +630,13 @@ impl App {
             return;
         }
         let screen = ctx.content_rect();
+        crate::raise::front(
+            ctx,
+            crate::raise::Win::Analyser,
+            crate::raise::Win::Analyser.id(),
+        );
         egui::Window::new("Analyser")
+            .id(crate::raise::Win::Analyser.id())
             .open(&mut open)
             .default_size([screen.width() * 0.6, screen.height() * 0.6])
             .min_size([560.0, 380.0])

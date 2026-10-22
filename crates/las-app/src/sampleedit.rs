@@ -1016,6 +1016,7 @@ impl crate::app::App {
             }
         }
         self.sample_editor = Some(ed);
+        crate::raise::raise(crate::raise::Win::SampleEditor);
     }
 
     /// The sample editor's window, while it is open.
@@ -1046,10 +1047,15 @@ impl crate::app::App {
             let l = self.project.loaded.as_ref()?;
             l.project.channel(id).map(|c| c.name.clone())
         });
+        crate::raise::front(
+            ctx,
+            crate::raise::Win::SampleEditor,
+            crate::raise::Win::SampleEditor.id(),
+        );
         let mut keep = true;
         let mut out = Out::default();
         egui::Window::new(format!("Sample editor: {}", ed.name))
-            .id(egui::Id::unique("sample-editor"))
+            .id(crate::raise::Win::SampleEditor.id())
             .constrain_to(area)
             .resizable(true)
             .default_pos(area.min + vec2(120.0, 90.0))

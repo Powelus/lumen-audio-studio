@@ -200,7 +200,10 @@ impl ProjectState {
                     // a playing song picks the loop up from where it is
                     self.stale = true;
                 }
-                PlEdit::OpenAuto(id) => self.open_auto = Some(id.clone()),
+                PlEdit::OpenAuto(id) => {
+                    self.open_auto = Some(id.clone());
+                    crate::raise::raise(crate::raise::Win::Automation);
+                }
                 PlEdit::ChoosePattern(id) => {
                     if let Some(i) = l.project.patterns.iter().position(|p| &p.id == id) {
                         self.pattern = i;
@@ -254,6 +257,7 @@ impl ProjectState {
         let mut id = String::new();
         self.modify(true, |p| id = auto::create_clip(p, req, at));
         self.open_auto = Some(id);
+        crate::raise::raise(crate::raise::Win::Automation);
     }
 
     /// Carry out the edits of an automation clip's curve.
@@ -283,6 +287,7 @@ impl ProjectState {
                 pending.push(req.clone());
             } else if let MixEdit::OpenEffect { insert, slot } = e {
                 self.open_effect = Some((*insert, *slot));
+                crate::raise::raise(crate::raise::Win::Effect);
             } else if *e == MixEdit::Begin {
                 self.undo.push(l.project.clone());
                 if self.undo.len() > 200 {
