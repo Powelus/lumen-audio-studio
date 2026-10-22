@@ -24,7 +24,7 @@ pub const INSTRUMENTS: &[(&str, &str, &str)] = &[
 ];
 
 pub fn instrument_known(id: &str) -> bool {
-    INSTRUMENTS.iter().any(|i| i.0 == id)
+    INSTRUMENTS.iter().any(|i| i.0 == id) || id == crate::slicer::SLICER_ID
 }
 
 /// Milliseconds since 1970, as the web version stamps projects.

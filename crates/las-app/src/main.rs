@@ -27,6 +27,7 @@ mod project;
 mod rack;
 mod record;
 mod roll;
+mod sampleedit;
 mod samplerui;
 mod settings;
 mod shell;

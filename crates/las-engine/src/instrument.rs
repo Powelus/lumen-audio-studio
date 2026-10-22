@@ -350,7 +350,9 @@ impl Instrument {
                 Box::new(crate::weave::Weave::new(state, sr)),
                 sr,
             ))),
-            "sampler" => Core::Sampler(Box::new(Sampler::new(state, sample, sr))),
+            "sampler" | las_project::slicer::SLICER_ID => {
+                Core::Sampler(Box::new(Sampler::new(state, sample, sr)))
+            }
             "lumapad" => Core::Pads(Box::new(PadBank::new(state, pad_samples, sr))),
             "audioclip" => Core::AudioClip(Box::new(AudioClipper::new(state, sample, sr))),
             PLUGIN_ID => plugin_host()

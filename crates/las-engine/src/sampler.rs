@@ -456,8 +456,24 @@ impl Sampler {
         if s.get("cut").is_some_and(truthy) {
             self.cut_voices(time);
         }
-        let semis =
-            f64::from(key) - n("root", 60.0) + n("tune", 0.0) + (n("fine", 0.0) + fine) / 100.0;
+        // a slicer plays slice N of its sample, unpitched, on key C5 + N
+        let slice = s.get("slices").and_then(Value::as_array).map(|sl| {
+            let i = usize::try_from(key - 60).ok().filter(|&i| i < sl.len());
+            i.map(|i| {
+                let at = |k: usize| sl.get(k).and_then(Value::as_f64);
+                (at(i).unwrap_or(0.0), at(i + 1).unwrap_or(1.0))
+            })
+        });
+        if slice == Some(None) {
+            return;
+        }
+        let slice = slice.flatten();
+        let pitch = if slice.is_some() {
+            0.0
+        } else {
+            f64::from(key) - n("root", 60.0)
+        };
+        let semis = pitch + n("tune", 0.0) + (n("fine", 0.0) + fine) / 100.0;
         let vel_to_vol = n("velToVol", 0.7);
         let gain = 1.0 - vel_to_vol + vel_to_vol * vel;
         // the node's playbackRate is a float
@@ -468,7 +484,7 @@ impl Sampler {
             n("sustain", 1.0),
             n("release", 0.08) * rel_scale,
         );
-        let (start, end) = (n("start", 0.0), n("end", 1.0));
+        let (start, end) = slice.unwrap_or((n("start", 0.0), n("end", 1.0)));
         let amount = n("fltEnvAmt", 0.0);
         let filter = (amount != 0.0).then(|| {
             FilterEnv::new(

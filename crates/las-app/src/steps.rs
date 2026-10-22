@@ -776,7 +776,14 @@ pub fn draw(
                         *selected = i;
                     }
                     if resp.double_clicked() {
-                        out.open_synth = Some(i);
+                        if c.plugin_id == "audioclip" {
+                            // as FL opens an audio clip's sound in Edison
+                            crate::sampleedit::request(crate::sampleedit::Request::Edit(
+                                c.id.clone(),
+                            ));
+                        } else {
+                            out.open_synth = Some(i);
+                        }
                     }
                     let resp = resp.on_hover_text("Double click: instrument. Right click: more.");
                     resp.context_menu(|ui| {
@@ -1000,6 +1007,9 @@ fn channel_menu(
     {
         out.open_settings = Some(i);
         ui.close();
+    }
+    if c.sample_id.is_some() {
+        crate::sampleedit::menu_items(ui, &c.id);
     }
     ui.separator();
     if ui.button("Rename...").clicked() {

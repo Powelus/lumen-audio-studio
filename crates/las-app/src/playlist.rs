@@ -527,6 +527,7 @@ fn fade_handle_at(
 /// The audio clip part of the playlist's right click menu: the clip's edits.
 fn audio_clip_menu(ui: &mut Ui, project: &Project, c: &Clip, edits: &mut Vec<PlEdit>) {
     ui.label(egui::RichText::new("Audio clip").strong());
+    crate::sampleedit::menu_items(ui, &c.ref_id);
     let seconds = sample_seconds(project, c);
     let before = c.audio.clone().unwrap_or_default();
     let out = crate::clipedit::panel(ui, &before, seconds, project.bpm, c.length);

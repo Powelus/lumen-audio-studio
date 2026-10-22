@@ -128,6 +128,8 @@ pub struct App {
     pub(crate) weave: crate::weave_ui::WeaveEditor,
     /// The hosted plugins' own windows that are open.
     pub(crate) editors: Vec<crate::hosted::OpenEditor>,
+    /// The sample editor, while it is open.
+    pub(crate) sample_editor: Option<crate::sampleedit::SampleEditor>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -204,6 +206,7 @@ impl App {
             analyser: None,
             weave: Default::default(),
             editors: Vec::new(),
+            sample_editor: None,
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
@@ -325,6 +328,19 @@ impl App {
                 let track = p.playlist.tracks.len().min(6).saturating_sub(1);
                 let _ = crate::menus::import_audio_clip(p, samples, "Demo audio", wav, 0.0, track);
             });
+            // `--sample-editor` opens the demo audio in the sample editor, sliced
+            if std::env::args().any(|a| a == "--sample-editor") {
+                let id = app.project.loaded.as_ref().and_then(|l| {
+                    l.project
+                        .channels
+                        .iter()
+                        .rfind(|c| c.plugin_id == "audioclip")
+                        .map(|c| c.id.clone())
+                });
+                if let Some(id) = id {
+                    crate::sampleedit::request(crate::sampleedit::Request::Slice(id));
+                }
+            }
         }
         if std::env::args().any(|a| a == "--analyser-demo") {
             app.analyser_demo();

@@ -9,6 +9,7 @@ pub mod create;
 pub mod las;
 pub mod migrate;
 pub mod model;
+pub mod slicer;
 
 pub use las::{decode, encode, Bundle, LasError, Sample};
 pub use migrate::{migrate_project, Migrated, ProjectError};

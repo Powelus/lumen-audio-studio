@@ -249,6 +249,10 @@ impl App {
             self.audio_clip_window(ui, channel);
             return;
         }
+        if c.plugin_id == las_project::slicer::SLICER_ID {
+            self.slicer_window(ui, channel);
+            return;
+        }
         let state = c.state.clone();
         ui.label(RichText::new(&c.name).size(16.0).strong());
         ui.label(
@@ -318,6 +322,20 @@ impl App {
             return;
         };
         ui.label(RichText::new(&c.name).size(16.0).strong());
+        // the sound's outline, and the way to edit it
+        if let Some(wave) = c
+            .sample_id
+            .as_ref()
+            .and_then(|s| self.project.playlist.waves.get(s))
+            .cloned()
+        {
+            let r = crate::sampleedit::wave_strip(ui, &wave, 80.0)
+                .on_hover_text("Double click to open the sample editor");
+            if r.double_clicked() {
+                crate::sampleedit::request(crate::sampleedit::Request::Edit(c.id.clone()));
+            }
+        }
+        ui.horizontal(|ui| crate::sampleedit::menu_items(ui, &c.id));
         let clips: Vec<&las_project::Clip> = project
             .playlist
             .clips
