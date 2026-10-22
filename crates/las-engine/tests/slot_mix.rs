@@ -4,7 +4,7 @@
 //! change glides there.
 
 use las_engine::library::encode_wav;
-use las_engine::mixer::LiveControl;
+use las_engine::mixer::{slot_key, LiveControl};
 use las_engine::render::{render_mix_with, Mode, RenderOptions};
 use las_engine::{PlayMode, Player};
 use las_project::create::{add_channel, default_project};
@@ -173,7 +173,7 @@ fn a_live_change_of_the_mix_glides_without_a_jump() {
     for _ in 0..20 {
         player.process(&mut l, &mut r);
     }
-    player.set_live(1, &LiveControl::SlotMix("fx_d".into()), 1.0);
+    player.set_live(1, &LiveControl::SlotMix(slot_key("fx_d")), 1.0);
     let mut out = Vec::new();
     for _ in 0..40 {
         player.process(&mut l, &mut r);

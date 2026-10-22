@@ -98,6 +98,9 @@ pub enum Command {
     FxParams(Instrument, usize, Box<Params>),
     /// Switch an effect on or off and set its dry/wet mix.
     FxMix(Instrument, usize, bool, f64),
+    /// A mixer control dragged while the song plays: it glides there at once (the
+    /// project's player is rebuilt with the new value once the mouse is let go).
+    MixerLive(usize, las_engine::mixer::LiveControl, f64),
     Tempo(f64),
     /// Swap in the player of a project (the old one comes back).
     SetPlayer(Box<Player>),
@@ -171,6 +174,8 @@ pub struct Meters {
     callback_frames: AtomicU32,
     /// The peak of each mixer insert, master first (bits of an `f32`).
     inserts: [AtomicU32; 32],
+    /// The same, left and right apart.
+    inserts_lr: [[AtomicU32; 2]; 32],
     /// The last moments of what goes out, for the analyser.
     pub scope: Scope,
 }
@@ -259,6 +264,12 @@ impl Meters {
     /// The peak level of insert `i` of the project's mixer (0 beyond the last).
     pub fn insert_peak(&self, i: usize) -> f32 {
         self.inserts.get(i).map_or(0.0, Self::load_f)
+    }
+    /// The peak level of insert `i`, left and right.
+    pub fn insert_peak_lr(&self, i: usize) -> [f32; 2] {
+        self.inserts_lr
+            .get(i)
+            .map_or([0.0; 2], |s| [Self::load_f(&s[0]), Self::load_f(&s[1])])
     }
     /// Whether the project's player is playing.
     pub fn playing(&self) -> bool {
@@ -1027,6 +1038,11 @@ impl Renderer {
                     s.mix = mix;
                 }
             }
+            Command::MixerLive(insert, control, value) => {
+                if let Some(p) = &mut self.player {
+                    p.set_live(insert, &control, value);
+                }
+            }
             Command::Tempo(bpm) => self.bpm = bpm,
             Command::Metronome(on) => {
                 self.metronome = on;
@@ -1326,6 +1342,10 @@ impl Renderer {
         if let Some(p) = &self.player {
             for (slot, v) in self.meters.inserts.iter().zip(p.insert_peaks()) {
                 Meters::store(slot, *v);
+            }
+            for (slot, v) in self.meters.inserts_lr.iter().zip(p.insert_peaks_lr()) {
+                Meters::store(&slot[0], v[0]);
+                Meters::store(&slot[1], v[1]);
             }
             self.meters
                 .position

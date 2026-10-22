@@ -165,6 +165,9 @@ pub enum GroupFilter {
     /// Channels in no group.
     Unsorted,
     Named(String),
+    /// The channels that play through a mixer insert (the mixer's "Select all
+    /// channels routed here").
+    Insert(usize),
 }
 
 impl GroupFilter {
@@ -174,6 +177,7 @@ impl GroupFilter {
             GroupFilter::All => true,
             GroupFilter::Unsorted => g.is_none(),
             GroupFilter::Named(n) => g == Some(n.as_str()),
+            GroupFilter::Insert(i) => c.mixer_track == *i,
         }
     }
 
@@ -182,6 +186,8 @@ impl GroupFilter {
             GroupFilter::All => "All".into(),
             GroupFilter::Unsorted => "Unsorted".into(),
             GroupFilter::Named(n) => n.clone(),
+            GroupFilter::Insert(0) => "Routed to the master".into(),
+            GroupFilter::Insert(i) => format!("Routed to insert {i}"),
         }
     }
 }
@@ -533,10 +539,18 @@ pub fn knob_core(
         *v = (*v + d).clamp(range.0, range.1);
         changed = *v != before;
     }
-    let reset = resp.double_clicked();
+    let reset = resp.double_clicked() || crate::widgets::reset_click(ui, &resp);
     if reset {
         *v = default;
         changed = true;
+    }
+    // the wheel turns it too, a notch a few percent
+    let mut turned = false;
+    if let Some((dy, new_turn)) = crate::widgets::wheel(ui, &resp) {
+        let before = *v;
+        *v = (*v + f64::from(dy) / 1500.0 * (range.1 - range.0)).clamp(range.0, range.1);
+        changed |= *v != before;
+        turned = new_turn;
     }
     let p = pal();
     let painter = ui.painter_at(r);
@@ -548,7 +562,7 @@ pub fn knob_core(
     let ang = (-135.0 + 270.0 * t).to_radians();
     let tip_pt = pos2(c.x + ang.sin() * rad * 0.75, c.y - ang.cos() * rad * 0.75);
     painter.line_segment([c, tip_pt], Stroke::new(2.0, colour));
-    (changed, resp.drag_started() || reset, resp)
+    (changed, resp.drag_started() || reset || turned, resp)
 }
 
 /// What the rack asks for in one frame.

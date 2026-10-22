@@ -171,8 +171,16 @@ const LIVE_GLIDE: f64 = 0.015;
 pub enum LiveControl {
     Volume,
     Pan,
-    /// The dry and wet mix of the effect slot with this id.
-    SlotMix(String),
+    /// The dry and wet mix of an effect slot, by the [`slot_key`] of its id (no string
+    /// travels to the audio thread, where freeing one would not be safe).
+    SlotMix(u64),
+}
+
+/// A number for an effect slot's id (FNV-1a).
+pub fn slot_key(id: &str) -> u64 {
+    id.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 pub struct Mixer {
@@ -490,8 +498,8 @@ impl Mixer {
         match control {
             LiveControl::Volume => glide(&mut t.fader, value.clamp(0.0, 1.25)),
             LiveControl::Pan => glide(&mut t.pan, value.clamp(-1.0, 1.0)),
-            LiveControl::SlotMix(id) => {
-                if let Some(s) = t.slots.iter_mut().find(|s| s.id == *id) {
+            LiveControl::SlotMix(key) => {
+                if let Some(s) = t.slots.iter_mut().find(|s| slot_key(&s.id) == *key) {
                     if s.fx.enabled {
                         let m = value.clamp(0.0, 1.0);
                         glide(&mut s.auto.wet, m);

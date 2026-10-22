@@ -81,8 +81,20 @@ impl App {
             );
             ui.label(RichText::new(format!("{} - {insert_name}", desc.category)).weak());
             ui.menu_button("Presets", |ui| {
-                if desc.presets.is_empty() {
-                    ui.label("No presets");
+                if ui
+                    .button("Default")
+                    .on_hover_text("Back to the effect's own settings")
+                    .clicked()
+                {
+                    ch.state = Some(full_state(&id, &desc.default_state));
+                    ui.close();
+                }
+                if let Some(st) = user_presets(ui, &id, &state) {
+                    ch.state = Some(st);
+                    ui.close();
+                }
+                if !desc.presets.is_empty() {
+                    ui.separator();
                 }
                 let mut shown = "";
                 for p in &desc.presets {
@@ -129,6 +141,7 @@ impl App {
             {
                 ch.mix = Some(mix);
             }
+            ui.label(RichText::new(format!("{:.0}%", mix * 100.0)).weak().small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Remove").clicked() {
                     ch.remove = true;
@@ -162,6 +175,17 @@ impl App {
             });
             self.project.open_effect = None;
         } else if ch.state.is_some() || ch.on.is_some() || ch.mix.is_some() {
+            if let (Some(m), Some(l)) = (ch.mix, &self.project.loaded) {
+                let project = l.project.clone();
+                self.mixer_live(
+                    &project,
+                    &[crate::mixer::MixEdit::SlotMix {
+                        insert,
+                        slot,
+                        mix: m,
+                    }],
+                );
+            }
             self.project.modify_coalesced("effect", move |p| {
                 if let Some(Some(s)) = p.mixer.get_mut(insert).and_then(|t| t.slots.get_mut(slot)) {
                     if let Some(st) = ch.state {
@@ -177,4 +201,92 @@ impl App {
             });
         }
     }
+}
+
+/// The bank the user's presets of effect `id` are kept in.
+pub fn bank_of(id: &str) -> String {
+    format!("fx-{id}")
+}
+
+/// Save the effect settings `state` as the user's preset `name` of effect `id`,
+/// replacing one of that name.
+pub fn save_preset(id: &str, name: &str, state: &Value) -> Result<(), String> {
+    let defaults = full_state(id, &Value::Null);
+    let mut list = crate::presets::entries(&bank_of(id), &defaults);
+    list.retain(|e| e.user && e.name != name);
+    list.push(crate::presets::Entry {
+        name: name.to_string(),
+        category: "User".into(),
+        patch: state.clone(),
+        user: true,
+        fx: Vec::new(),
+    });
+    crate::presets::save_user(&bank_of(id), &list)
+}
+
+/// The user's presets of effect `id`, as complete settings.
+pub fn user_presets_of(id: &str) -> Vec<(String, Value)> {
+    let defaults = full_state(id, &Value::Null);
+    crate::presets::entries(&bank_of(id), &defaults)
+        .into_iter()
+        .filter(|e| e.user)
+        .map(|e| (e.name, full_state(id, &e.patch)))
+        .collect()
+}
+
+/// Delete the user's preset `name` of effect `id`.
+pub fn delete_preset(id: &str, name: &str) -> Result<(), String> {
+    let defaults = full_state(id, &Value::Null);
+    let mut list = crate::presets::entries(&bank_of(id), &defaults);
+    list.retain(|e| e.user && e.name != name);
+    crate::presets::save_user(&bank_of(id), &list)
+}
+
+/// The user's part of an effect's preset menu: their presets (a click loads one, x
+/// deletes it) and a box to save the current settings under a name. Returns settings
+/// to load.
+fn user_presets(ui: &mut Ui, id: &str, state: &Value) -> Option<Value> {
+    let mut pick = None;
+    let list = user_presets_of(id);
+    if !list.is_empty() {
+        ui.separator();
+        ui.label(RichText::new("User").strong());
+    }
+    for (name, st) in list {
+        ui.horizontal(|ui| {
+            if ui.button(&name).clicked() {
+                pick = Some(st);
+            }
+            if ui
+                .small_button("x")
+                .on_hover_text("Delete this preset")
+                .clicked()
+            {
+                let _ = delete_preset(id, &name);
+            }
+        });
+    }
+    ui.separator();
+    let key = egui::Id::unique("fx-preset-name").with(id);
+    let mut name: String = ui.data(|d| d.get_temp(key)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .hint_text("Preset name")
+                .desired_width(110.0),
+        );
+        let ok = !name.trim().is_empty();
+        if ui
+            .add_enabled(ok, egui::Button::new("Save preset"))
+            .on_hover_text("Keep these settings as a preset of your own")
+            .clicked()
+        {
+            if let Err(e) = save_preset(id, name.trim(), state) {
+                ui.label(RichText::new(e).color(pal().hot));
+            }
+            name.clear();
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(key, name));
+    pick
 }
