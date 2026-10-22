@@ -11,7 +11,7 @@ use crate::fxauto::{densify, map_automation, SlotAuto};
 use crate::param::Param;
 use crate::pluginparams::plugin_param_def;
 use crate::sampler::{PadBank, Sampler};
-use las_dsp::engine::{prepare_patch, Event, PatchError};
+use las_dsp::engine::{prepare_patch, Cc, Event, PatchError};
 use las_dsp::fm::{fm_engine, Fm, FmEngine};
 use las_dsp::fx::registry::{full_state, parse_params, EffectUnit, FxSlot};
 use las_dsp::mist::{mist_engine, Mist, MistEngine};
@@ -88,6 +88,8 @@ struct Layer {
     level: f64,
     /// The layer's patch before the macros scale it.
     base: Value,
+    /// The layer's pan before the width macro scales it.
+    base_pan: f64,
 }
 
 /// An effect in the instrument's own rack, and where it sits in the state's list.
@@ -113,6 +115,8 @@ enum Core {
 pub struct Instrument {
     core: Core,
     arp: Option<Arpeggiator>,
+    /// The chord each note becomes (semitones above it; just 0 for none).
+    chord: &'static [i32],
     rack: Vec<RackSlot>,
     sr: f64,
     scratch: [Vec<f32>; 2],
@@ -176,6 +180,15 @@ impl Gate {
     }
 }
 
+/// How much a note's release (FL's note release, 0 to 1, 0.5 when not set) stretches
+/// the instrument's release time: a quarter at 0, as it is at 0.5, four times at 1.
+pub fn release_scale(release: f64) -> f64 {
+    if !release.is_finite() {
+        return 1.0;
+    }
+    16f64.powf(release.clamp(0.0, 1.0) - 0.5)
+}
+
 fn cut_mul(m: f64) -> f64 {
     2f64.powf((m - 0.5) * 8.0)
 }
@@ -192,6 +205,7 @@ struct LayerSpec {
     patch: Value,
     gain: f64,
     pan: f64,
+    base_pan: f64,
     transpose: f64,
     index: usize,
     level: f64,
@@ -208,6 +222,7 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
             patch,
             gain: 1.0,
             pan: 0.0,
+            base_pan: 0.0,
             transpose: 0.0,
             index: 0,
             level: 1.0,
@@ -271,6 +286,7 @@ fn layers_from_state(plugin_id: &str, state: &Value) -> Vec<LayerSpec> {
             level: num(l.get("level"), 1.0),
             gain: num(l.get("level"), 1.0) * master,
             pan: (num(l.get("pan"), 0.0) * width).clamp(-1.0, 1.0),
+            base_pan: num(l.get("pan"), 0.0),
             transpose: num(l.get("transpose"), 0.0),
         });
     }
@@ -325,6 +341,7 @@ impl Instrument {
                         index: spec.index,
                         level: spec.level,
                         base: spec.base,
+                        base_pan: spec.base_pan,
                     });
                 }
                 Core::Layers(layers)
@@ -342,7 +359,10 @@ impl Instrument {
             _ => Core::Silent,
         };
         let arp_state = ArpState::from_json(state.get("arp"));
-        let arp = arp_state.on.then(|| Arpeggiator::new(arp_state));
+        let chord = crate::arp::chord_intervals(&arp_state.chord);
+        // the arpeggiator plays an instrument's notes (not the pads' or an audio clip's)
+        let arp = (arp_state.on && !matches!(core, Core::Pads(_) | Core::AudioClip(_)))
+            .then(|| Arpeggiator::new(arp_state));
         let mut rack = Vec::new();
         let items = state.get("fx").and_then(Value::as_array);
         for (index, item) in items.into_iter().flatten().enumerate() {
@@ -379,6 +399,7 @@ impl Instrument {
         Ok(Self {
             core,
             arp,
+            chord,
             rack,
             sr,
             scratch: [Vec::new(), Vec::new()],
@@ -456,6 +477,11 @@ impl Instrument {
                                     time,
                                     key: key + l.transpose,
                                 },
+                                Event::OffScaled { time, key, scale } => Event::OffScaled {
+                                    time,
+                                    key: key + l.transpose,
+                                    scale,
+                                },
                                 other => other,
                             })
                             .collect();
@@ -471,7 +497,9 @@ impl Instrument {
                 for e in evs {
                     match *e {
                         Event::On { time, key, vel, .. } => h.on(time, key, vel),
-                        Event::Off { time, key } => h.off(time, key),
+                        Event::Off { time, key } | Event::OffScaled { time, key, .. } => {
+                            h.off(time, key)
+                        }
                         _ => {}
                     }
                 }
@@ -491,21 +519,10 @@ impl Instrument {
         fine: f64,
         pan: f64,
         one_shot: bool,
+        release: f64,
     ) {
         self.gate.at(time);
-        if let Core::Sampler(s) = &mut self.core {
-            // step notes ring out like FL; piano roll notes are gated by their length
-            let ring = one_shot && s.state_loop() != Some(true);
-            s.play_note(
-                key as i32,
-                vel,
-                time,
-                (!ring).then_some(duration),
-                fine,
-                pan,
-            );
-            return;
-        }
+        let rel_scale = release_scale(release);
         if let Core::Pads(p) = &mut self.core {
             p.play_note(key as i32, vel, time, fine);
             return;
@@ -514,15 +531,47 @@ impl Instrument {
             c.play_note(time);
             return;
         }
-        if let Some(arp) = &mut self.arp {
-            arp.play_note(key, vel, time, duration);
-            return;
+        for &semis in self.chord {
+            let key = key + f64::from(semis);
+            if let Some(arp) = &mut self.arp {
+                arp.play_note(key, vel, time, duration);
+                continue;
+            }
+            if let Core::Sampler(s) = &mut self.core {
+                // step notes ring out like FL; piano roll notes are gated by their length
+                let ring = one_shot && s.state_loop() != Some(true);
+                s.play_note(
+                    key as i32,
+                    vel,
+                    time,
+                    (!ring).then_some(duration),
+                    fine,
+                    pan,
+                    rel_scale,
+                );
+                continue;
+            }
+            self.direct(key, vel, time, duration, fine, pan, rel_scale);
         }
-        self.direct(key, vel, time, duration, fine, pan);
     }
 
-    fn direct(&mut self, key: f64, vel: f64, time: f64, duration: f64, fine: f64, pan: f64) {
+    #[allow(clippy::too_many_arguments)]
+    fn direct(
+        &mut self,
+        key: f64,
+        vel: f64,
+        time: f64,
+        duration: f64,
+        fine: f64,
+        pan: f64,
+        rel_scale: f64,
+    ) {
         self.gate.at(time);
+        if let Core::Sampler(s) = &mut self.core {
+            s.play_note(key as i32, vel, time, Some(duration), fine, pan, rel_scale);
+            return;
+        }
+        let off = time + duration.max(0.005);
         let evs = [
             Event::On {
                 time,
@@ -531,9 +580,14 @@ impl Instrument {
                 fine,
                 pan,
             },
-            Event::Off {
-                time: time + duration.max(0.005),
-                key,
+            if rel_scale == 1.0 {
+                Event::Off { time: off, key }
+            } else {
+                Event::OffScaled {
+                    time: off,
+                    key,
+                    scale: rel_scale,
+                }
             },
         ];
         self.queue_all(&evs, true);
@@ -578,7 +632,7 @@ impl Instrument {
         self.gate.at(time);
         self.gate.held += 1;
         match &mut self.core {
-            Core::Sampler(s) => s.play_note(key as i32, vel, time, None, 0.0, 0.0),
+            Core::Sampler(s) => s.play_note(key as i32, vel, time, None, 0.0, 0.0, 1.0),
             Core::Pads(p) => p.play_note(key as i32, vel, time, 0.0),
             Core::AudioClip(c) => c.play_note(time),
             Core::Silent => {}
@@ -609,6 +663,18 @@ impl Instrument {
         }
     }
 
+    /// A performance controller moved at `time`: the mod wheel, pitch bend or
+    /// aftertouch, from live MIDI.
+    pub fn controller(&mut self, cc: Cc, value: f64, time: f64) {
+        match &mut self.core {
+            Core::Hosted(h) => h.controller(cc, value),
+            Core::Layers(_) | Core::Facet(_) | Core::Mist(_) => {
+                self.queue_all(&[Event::Cc { time, cc, value }], false)
+            }
+            _ => {}
+        }
+    }
+
     /// Whether the output is a mono signal (a channel then pans it with the
     /// mono law, which is 3 dB down in the middle).
     pub fn is_mono(&self) -> bool {
@@ -626,7 +692,7 @@ impl Instrument {
         });
         self.arp = Some(arp);
         for (k, v, time, d) in steps {
-            self.direct(k, v, time, d, 0.0, 0.0);
+            self.direct(k, v, time, d, 0.0, 0.0, 1.0);
         }
     }
 
@@ -801,13 +867,55 @@ impl Instrument {
                 let Some(m) = path.strip_prefix("macros.") else {
                     return false;
                 };
-                if !matches!(m, "cutoff" | "res" | "attack" | "release") {
+                if !matches!(
+                    m,
+                    "cutoff" | "res" | "attack" | "release" | "drive" | "width" | "detune"
+                ) {
                     return false;
                 }
                 // a macro scales each layer's own values: one ramp per layer
                 let pts = densify(points, 0.02);
                 for l in layers {
-                    if m == "cutoff" || m == "res" {
+                    if m == "drive" {
+                        // drive adds to each filter's own drive
+                        let filters = l.base.get("filters").and_then(Value::as_array).cloned();
+                        for (fi, f) in filters.into_iter().flatten().enumerate() {
+                            let d0 = num(f.get("drive"), 0.0);
+                            let values: Vec<(f64, f64)> = pts
+                                .iter()
+                                .map(|&(t, v)| (t, d0 + v.clamp(0.0, 1.0)))
+                                .collect();
+                            l.engine
+                                .ramp(&format!("filters.{fi}.drive"), &values, first);
+                        }
+                    } else if m == "width" || m == "detune" {
+                        // width and detune scale each oscillator's spread and detune (0.5
+                        // leaves them as they are); width also narrows the layer's pan
+                        let (key, d) = if m == "width" {
+                            ("spread", 0.6)
+                        } else {
+                            ("detune", 0.2)
+                        };
+                        let oscs = l.base.get("osc").and_then(Value::as_array).cloned();
+                        for (oi, o) in oscs.into_iter().flatten().enumerate() {
+                            let b = num(o.get(key), d);
+                            let values: Vec<(f64, f64)> = pts
+                                .iter()
+                                .map(|&(t, v)| (t, (b * (v * 2.0).clamp(0.0, 2.0)).clamp(0.0, 1.0)))
+                                .collect();
+                            l.engine.ramp(&format!("osc.{oi}.{key}"), &values, first);
+                        }
+                        if m == "width" {
+                            let p0 = l.base_pan;
+                            let values: Vec<(f64, f64)> = pts
+                                .iter()
+                                .map(|&(t, v)| {
+                                    (t, (p0 * (v * 2.0).clamp(0.0, 2.0)).clamp(-1.0, 1.0))
+                                })
+                                .collect();
+                            l.pan.ramp(&values, first);
+                        }
+                    } else if m == "cutoff" || m == "res" {
                         let filters = l.base.get("filters").and_then(Value::as_array).cloned();
                         for (fi, f) in filters.into_iter().flatten().enumerate() {
                             let values: Vec<(f64, f64)> = pts
@@ -903,6 +1011,78 @@ mod tests {
         assert_eq!(l.patch["osc"][0]["spread"], 0.8);
         assert_eq!(l.patch["filters"][0]["drive"], 0.1);
         assert!((l.pan - 0.5).abs() < 1e-9);
+    }
+
+    /// A held note with `path` automated flat at `v` (0 to 1) from the start.
+    fn hold_automated(state: &Value, path: &str, v: f64, frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut inst = nebula(state);
+        inst.set_bpm(120.0);
+        assert!(
+            inst.automate(path, &[(0.0, v), (10.0, v)], true, 128),
+            "{path}"
+        );
+        inst.note_on(60.0, 0.9, 0.0);
+        let (mut l, mut r) = (vec![0.0; frames], vec![0.0; frames]);
+        for (i, (cl, cr)) in l.chunks_mut(256).zip(r.chunks_mut(256)).enumerate() {
+            inst.render(i as f64 * 256.0 / 24000.0, cl, cr);
+        }
+        (l, r)
+    }
+
+    #[test]
+    fn drive_width_and_detune_macros_follow_automation() {
+        let st = json!({
+            "layers": [{ "on": true, "level": 1.0, "pan": 0.6, "patch": {
+                "osc": [{ "on": true, "table": "saw", "voices": 5, "detune": 0.4, "spread": 1.0 }],
+                "filters": [{ "on": true, "type": "lp24", "cutoff": 1500, "drive": 0.0 }],
+            }}],
+        });
+        let side = |(l, r): (Vec<f32>, Vec<f32>)| {
+            l.iter().zip(&r).map(|(a, b)| (a - b).abs()).sum::<f32>()
+        };
+        let diff = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>();
+        // width automated to 0 plays in mono
+        assert!(side(hold_automated(&st, "macros.width", 0.0, 4096)) < 1e-3);
+        assert!(side(hold_automated(&st, "macros.width", 0.5, 4096)) > 1.0);
+        // drive and detune change the sound
+        let plain = hold(&st, 4096).0;
+        let driven = hold_automated(&st, "macros.drive", 1.0, 4096).0;
+        assert!(diff(&plain, &driven) > 1.0, "{}", diff(&plain, &driven));
+        let wide = hold_automated(&st, "macros.detune", 1.0, 4096).0;
+        assert!(diff(&plain, &wide) > 1.0, "{}", diff(&plain, &wide));
+        let same = hold_automated(&st, "macros.detune", 0.5, 4096).0;
+        assert!(diff(&plain, &same) < 1e-3, "{}", diff(&plain, &same));
+    }
+
+    #[test]
+    fn a_notes_release_stretches_the_instruments_release() {
+        assert!((release_scale(0.5) - 1.0).abs() < 1e-12);
+        assert!((release_scale(0.0) - 0.25).abs() < 1e-12);
+        assert!((release_scale(1.0) - 4.0).abs() < 1e-12);
+        assert_eq!(release_scale(f64::NAN), 1.0);
+        // a synth note of 0.1 s: the tail after it rings longer with a long release
+        let tail = |plugin: &str, state: &Value, release: f64| {
+            let mut tables = TableLibrary::new();
+            let mut inst =
+                Instrument::new(plugin, state, 24000.0, &mut tables, None, Vec::new()).unwrap();
+            inst.set_bpm(120.0);
+            inst.play_note(60.0, 0.9, 0.0, 0.1, 0.0, 0.0, false, release);
+            let n = 24000;
+            let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+            for (i, (cl, cr)) in l.chunks_mut(256).zip(r.chunks_mut(256)).enumerate() {
+                inst.render(i as f64 * 256.0 / 24000.0, cl, cr);
+            }
+            // energy from 0.2 s on
+            l[4800..].iter().map(|s| s * s).sum::<f32>()
+        };
+        let synth = json!({ "patch": { "env": [{ "a": 0.001, "d": 0.1, "s": 1.0, "r": 0.3 }] } });
+        let (short, mid, long) = (
+            tail("polaris", &synth, 0.0),
+            tail("polaris", &synth, 0.5),
+            tail("polaris", &synth, 1.0),
+        );
+        assert!(short < mid && mid < long, "{short} {mid} {long}");
+        assert!(long > mid * 2.0);
     }
 
     #[test]

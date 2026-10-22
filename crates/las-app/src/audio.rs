@@ -113,6 +113,13 @@ pub enum Command {
         vel: f64,
         on: bool,
     },
+    /// A controller (mod wheel, pitch bend, aftertouch) moved on one of the project's
+    /// channels.
+    PlayerController {
+        channel: usize,
+        cc: Cc,
+        value: f64,
+    },
 }
 
 /// Meters and counters the audio thread publishes.
@@ -751,6 +758,11 @@ impl Renderer {
                     } else {
                         p.note_off(channel, key as f64);
                     }
+                }
+            }
+            Command::PlayerController { channel, cc, value } => {
+                if let Some(p) = &mut self.player {
+                    p.controller(channel, cc, value);
                 }
             }
             Command::Instrument(i) => {

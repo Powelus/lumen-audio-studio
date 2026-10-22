@@ -415,6 +415,9 @@ pub struct Shell {
     pub nebula_page: usize,
     pub nebula_cat: String,
     pub nebula_find: String,
+    /// The channel whose shared Channel settings (Arp and chords) window is open; a
+    /// sampler shows them as tabs of its own window instead.
+    pub chan_settings: Option<usize>,
     /// The memory the app uses, megabytes, and when it was last read.
     ram: (Option<Instant>, f64),
     pub search: String,
@@ -464,6 +467,7 @@ impl Shell {
             nebula_page: 0,
             nebula_cat: String::new(),
             nebula_find: String::new(),
+            chan_settings: None,
             ram: (None, 0.0),
             search: String::new(),
             theme: theme::saved_choice(),
@@ -1450,15 +1454,27 @@ impl App {
             // each face has its own window size (TriOsc is a small one)
             let face = match self.bound {
                 None | Some(crate::inst::Bound::Synth(_)) => self.face_id(),
+                Some(crate::inst::Bound::Nebula(_)) => "nebula".into(),
                 _ => String::new(),
             };
             let size = match face.as_str() {
                 "triosc" => vec2(640.0, 560.0),
                 "monolith" => vec2(1060.0, 740.0),
                 "zenith" => vec2(1000.0, 790.0),
+                "nebula" => vec2(1100.0, 660.0),
                 _ => vec2(900.0, 680.0),
             };
             let first_pos = a.min + vec2(160.0, 30.0);
+            // never taller or wider than the screen leaves room for (720p, 900 px): what
+            // does not fit scrolls
+            let size = vec2(
+                size.x.min((a.width() - 20.0).max(320.0)),
+                size.y.min((a.height() - 40.0).max(240.0)),
+            );
+            let first_pos = pos2(
+                first_pos.x.min((a.right() - size.x).max(a.left())),
+                first_pos.y,
+            );
             // the window is named after the channel it shows
             let title = self
                 .bound
@@ -1480,30 +1496,38 @@ impl App {
                 .id(id)
                 .open(&mut open.synth)
                 .show(ctx, |ui| match self.bound {
-                    Some(crate::inst::Bound::Basic(c)) => self.basic_editor(ui, c),
-                    Some(crate::inst::Bound::Hosted(c)) => self.hosted_channel(ui, c),
-                    Some(crate::inst::Bound::Nebula(c)) => {
-                        crate::skin::face(ui, crate::skin::skin_for("nebula"), |ui| {
-                            self.nebula_window(ui, c)
-                        })
-                    }
-                    Some(crate::inst::Bound::Weave(c)) => {
-                        crate::skin::face(ui, crate::skin::skin_for("weave"), |ui| {
-                            self.weave_window(ui, c)
-                        })
-                    }
-                    Some(crate::inst::Bound::Pads(c)) => {
-                        crate::skin::face(ui, crate::skin::skin_for("lumapad"), |ui| {
-                            self.pads_window(ui, c)
-                        })
-                    }
-                    Some(crate::inst::Bound::Sampler(c)) => {
-                        crate::skin::face(ui, crate::skin::skin_for("sampler"), |ui| {
-                            self.sampler_window(ui, c)
-                        })
+                    Some(b) if !matches!(b, crate::inst::Bound::Synth(_)) => {
+                        egui::ScrollArea::both()
+                            .id_salt("instrument-scroll")
+                            .show(ui, |ui| self.bound_window(ui, b));
                     }
                     _ => self.synth_window(ui),
                 });
+        }
+        if let Some(c) = self.shell.chan_settings {
+            let mut keep = true;
+            let name = self
+                .project
+                .loaded
+                .as_ref()
+                .and_then(|l| l.project.channels.get(c))
+                .map(|ch| ch.name.clone());
+            match name {
+                Some(name) => {
+                    win(
+                        &format!("Channel settings: {name}"),
+                        a.min + vec2(300.0, 110.0),
+                        vec2(460.0, 420.0),
+                    )
+                    .id(egui::Id::unique("chan-settings-window"))
+                    .open(&mut keep)
+                    .show(ctx, |ui| self.shared_settings(ui, c));
+                }
+                None => keep = false,
+            }
+            if !keep {
+                self.shell.chan_settings = None;
+            }
         }
         if let Some((insert, slot)) = self.project.open_effect {
             let mut keep = true;
@@ -1620,6 +1644,9 @@ impl App {
         }
         if let Some(c) = out.open_synth {
             self.open_channel(c);
+        }
+        if let Some(c) = out.open_settings {
+            self.open_channel_settings(c);
         }
         for (ch, e) in &out.notes {
             self.project.edit_channel(*ch, std::slice::from_ref(e));
@@ -1768,6 +1795,28 @@ impl App {
         edits.extend(more);
         drop(project);
         self.project.edit_mixer(&edits);
+    }
+
+    /// The window of a channel whose instrument has its own face (not the synth panels).
+    fn bound_window(&mut self, ui: &mut Ui, b: crate::inst::Bound) {
+        use crate::inst::Bound;
+        match b {
+            Bound::Basic(c) => self.basic_editor(ui, c),
+            Bound::Hosted(c) => self.hosted_channel(ui, c),
+            Bound::Nebula(c) => crate::skin::face(ui, crate::skin::skin_for("nebula"), |ui| {
+                self.nebula_window(ui, c)
+            }),
+            Bound::Weave(c) => crate::skin::face(ui, crate::skin::skin_for("weave"), |ui| {
+                self.weave_window(ui, c)
+            }),
+            Bound::Pads(c) => crate::skin::face(ui, crate::skin::skin_for("lumapad"), |ui| {
+                self.pads_window(ui, c)
+            }),
+            Bound::Sampler(c) => crate::skin::face(ui, crate::skin::skin_for("sampler"), |ui| {
+                self.sampler_window(ui, c)
+            }),
+            Bound::Synth(_) => self.synth_window(ui),
+        }
     }
 
     fn synth_window(&mut self, ui: &mut Ui) {

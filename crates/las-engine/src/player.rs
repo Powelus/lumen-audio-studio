@@ -227,6 +227,12 @@ impl Player {
         self.engine.note_off(channel, key, t);
     }
 
+    /// A performance controller (mod wheel, pitch bend, aftertouch) moved on a channel.
+    pub fn controller(&mut self, channel: usize, cc: las_dsp::engine::Cc, value: f64) {
+        let t = self.now();
+        self.engine.controller(channel, cc, value, t);
+    }
+
     /// Schedule the song up to the lookahead.
     fn schedule(&mut self) {
         if !self.playing || self.scheduled_all {
