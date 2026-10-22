@@ -910,3 +910,40 @@ fn a_preset_from_quick_search_never_turns_a_channel_into_another_synth() {
     );
     assert_eq!(preset_title(&h), name);
 }
+
+#[test]
+fn mixer_add_an_effect_from_an_empty_slot_on_a_small_screen() {
+    let mut h = Harness::demo_sized(1366.0, 768.0);
+    let o = &mut h.app.shell.open;
+    o.rack = false;
+    o.playlist = false;
+    h.key(eframe::egui::Key::F9);
+    h.run(3);
+    let ins = h.app.project.mixer_state.selected;
+    let before = h.project().mixer[ins].slots.iter().flatten().count();
+    let slot = h.find_prefix("+ Slot").into_iter().min_by(|a, b| a.rect.top().total_cmp(&b.rect.top())).expect("an empty slot");
+    h.click_at(slot.rect.center());
+    let screen = h.ctx.content_rect();
+    let names: Vec<String> = las_dsp::fx::registry::descriptors().iter().map(|d| d.name.clone()).collect();
+    // the menu stays on the screen and scrolls: an effect in view is picked
+    let buttons: Vec<_> = names
+        .iter()
+        .filter_map(|n| h.find_all(n).into_iter().find(|b| b.role == eframe::egui::accesskit::Role::Button))
+        .collect();
+    let left = buttons.iter().map(|b| b.rect.left()).fold(f32::MAX, f32::min);
+    let right = buttons.iter().map(|b| b.rect.right()).fold(f32::MIN, f32::max);
+    let bar = h
+        .nodes
+        .iter()
+        .filter(|n| n.role == eframe::egui::accesskit::Role::ScrollBar && n.rect.left() > left)
+        .min_by(|a, b| (a.rect.left() - right).abs().total_cmp(&(b.rect.left() - right).abs()))
+        .expect("the effects menu scrolls")
+        .rect;
+    assert!(screen.contains_rect(bar), "the menu is on the screen: {bar:?}");
+    let pick = buttons
+        .iter()
+        .find(|b| b.rect.top() > bar.top() + 4.0 && b.rect.bottom() < bar.bottom() - 4.0)
+        .expect("an effect in view");
+    h.click_at(pick.rect.center());
+    assert_eq!(h.project().mixer[ins].slots.iter().flatten().count(), before + 1, "the effect is added");
+}

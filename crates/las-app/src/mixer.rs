@@ -876,6 +876,15 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
 /// The menu of effects to put in a slot: the built-in ones by category, then the
 /// plugins found on the computer. Returns the pick (and whether it is a plugin).
 fn effect_menu(ui: &mut Ui) -> Option<(String, bool)> {
+    // the list is long: it scrolls, so no effect is left off a small screen
+    let room = (ui.ctx().content_rect().height() * 0.55).clamp(160.0, 480.0);
+    egui::ScrollArea::vertical()
+        .max_height(room)
+        .show(ui, effect_list)
+        .inner
+}
+
+fn effect_list(ui: &mut Ui) -> Option<(String, bool)> {
     let p = crate::theme::pal();
     let mut pick = None;
     let mut shown = "";

@@ -152,7 +152,7 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
         1000
     } else if ts.starts_with(&qs) {
         300
-    } else if ts.contains(&qs) {
+    } else if qs.chars().count() >= 3 && ts.contains(&qs) {
         150
     } else {
         0
