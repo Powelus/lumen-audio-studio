@@ -1130,7 +1130,8 @@ fn channel_menu(
                     .hint_text("New group")
                     .desired_width(110.0),
             );
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let enter =
+                (r.has_focus() || r.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let name = state.new_group.trim().to_string();
             if (ui.button("Add").clicked() || enter) && !name.is_empty() {
                 out.chans.push(ChanEdit::Begin);

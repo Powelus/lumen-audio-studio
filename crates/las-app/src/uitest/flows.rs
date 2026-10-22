@@ -1100,7 +1100,8 @@ fn sample_editor_reverse_trim_undo_and_the_edit_is_saved() {
     o.rack = false;
     o.playlist = false;
     o.mixer = false;
-    h.app.add_factory_channel("factory:kick-punch", "Kick Punch");
+    h.app
+        .add_factory_channel("factory:kick-punch", "Kick Punch");
     let ch = h.project().channels.len() - 1;
     let id = h.project().channels[ch].id.clone();
     crate::sampleedit::request(crate::sampleedit::Request::Edit(id.clone()));
@@ -1116,15 +1117,26 @@ fn sample_editor_reverse_trim_undo_and_the_edit_is_saved() {
     h.click("Redo");
     assert_eq!(sample(&h), s1);
     // select the first half of the waveform and trim to it
-    let win = h.find_prefix("Sample editor:").into_iter().find(|n| n.role == eframe::egui::accesskit::Role::Window).unwrap().rect;
+    let win = h
+        .find_prefix("Sample editor:")
+        .into_iter()
+        .find(|n| n.role == eframe::egui::accesskit::Role::Window)
+        .unwrap()
+        .rect;
     let wave = h.find_prefix("Drag across the waveform to select")[0].rect;
     assert!(win.contains_rect(wave));
     // below the marker strip at its top
     let wave = eframe::egui::Rect::from_min_max(wave.min + eframe::egui::vec2(0.0, 40.0), wave.max);
     let frames = |h: &Harness| h.app.sample_editor.as_ref().unwrap().audio.channels[0].len();
     let f0 = frames(&h);
-    h.drag(wave.left_center() + eframe::egui::vec2(10.0, 0.0), wave.center());
-    assert!(h.app.sample_editor.as_ref().unwrap().sel.is_some(), "a drag selects");
+    h.drag(
+        wave.left_center() + eframe::egui::vec2(10.0, 0.0),
+        wave.center(),
+    );
+    assert!(
+        h.app.sample_editor.as_ref().unwrap().sel.is_some(),
+        "a drag selects"
+    );
     h.click("Trim to selection");
     let f1 = frames(&h);
     assert!(f1 < f0 * 3 / 4, "trimmed: {f0} -> {f1}");
@@ -1138,7 +1150,10 @@ fn sample_editor_reverse_trim_undo_and_the_edit_is_saved() {
     h.run(3);
     assert_eq!(sample(&h), want);
     let l = h.app.project.loaded.as_ref().unwrap();
-    assert!(l.samples.contains_key(want.as_deref().unwrap()), "the edited sound was saved with the project");
+    assert!(
+        l.samples.contains_key(want.as_deref().unwrap()),
+        "the edited sound was saved with the project"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1166,5 +1181,83 @@ fn settings_theme_and_windows_are_kept_after_a_restart() {
     let h = h.restart();
     assert!(h.app.settings.count_in, "the setting is kept");
     assert_eq!(h.app.shell.theme, id, "the theme is kept");
-    assert_eq!((h.app.shell.open.mixer, h.app.shell.open.rack), (mixer, rack), "the windows are kept");
+    assert_eq!(
+        (h.app.shell.open.mixer, h.app.shell.open.rack),
+        (mixer, rack),
+        "the windows are kept"
+    );
+}
+
+#[test]
+fn undo_takes_every_kind_of_edit_back_and_redo_does_them_again() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = Harness::demo();
+    let start = serde_json::to_value(h.project()).unwrap();
+    let mut states = vec![start.clone()];
+    let mut note = |h: &Harness, states: &mut Vec<serde_json::Value>, what: &str| {
+        let now = serde_json::to_value(h.project()).unwrap();
+        assert_ne!(Some(&now), states.last(), "{what} changed the project");
+        states.push(now);
+    };
+    // a step
+    let r = step_row(&h, 1);
+    h.click_at(eframe::egui::pos2(r.left() + 8.0, r.center().y));
+    note(&h, &mut states, "a step");
+    // a channel, a pattern
+    h.menu(&["Add", "Zenith"]);
+    note(&h, &mut states, "Add > Zenith");
+    h.key(Key::F4);
+    note(&h, &mut states, "F4");
+    // the tempo, by dragging it
+    let tempo = h.get("Drag up and down to change the tempo. Right click: Create automation clip (the tempo then follows it in the song)");
+    h.drag(
+        tempo.rect.center(),
+        tempo.rect.center() - eframe::egui::vec2(0.0, 30.0),
+    );
+    note(&h, &mut states, "the tempo");
+    // a rename
+    h.menu(&["Patterns", "Rename pattern..."]);
+    h.key_with(Key::A, Modifiers::COMMAND);
+    h.type_text("Verse");
+    h.key(Key::Enter);
+    note(&h, &mut states, "a rename");
+    assert_eq!(h.project().patterns[h.app.project.pattern].name, "Verse");
+    let n = states.len() - 1;
+    for i in (0..n).rev() {
+        h.key_with(Key::Z, Modifiers::COMMAND);
+        let now = serde_json::to_value(h.project()).unwrap();
+        let d = json_diff(&states[i], &now);
+        assert!(d.is_empty(), "undo {} of {n}: {d:#?}", n - i);
+    }
+    for (i, want) in states.iter().enumerate().skip(1) {
+        h.key_with(Key::Y, Modifiers::COMMAND);
+        let now = serde_json::to_value(h.project()).unwrap();
+        let d = json_diff(want, &now);
+        assert!(d.is_empty(), "redo {i}: {d:#?}");
+    }
+}
+
+#[test]
+fn enter_confirms_the_save_as_template_box_and_the_template_is_offered() {
+    let mut h = Harness::demo();
+    quick(&mut h, "Save as template");
+    assert!(h.app.wf.template_name.is_some(), "the name box opens");
+    h.type_text("My Beat");
+    h.key(eframe::egui::Key::Enter);
+    assert!(h.app.wf.template_name.is_none(), "Enter saves and closes");
+    let dir = crate::workflow::templates::dir("templates").unwrap();
+    let saved = crate::workflow::templates::user_templates(&dir);
+    assert!(
+        saved.iter().any(|(n, _)| n == "My Beat"),
+        "saved: {saved:?}"
+    );
+    // and a new project made from it has the demo's channels
+    let n = h.project().channels.len();
+    h.app.project.dirty = false;
+    quick(&mut h, "New from template: My Beat");
+    assert_eq!(h.project().channels.len(), n);
+    assert!(
+        !h.app.project.has_file(),
+        "a template opens as a new, unsaved project"
+    );
 }

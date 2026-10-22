@@ -1080,8 +1080,10 @@ impl App {
             .show(ctx, |ui| {
                 ui.label("Name of the template:");
                 let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(220.0));
+                // Enter confirms (the box asks for the focus every frame, so it never
+                // shows as lost)
+                ok |= (r.has_focus() || r.lost_focus()) && ui.input(|i| i.key_pressed(Key::Enter));
                 r.request_focus();
-                ok |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 cancel |= ui.input(|i| i.key_pressed(Key::Escape));
                 ui.horizontal(|ui| {
                     ok |= ui.button("Save").clicked();
