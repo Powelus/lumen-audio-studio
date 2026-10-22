@@ -1025,14 +1025,13 @@ pub fn draw(
             }
             if c.kind == ClipKind::Automation {
                 if let Some(a) = project.automation.iter().find(|a| a.id == c.ref_id) {
-                    let len = a.length.max(1.0);
-                    let line: Vec<egui::Pos2> = a
-                        .points
-                        .iter()
-                        .map(|q| {
+                    // the curve as it plays, from where the clip starts in it
+                    let line: Vec<egui::Pos2> = las_engine::timeline::automation_curve(a)
+                        .into_iter()
+                        .map(|(t, v)| {
                             egui::pos2(
-                                r.left() + (q.t / len) as f32 * r.width(),
-                                r.bottom() - 4.0 - q.v as f32 * (r.height() - 18.0),
+                                x_of(c.start + t - c.offset),
+                                r.bottom() - 4.0 - v as f32 * (r.height() - 18.0),
                             )
                         })
                         .collect();

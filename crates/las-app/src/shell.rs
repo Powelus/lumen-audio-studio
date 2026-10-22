@@ -1687,11 +1687,12 @@ impl App {
             });
         });
         ui.label(
-            RichText::new("Click to add a point, drag to move it, right click to remove it.")
+            RichText::new("Click to add a point and drag to move it. Right click a point for its curve (single, double, hold, stairs, smooth) or to delete it. Drag the small ring between two points up or down to bend the curve, double click it to straighten.")
                 .weak()
                 .size(11.0),
         );
-        let edits = crate::auto::draw(ui, clip, &mut self.project.auto_state);
+        let mut edits = crate::auto::lfo_row(ui, clip, &mut self.project.auto_state);
+        edits.extend(crate::auto::draw(ui, clip, &mut self.project.auto_state));
         let cid = clip.id.clone();
         drop(project);
         self.project.edit_auto(&edits);
