@@ -54,6 +54,9 @@ pub enum RenameTarget {
 
 #[derive(Default)]
 pub struct ProjectState {
+    /// Counts the projects made the open one (new, opened, from a template), so the
+    /// windows that belonged to the last one can close.
+    pub generation: u64,
     pub path: String,
     pub loaded: Option<Loaded>,
     building: Option<Building>,
@@ -147,6 +150,7 @@ impl ProjectState {
         self.last_edit = None;
         self.open_effect = None;
         self.open_auto = None;
+        self.generation += 1;
         self.playlist.forget_project();
         self.roll.forget_project();
         // the loop the song was saved with

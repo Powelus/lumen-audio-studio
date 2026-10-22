@@ -1225,7 +1225,6 @@ fn strip(
                             ui.close();
                         }
                     });
-                    r.on_hover_text(format!("{} ({:.1} dB)", pct(vol), db(vol)));
                     let label = if t.volume <= 0.0 {
                         "-\u{221e}".to_string()
                     } else {
@@ -1453,10 +1452,6 @@ fn db(v: f64) -> f64 {
     } else {
         20.0 * v.log10()
     }
-}
-
-fn pct(v: f64) -> String {
-    format!("{:.0}%", v * 100.0)
 }
 
 /// An effect's id without its `las-` prefix.

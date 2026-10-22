@@ -132,6 +132,8 @@ pub struct App {
     pub(crate) sample_editor: Option<crate::sampleedit::SampleEditor>,
     /// Command palette, capture, render, reference, tuner, templates, autosave.
     pub(crate) wf: crate::workflow::Workflow,
+    /// The project generation the windows were last opened for.
+    pub(crate) seen_generation: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -221,6 +223,7 @@ impl App {
             editors: Vec::new(),
             sample_editor: None,
             wf,
+            seen_generation: 0,
         };
         for inst in [Instrument::Polaris, Instrument::Mist, Instrument::Facet] {
             app.load_preset(inst, 1);
@@ -1879,6 +1882,27 @@ impl App {
     }
 }
 
+impl App {
+    /// Another project was opened: the instrument window, the sample editor and the
+    /// channel settings showed the old one's channels, so they close (the instrument
+    /// window would otherwise turn into a stand-alone synth no channel hears).
+    fn forget_old_windows(&mut self) {
+        let g = self.project.generation;
+        if g == self.seen_generation {
+            return;
+        }
+        let first = self.seen_generation == 0;
+        self.seen_generation = g;
+        if first {
+            return;
+        }
+        self.bound = None;
+        self.shell.open.synth = false;
+        self.sample_editor = None;
+        self.shell.chan_settings = None;
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.scale_ui(ctx);
@@ -1898,6 +1922,7 @@ impl eframe::App for App {
                 .collect()
         });
         self.poll_project(ctx);
+        self.forget_old_windows();
         self.poll_midi();
         self.sync_bound();
         if self.quit {

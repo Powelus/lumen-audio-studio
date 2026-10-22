@@ -1385,3 +1385,30 @@ fn every_button_of_the_main_windows_can_be_clicked() {
         println!("{title}: {n} buttons");
     }
 }
+
+#[test]
+fn opening_another_project_closes_the_old_ones_instrument_windows() {
+    let mut h = Harness::demo();
+    h.app.add_channel("zenith");
+    let ch = h.project().channels.len() - 1;
+    h.app.open_channel(ch);
+    h.run(3);
+    assert!(h.app.shell.open.synth);
+    h.app.project.dirty = false;
+    h.menu(&["File", "New Ctrl+N"]);
+    assert!(
+        !h.app.shell.open.synth,
+        "the old song's instrument window closes"
+    );
+    assert!(h.app.bound.is_none());
+    assert!(
+        !h.nodes
+            .iter()
+            .any(|n| n.label.contains("Stand-alone synth")),
+        "no stand-alone synth left showing"
+    );
+    // the new song's own channels open as usual
+    h.app.open_channel(0);
+    h.run(3);
+    assert!(h.app.shell.open.synth);
+}
