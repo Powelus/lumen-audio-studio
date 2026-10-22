@@ -44,6 +44,9 @@ pub struct SourcePlayback {
     pub stop: Option<f64>,
     /// Loop points, in buffer frames.
     pub loop_points: Option<(f64, f64)>,
+    /// Set once the rate changed while sounding: the output frame `offset` reads at
+    /// (instead of `start`).
+    pub rebased: Option<usize>,
 }
 
 impl SourcePlayback {
@@ -62,7 +65,8 @@ impl SourcePlayback {
             }
         }
         let len = self.buf.frames();
-        let mut pos = self.offset + (frame as f64 - self.start * sr) * self.rate;
+        let base = self.rebased.map_or(self.start * sr, |f| f as f64);
+        let mut pos = self.offset + (frame as f64 - base) * self.rate;
         let mut looping = false;
         if let Some((ls, le)) = self.loop_points {
             if le > ls && len > 0 {
@@ -95,6 +99,23 @@ impl SourcePlayback {
             out[1] = out[0];
         }
         Some(out)
+    }
+
+    /// Change the rate by `k` from output frame `frame` on, without a jump in where
+    /// it reads (a channel's pitch moving under a note).
+    pub fn bend(&mut self, frame: usize, sr: f64, k: f64) {
+        if frame > self.first_frame(sr) {
+            let base = self.rebased.map_or(self.start * sr, |f| f as f64);
+            let mut pos = self.offset + (frame as f64 - base) * self.rate;
+            if let Some((ls, le)) = self.loop_points {
+                if le > ls && pos >= le {
+                    pos = ls + (pos - ls) % (le - ls);
+                }
+            }
+            self.offset = pos;
+            self.rebased = Some(frame);
+        }
+        self.rate *= k;
     }
 }
 
@@ -266,6 +287,7 @@ fn make_voice(buf: &Arc<Audio>, sr: f64, v: VoiceSpec) -> Voice {
     let bsr = buf.sample_rate;
     Voice {
         src: SourcePlayback {
+            rebased: None,
             buf: buf.clone(),
             start: t,
             offset: round(start_sec * bsr),
@@ -350,6 +372,8 @@ pub struct Sampler {
     made: [(f32, f32); 2],
     /// Automation of what is read when a note starts.
     timeline: BTreeMap<String, Timeline>,
+    /// The channel pitch offset last heard (see [`Sampler::retune`]).
+    tune: Option<f64>,
     gain_buf: Vec<f32>,
 }
 
@@ -390,6 +414,7 @@ impl Sampler {
             g,
             made: [(f32::NAN, 0.0); 2],
             timeline: BTreeMap::new(),
+            tune: None,
             gain_buf: Vec::new(),
         }
     }
@@ -539,6 +564,20 @@ impl Sampler {
     /// Fade out everything that sounds.
     pub fn stop(&mut self, time: f64) {
         self.cut_voices(time);
+    }
+
+    /// The channel's pitch offset is now `semis` (from output frame `frame`): the
+    /// voices that sound follow it by the change.
+    pub fn retune(&mut self, semis: f64, frame: usize) {
+        let delta = semis - self.tune.unwrap_or(semis);
+        self.tune = Some(semis);
+        if delta == 0.0 {
+            return;
+        }
+        let k = 2f64.powf(delta / 12.0);
+        for v in &mut self.voices {
+            v.src.bend(frame, self.sr, k);
+        }
     }
 
     /// Whether the sampler loops its sample.

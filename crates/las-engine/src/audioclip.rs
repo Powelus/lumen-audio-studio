@@ -338,6 +338,7 @@ impl AudioClipper {
         let sr = self.sr;
         self.voices.push(ClipVoice {
             src: SourcePlayback {
+                rebased: None,
                 buf,
                 start: t,
                 offset: (off * bsr + 0.5).floor(),

@@ -1469,3 +1469,66 @@ fn a_rack_row_with_piano_roll_notes_previews_them_and_a_click_opens_the_roll() {
         .sum::<usize>();
     assert_eq!(before, after, "the preview toggles no steps");
 }
+
+fn roll_ctl(h: &Harness) -> las_project::Controllers {
+    let p = h.project();
+    let id = &p.channels[h.app.project.channel].id;
+    p.patterns[h.app.project.pattern]
+        .controllers
+        .get(id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn piano_roll_mod_wheel_lane_draws_erases_and_undoes() {
+    use eframe::egui::{Key, Modifiers, PointerButton};
+    use las_project::CtlKind;
+    let mut h = roll_harness();
+    let g = roll_grid(&h);
+    h.click("Mod wheel");
+    assert_eq!(h.app.project.roll.lane, crate::roll::Lane::ModWheel);
+    h.run(2);
+    let tab = h.get("Mod wheel").rect;
+    // the lane sits right under its row of names, 84 points high
+    let top = tab.bottom() + 12.0;
+    let a = eframe::egui::pos2(g.left() + 20.0, top + 10.0);
+    let b = eframe::egui::pos2(g.left() + 260.0, top + 70.0);
+    h.drag(a, b);
+    let c = roll_ctl(&h);
+    let w = &c.mod_wheel;
+    assert!(w.len() >= 4, "a drag draws a line of points: {}", w.len());
+    assert!(w.first().unwrap().v > w.last().unwrap().v, "high to low");
+    assert!(w.windows(2).all(|p| p[0].pos < p[1].pos), "in time order");
+    assert!(c.pitch_bend.is_empty() && c.aftertouch.is_empty());
+    // the notes are left alone
+    assert!(roll_notes(&h).is_empty());
+    // a right drag over part of it erases that part
+    let n = w.len();
+    h.drag_with(
+        eframe::egui::pos2(g.left() + 20.0, top + 40.0),
+        eframe::egui::pos2(g.left() + 100.0, top + 40.0),
+        PointerButton::Secondary,
+        Modifiers::NONE,
+    );
+    let left = roll_ctl(&h).mod_wheel.len();
+    assert!(left < n && left > 0, "erased some: {n} -> {left}");
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(roll_ctl(&h).mod_wheel.len(), n, "undo brings them back");
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert!(roll_ctl(&h).mod_wheel.is_empty(), "and undoes the drawing");
+    // pitch bend draws around the middle
+    h.click("Pitch bend");
+    h.run(2);
+    h.drag(
+        eframe::egui::pos2(g.left() + 20.0, top + 2.0),
+        eframe::egui::pos2(g.left() + 60.0, top + 2.0),
+    );
+    let pb = roll_ctl(&h).pitch_bend;
+    assert!(!pb.is_empty() && pb.iter().all(|p| p.v > 0.8), "{pb:?}");
+    assert_eq!(
+        roll_ctl(&h).value_at(CtlKind::PitchBend, -1.0),
+        0.0,
+        "no bend before the first point"
+    );
+}

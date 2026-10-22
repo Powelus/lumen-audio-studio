@@ -155,6 +155,8 @@ pub(crate) struct Hosted {
     held: Vec<u8>,
     sr: f64,
     notes: Vec<Note>,
+    /// Controller moves by time, sent at the start of the block they fall in.
+    ccs: Vec<(f64, las_dsp::engine::Cc, f64)>,
 }
 
 impl Hosted {
@@ -165,6 +167,7 @@ impl Hosted {
             held: Vec::new(),
             sr,
             notes: Vec::with_capacity(128),
+            ccs: Vec::new(),
         }
     }
 
@@ -185,9 +188,10 @@ impl Hosted {
         self.plugin.automate(id, points, first)
     }
 
-    /// Move a performance controller (applied from the next block).
-    pub fn controller(&mut self, cc: las_dsp::engine::Cc, value: f64) {
-        self.plugin.controller(cc, value);
+    /// Move a performance controller at `time` (applied from the block it falls in).
+    pub fn controller(&mut self, cc: las_dsp::engine::Cc, value: f64, time: f64) {
+        let i = self.ccs.partition_point(|e| e.0 <= time);
+        self.ccs.insert(i, (time, cc, value));
     }
 
     pub fn weave_patch(
@@ -198,6 +202,7 @@ impl Hosted {
     }
 
     pub fn stop(&mut self, time: f64) {
+        self.ccs.retain(|e| e.0 < time);
         self.queue.retain(|&(t, _, v)| t < time && v == 0.0);
         let held = std::mem::take(&mut self.held);
         for key in held {
@@ -211,6 +216,10 @@ impl Hosted {
             return;
         }
         let end = t0 + n as f64 / self.sr;
+        let due = self.ccs.partition_point(|e| e.0 < end);
+        for (_, cc, v) in self.ccs.drain(..due) {
+            self.plugin.controller(cc, v);
+        }
         self.queue.sort_by(|a, b| a.0.total_cmp(&b.0));
         let due = self.queue.partition_point(|e| e.0 < end);
         let mut notes = std::mem::take(&mut self.notes);
