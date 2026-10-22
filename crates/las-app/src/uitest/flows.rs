@@ -1416,3 +1416,42 @@ fn opening_another_project_closes_the_old_ones_instrument_windows() {
     h.run(3);
     assert!(h.app.shell.open.synth);
 }
+
+#[test]
+fn a_rack_row_with_piano_roll_notes_previews_them_and_a_click_opens_the_roll() {
+    let mut h = Harness::demo();
+    h.app.shell.open.rack = true;
+    h.app.shell.open.roll = false;
+    // give the first channel a long note at another key, so it is no plain step
+    let pattern = h.app.project.pattern;
+    let id = h.project().channels[0].id.clone();
+    h.app.project.modify(true, |p| {
+        let t = f64::from(las_project::TICKS_PER_STEP);
+        let mut n = crate::roll::new_note(67, 2.0 * t, 6.0 * t);
+        n.step = None;
+        p.patterns[pattern].notes.entry(id).or_default().push(n);
+    });
+    h.run(3);
+    let first = h.project().channels[0].name.clone();
+    let preview = h.get(&format!("Piano roll notes of {first}"));
+    h.click_at(preview.rect.center());
+    h.run(3);
+    assert!(
+        h.app.shell.open.roll,
+        "a click on the preview opens the roll"
+    );
+    assert_eq!(h.app.project.channel, 0);
+    let before = h.project().patterns[pattern]
+        .notes
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
+    h.click_at(preview.rect.center());
+    h.run(2);
+    let after = h.project().patterns[pattern]
+        .notes
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
+    assert_eq!(before, after, "the preview toggles no steps");
+}

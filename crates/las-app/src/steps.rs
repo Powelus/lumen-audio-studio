@@ -349,6 +349,64 @@ fn step_note(notes: &[Note], step: usize) -> Option<&Note> {
         .find(|n| n.step == Some(true) && (n.pos - pos).abs() < 0.5)
 }
 
+/// Whether a channel's notes are all plain steps (a step long, on the step grid, at
+/// the default key), so the rack shows them as steps; otherwise it shows a preview of
+/// the piano roll's notes.
+pub fn step_like(notes: &[Note]) -> bool {
+    let t = f64::from(TICKS_PER_STEP);
+    notes.iter().all(|n| {
+        let grid = n.pos / t;
+        n.key == 60 && (n.len - t).abs() < 0.5 && (grid - grid.round()).abs() * t < 0.5
+    })
+}
+
+/// The little piano roll drawn over a channel's step area: a bar for each note, by
+/// time across the pattern's `steps` and by pitch between the lowest and highest key.
+fn roll_preview(
+    painter: &egui::Painter,
+    area: Rect,
+    notes: &[Note],
+    steps: usize,
+    col: Color32,
+    bg: Color32,
+) {
+    let bgr = Rect::from_min_max(
+        pos2(area.left(), area.top() + 2.0),
+        pos2(area.left() + cell_offset(steps) - 3.0, area.bottom() - 2.0),
+    );
+    painter.rect_filled(bgr, 4.0, bg);
+    let (lo, hi) = notes.iter().fold((i32::MAX, i32::MIN), |(l, h), n| {
+        (l.min(n.key), h.max(n.key))
+    });
+    if lo > hi {
+        return;
+    }
+    let inner = bgr.shrink2(vec2(3.0, 3.0));
+    let ticks = steps as f64 * f64::from(TICKS_PER_STEP);
+    let rows = (hi - lo + 1) as f32;
+    let h = (inner.height() / rows).clamp(2.0, 6.0);
+    let span = (inner.height() - h).max(0.0);
+    for n in notes {
+        let x0 = inner.left() + (n.pos / ticks) as f32 * inner.width();
+        if x0 >= inner.right() {
+            continue;
+        }
+        let x1 = (inner.left() + ((n.pos + n.len) / ticks) as f32 * inner.width())
+            .max(x0 + 2.0)
+            .min(inner.right());
+        let y = if hi == lo {
+            inner.center().y - h / 2.0
+        } else {
+            inner.bottom() - h - (n.key - lo) as f32 / (hi - lo) as f32 * span
+        };
+        painter.rect_filled(
+            Rect::from_min_max(pos2(x0, y), pos2(x1 - 1.0, y + h)),
+            1.5,
+            col,
+        );
+    }
+}
+
 /// The edit that toggles a step: remove the note there, or place one.
 pub fn toggle(notes: &[Note], step: usize) -> Edit {
     match step_note(notes, step) {
@@ -814,7 +872,13 @@ pub fn draw(
                     steps_left = area.left();
                     let cell_at = |x: f32| cell_under(x - area.left(), steps);
                     let painter = ui.painter_at(area);
-                    for s in 0..steps {
+                    // notes that are not plain steps show as a little piano roll in
+                    // place of the steps, as FL does; a click opens the piano roll
+                    let rolled = !step_like(notes);
+                    if rolled {
+                        roll_preview(&painter, area, notes, steps, col, p.step_off);
+                    }
+                    for s in 0..if rolled { 0 } else { steps } {
                         let on = step_note(notes, s).is_some();
                         let cell = Rect::from_min_size(
                             pos2(area.left() + cell_offset(s), area.top() + 2.0),
@@ -846,10 +910,32 @@ pub fn draw(
                             Stroke::new(1.5, Color32::WHITE),
                         );
                     }
+                    let resp = if rolled {
+                        let name = c.name.clone();
+                        resp.widget_info(move || {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                true,
+                                format!("Piano roll notes of {name}"),
+                            )
+                        });
+                        let resp = resp.on_hover_text("Notes from the piano roll. Click to edit them.");
+                        if resp.clicked_by(egui::PointerButton::Primary) || resp.double_clicked() {
+                            *selected = i;
+                            out.open_roll = Some(i);
+                        }
+                        resp.context_menu(|ui| {
+                            channel_menu(ui, project, i, notes, steps, state, &mut out);
+                        });
+                        resp
+                    } else {
+                        resp
+                    };
                     // click toggles, dragging paints
                     let primary = ui.input(|i| i.pointer.primary_down());
-                    if resp.drag_started_by(egui::PointerButton::Primary)
-                        || resp.clicked_by(egui::PointerButton::Primary)
+                    if !rolled
+                        && (resp.drag_started_by(egui::PointerButton::Primary)
+                            || resp.clicked_by(egui::PointerButton::Primary))
                     {
                         if let Some(s) = resp.interact_pointer_pos().and_then(|q| cell_at(q.x)) {
                             let e = toggle(notes, s);
@@ -858,7 +944,7 @@ pub fn draw(
                             out.notes.push((i, e));
                             *selected = i;
                         }
-                    } else if resp.dragged_by(egui::PointerButton::Primary) && primary {
+                    } else if !rolled && resp.dragged_by(egui::PointerButton::Primary) && primary {
                         if let (Some(add), Some(s)) = (
                             state.painting,
                             resp.interact_pointer_pos().and_then(|q| cell_at(q.x)),
@@ -1308,6 +1394,17 @@ mod tests {
     }
 
     #[test]
+    fn notes_are_step_like_only_when_a_step_long_on_the_grid_at_the_default_key() {
+        let t = f64::from(TICKS_PER_STEP);
+        let n = |key, pos, len| new_note(key, pos, len);
+        assert!(step_like(&[]));
+        assert!(step_like(&[n(60, 0.0, t), n(60, 4.0 * t, t)]));
+        assert!(!step_like(&[n(60, 0.0, t), n(62, t, t)]), "another key");
+        assert!(!step_like(&[n(60, 0.0, 2.0 * t)]), "longer");
+        assert!(!step_like(&[n(60, t / 2.0, t)]), "off the grid");
+    }
+
+    #[test]
     fn toggling_a_step_adds_then_removes_a_step_note() {
         let mut p = project();
         let ch = p.channels[0].id.clone();
@@ -1412,7 +1509,10 @@ mod tests {
 
     #[test]
     fn the_step_sequencer_draws_and_a_click_toggles_a_step() {
-        let p = project();
+        let mut p = project();
+        // piano roll notes would show as a preview, not steps
+        let id = p.channels[0].id.clone();
+        p.patterns[0].notes.remove(&id);
         let ctx = egui::Context::default();
         let mut state = StepState::default();
         let mut sel = 0usize;
