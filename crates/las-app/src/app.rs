@@ -477,11 +477,36 @@ impl App {
             .pointer(path)
             .and_then(Value::as_f64)
             .unwrap_or(v);
+        if let Some(req) = self.synth_automation(path, label, v) {
+            crate::widgets::automate_next(req);
+        }
         let changed = knob(ui, &mut v, range, d, label, log, show);
         if changed {
             self.set(path, json!(v));
         }
         changed
+    }
+
+    /// What automating the synth knob at `path` (a JSON pointer into the patch) of the
+    /// channel the panels edit would make, with the knob at `v` now.
+    fn synth_automation(
+        &self,
+        path: &str,
+        label: &str,
+        v: f64,
+    ) -> Option<crate::auto::AutoRequest> {
+        let Some(crate::inst::Bound::Synth(ch)) = self.bound else {
+            return None;
+        };
+        let l = self.project.loaded.as_ref()?;
+        let c = l.project.channels.get(ch)?;
+        let param = format!("patch{}", path.replace('/', "."));
+        let def = las_engine::pluginparams::plugin_param_def(&c.plugin_id, &param);
+        Some(crate::auto::AutoRequest {
+            target: crate::auto::plugin_target(&c.id, &param),
+            name: format!("{} {label}", c.name),
+            start: def.to_normalized(v).clamp(0.0, 1.0),
+        })
     }
 
     pub(crate) fn toggle(&mut self, ui: &mut Ui, path: &str, label: &str) -> bool {
@@ -1703,6 +1728,10 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.scale_ui(ctx);
+        // a knob's "Create automation clip" from the last frame
+        if let Some(r) = crate::widgets::take_automation_request() {
+            self.project.create_automation(&r);
+        }
         self.keys(ctx);
         self.shortcuts(ctx);
         let drop_at = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()));

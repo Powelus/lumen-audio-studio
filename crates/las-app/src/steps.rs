@@ -991,6 +991,31 @@ fn channel_menu(
         out.open_synth = Some(i);
         ui.close();
     }
+    ui.menu_button("Create automation clip", |ui| {
+        let pitch = c.pitch;
+        for (param, what, start) in [
+            ("volume", "level", c.volume / 1.25),
+            ("pan", "pan", (c.pan + 1.0) / 2.0),
+            ("pitch", "pitch", ((pitch + 12.0) / 24.0).clamp(0.0, 1.0)),
+        ] {
+            if ui
+                .button(format!("Channel {what}"))
+                .on_hover_text(if param == "pitch" {
+                    "Sets the pitch notes start at, up to an octave up or down"
+                } else {
+                    ""
+                })
+                .clicked()
+            {
+                out.chans.push(ChanEdit::Automate(crate::auto::AutoRequest {
+                    target: crate::auto::channel_target(&c.id, param),
+                    name: format!("{} {what}", c.name),
+                    start,
+                }));
+                ui.close();
+            }
+        }
+    });
     ui.separator();
     if ui.button("Rename...").clicked() {
         out.chans.push(ChanEdit::AskRename(i));
