@@ -15,7 +15,7 @@ fn every_factory_sample_matches_the_web_version() {
     let index = index.as_array().unwrap();
     assert_eq!(index.len(), FACTORY_SAMPLES.len());
     let all: Vec<f32> = fixture("factory.f32")
-        .chunks_exact(4)
+        .chunks(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let mut at = 0;

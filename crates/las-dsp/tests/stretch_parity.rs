@@ -11,7 +11,7 @@ fn stretches_match_the_web_version() {
         serde_json::from_slice(&std::fs::read(format!("{dir}/stretch.json")).unwrap()).unwrap();
     let all: Vec<f32> = std::fs::read(format!("{dir}/stretch.f32"))
         .unwrap()
-        .chunks_exact(4)
+        .chunks(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let mut at = 0;

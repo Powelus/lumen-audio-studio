@@ -423,7 +423,7 @@ impl Instance {
                     std::ptr::null_mut(),
                     0.0,
                 );
-                for (i, v) in vals.chunks_exact(4).enumerate() {
+                for (i, v) in vals.chunks(4).enumerate() {
                     let v = f32::from_le_bytes(v.try_into().map_err(|_| bad())?);
                     self.set_param(i as i32, v);
                 }
