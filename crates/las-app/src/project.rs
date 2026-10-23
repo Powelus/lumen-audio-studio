@@ -80,7 +80,7 @@ pub struct ProjectState {
     /// Where "Play song" starts, in ticks.
     pub start_tick: f64,
     /// Earlier and later states of the project, for undo and redo.
-    undo: Vec<Arc<Project>>,
+    pub(crate) undo: Vec<Arc<Project>>,
     redo: Vec<Arc<Project>>,
     /// Changed since it was opened or saved.
     pub dirty: bool,
@@ -92,6 +92,9 @@ pub struct ProjectState {
     last_edit: Option<(String, std::time::Instant)>,
     /// The player no longer matches the project and is rebuilt when things are quiet.
     pub(crate) stale: bool,
+    /// A drag has begun: its first change starts an undo step (a click that changes
+    /// nothing leaves no empty step and the project unmodified).
+    pub(crate) armed: bool,
     /// Count in (beats, tempo) before the player that is being built starts.
     pub count_in: Option<(u32, f64)>,
     /// The audio thread's panics seen so far (see [`crate::audio::Meters::faults`]).

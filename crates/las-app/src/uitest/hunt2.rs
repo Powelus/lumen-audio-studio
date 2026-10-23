@@ -181,3 +181,62 @@ fn a_synth_panel_knob_is_heard_in_the_playing_song_while_it_is_dragged() {
         assert!(heard > 0, "{id}: no knob changed the patch");
     }
 }
+
+fn playing(h: &Harness) -> bool {
+    h.app.audio.as_ref().is_some_and(|a| a.meters.playing())
+}
+
+/// Frames until the output is heard (or a few seconds of them pass).
+fn hears(h: &mut Harness) -> bool {
+    for _ in 0..150 {
+        h.run(1);
+        if h.heard > 1e-3 {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn space_plays_and_stops_the_pattern_and_the_song() {
+    use eframe::egui::Key;
+    let mut h = Harness::new().with_audio();
+    h.settle();
+    // pattern mode: the pattern loops
+    h.click("PAT");
+    h.key(Key::Space);
+    h.settle();
+    assert!(playing(&h), "Space did not start the pattern");
+    assert!(h.app.project.looping, "PAT plays the pattern");
+    assert!(hears(&mut h), "the pattern is not heard");
+    h.key(Key::Space);
+    h.run(3);
+    assert!(!playing(&h), "Space did not stop");
+    // song mode
+    h.click("SONG");
+    h.key(Key::Space);
+    h.settle();
+    assert!(playing(&h) && !h.app.project.looping, "SONG plays the song");
+    h.click("Stop");
+    h.run(3);
+    assert!(!playing(&h), "Stop did not stop");
+}
+
+#[test]
+fn a_click_on_swing_or_tempo_without_moving_is_not_an_edit() {
+    let mut h = Harness::demo();
+    h.app.project.dirty = false;
+    let undo = h.app.project.undo.len();
+    let swing = h.get("Swing: 0%").rect.center();
+    h.click_at(swing);
+    let bpm = h.find_prefix("Drag up and down to change the tempo")[0]
+        .rect
+        .center();
+    h.click_at(bpm);
+    assert_eq!(h.app.project.undo.len(), undo, "an empty undo step");
+    assert!(!h.app.project.dirty, "the project counts as changed");
+    // a real drag is one step
+    h.drag(bpm, bpm - eframe::egui::vec2(0.0, 40.0));
+    assert_eq!(h.app.project.undo.len(), undo + 1);
+    assert!(h.project().bpm > 128.0);
+}

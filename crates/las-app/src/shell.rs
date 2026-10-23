@@ -1045,13 +1045,14 @@ impl App {
             });
             let r = lcd(ui, &format!("{:.2}", live.unwrap_or(bpm)), "BPM", 86.0);
             if r.drag_started() {
-                self.project.modify(true, |_| {});
+                self.project.armed = true;
             }
             if r.dragged() {
                 let d = -f64::from(r.drag_delta().y) * 0.25;
                 if d != 0.0 {
+                    let begin = std::mem::take(&mut self.project.armed);
                     self.project
-                        .modify(false, |pr| pr.bpm = (pr.bpm + d).clamp(30.0, 300.0));
+                        .modify(begin, |pr| pr.bpm = (pr.bpm + d).clamp(30.0, 300.0));
                 }
             }
             let r = r.on_hover_text(
@@ -1973,10 +1974,11 @@ impl App {
                     steps::mini_knob(ui, &mut sw, (0.0, 1.0), 0.0, "Swing", pal().accent);
                 ui.label(RichText::new("SWING").size(10.0).color(pal().muted));
                 if start {
-                    self.project.modify(true, |_| {});
+                    self.project.armed = true;
                 }
                 if ch {
-                    self.project.modify(false, |pr| pr.swing = sw);
+                    let begin = std::mem::take(&mut self.project.armed);
+                    self.project.modify(begin, |pr| pr.swing = sw);
                 }
             });
         });
