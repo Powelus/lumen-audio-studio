@@ -154,12 +154,25 @@ impl ParamSpec {
 pub struct InputSpec {
     pub name: &'static str,
     pub unplugged: f32,
+    /// Takes any number of cables (summed); other inputs take one, and a new cable
+    /// plugged into one replaces the old.
+    pub many: bool,
 }
 
 const fn i(name: &'static str) -> InputSpec {
     InputSpec {
         name,
         unplugged: 0.0,
+        many: false,
+    }
+}
+
+/// An input that sums every cable plugged into it.
+const fn sum(name: &'static str) -> InputSpec {
+    InputSpec {
+        name,
+        unplugged: 0.0,
+        many: true,
     }
 }
 
@@ -184,6 +197,10 @@ pub const LADDER_MODES: [&str; 2] = ["24 dB", "12 dB"];
 /// The choices of a shaper's `shape`.
 pub const SHAPES: [&str; 3] = ["tanh", "fold", "clip"];
 /// The choices of a quantizer's `scale`.
+/// What the Math module does with its inputs (a is scaled first, the offset added last).
+pub const MATH_OPS: [&str; 6] = ["add", "subtract", "multiply", "min", "max", "average"];
+/// A symbol for each of [`MATH_OPS`].
+pub const MATH_SYMBOLS: [&str; 6] = ["+", "\u{2212}", "\u{d7}", "min", "max", "avg"];
 pub const SCALES: [&str; 4] = ["chromatic", "major", "minor", "pentatonic"];
 /// The notes of each scale, as a bit per semitone above the root.
 const SCALE_BITS: [u16; 4] = [0xfff, 0xab5, 0x5ad, 0x295];
@@ -197,7 +214,7 @@ static KEYS: Spec = Spec {
 };
 
 static OSC: Spec = Spec {
-    inputs: &[i("pitch"), i("fm"), i("sync"), i("pfm")],
+    inputs: &[sum("pitch"), i("fm"), i("sync"), i("pfm")],
     params: &[
         pstep("wave", 5, 2.0),
         p("tune", -24.0, 24.0, 0.0),
@@ -215,7 +232,7 @@ static OSC: Spec = Spec {
 };
 
 static FM: Spec = Spec {
-    inputs: &[i("pitch"), i("pm")],
+    inputs: &[sum("pitch"), i("pm")],
     params: &[
         plog("ratio", 0.125, 16.0, 1.0),
         p("tune", -24.0, 24.0, 0.0),
@@ -374,6 +391,7 @@ static VCA: Spec = Spec {
         InputSpec {
             name: "cv",
             unplugged: 1.0,
+            many: false,
         },
     ],
     params: &[p("gain", 0.0, 1.0, 1.0)],
@@ -381,7 +399,7 @@ static VCA: Spec = Spec {
 };
 
 static MIX: Spec = Spec {
-    inputs: &[i("a"), i("b"), i("c"), i("d")],
+    inputs: &[sum("a"), sum("b"), sum("c"), sum("d")],
     params: &[
         p("level_a", 0.0, 1.0, 1.0),
         p("level_b", 0.0, 1.0, 1.0),
@@ -393,7 +411,11 @@ static MIX: Spec = Spec {
 
 static MATH: Spec = Spec {
     inputs: &[i("a"), i("b")],
-    params: &[p("scale", -4.0, 4.0, 1.0), p("offset", -1.0, 1.0, 0.0)],
+    params: &[
+        p("scale", -4.0, 4.0, 1.0),
+        p("offset", -1.0, 1.0, 0.0),
+        pstep("op", 6, 0.0),
+    ],
     outputs: &["out"],
 };
 
@@ -416,7 +438,7 @@ static PAN: Spec = Spec {
 };
 
 static OUTPUT: Spec = Spec {
-    inputs: &[i("left"), i("right")],
+    inputs: &[sum("left"), sum("right")],
     params: &[p("level", 0.0, 1.0, 0.8), p("width", 0.0, 2.0, 1.0)],
     outputs: &[],
 };
@@ -498,6 +520,7 @@ impl Kind {
             (Kind::Ladder, "mode") => &LADDER_MODES,
             (Kind::Shaper, "shape") => &SHAPES,
             (Kind::Quant, "scale") => &SCALES,
+            (Kind::Math, "op") => &MATH_OPS,
             (Kind::Osc, "retrig") => &["free", "reset"],
             (Kind::Lfo, "retrig") => &["free", "on note"],
             (Kind::Env, "loop") => &["off", "on"],
@@ -524,6 +547,13 @@ impl Kind {
 
     pub fn output_index(self, name: &str) -> Option<usize> {
         self.spec().outputs.iter().position(|o| *o == name)
+    }
+
+    /// Whether an input takes more than one cable. A parameter does (each cable
+    /// moves it by its own amount, and they add up); a plain input says so in its spec.
+    pub fn accepts_many(self, input: &str) -> bool {
+        let s = self.spec();
+        s.params.iter().any(|p| p.name == input) || s.inputs.iter().any(|i| i.name == input && i.many)
     }
 
     pub fn param(self, name: &str) -> Option<&'static ParamSpec> {
@@ -686,8 +716,37 @@ impl Patch {
         }
     }
 
+    /// A patch read back. A single input with several cables (an older patch) keeps
+    /// only the first; inputs that sum keep them all.
     pub fn from_json(v: &serde_json::Value) -> Result<Self, String> {
-        serde_json::from_value(v.clone()).map_err(|e| e.to_string())
+        let mut p: Self = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+        p.one_cable_per_input();
+        Ok(p)
+    }
+
+    /// Drop every cable but the first into each input that takes one cable.
+    pub fn one_cable_per_input(&mut self) {
+        let mut seen: Vec<(u32, &str)> = Vec::new();
+        let keep: Vec<bool> = self
+            .cables
+            .iter()
+            .map(|c| {
+                let Some(k) = self.node(c.to).map(|n| n.kind) else {
+                    return true;
+                };
+                if !self.is_valid(c) || k.accepts_many(&c.input) {
+                    return true;
+                }
+                let key = (c.to, c.input.as_str());
+                if seen.contains(&key) {
+                    return false;
+                }
+                seen.push(key);
+                true
+            })
+            .collect();
+        let mut keep = keep.into_iter();
+        self.cables.retain(|_| keep.next().unwrap_or(true));
     }
 
     pub fn to_json(&self) -> serde_json::Value {
@@ -1154,12 +1213,14 @@ pub fn factory() -> Vec<(&'static str, Patch)> {
                     ),
                     m(7, Vca, &[]),
                     m(8, Output, &[("level", 0.6)]),
+                    m(9, Mix, &[("level_a", 0.5), ("level_b", 0.5)]),
                 ],
                 vec![
                     c(1, "pitch", 2, "pitch", 1.0),
                     c(1, "pitch", 3, "pitch", 1.0),
-                    c(2, "out", 5, "in", 0.5),
-                    c(3, "out", 5, "in", 0.5),
+                    c(2, "out", 9, "a", 1.0),
+                    c(3, "out", 9, "b", 1.0),
+                    c(9, "out", 5, "in", 1.0),
                     c(4, "out", 5, "cutoff", 0.1),
                     c(1, "gate", 6, "gate", 1.0),
                     c(5, "out", 7, "in", 1.0),
@@ -2366,7 +2427,11 @@ pub struct Modular {
 }
 
 impl Modular {
+    /// A synth playing a patch; a single input with several cables plays only the first.
     pub fn new(patch: &Patch, sr: f64) -> Self {
+        let mut patch = patch.clone();
+        patch.one_cable_per_input();
+        let patch = &patch;
         let graph = Graph::compile(patch);
         let voices = (0..MAX_VOICES)
             .map(|v| Voice::new(&graph, v as u32, sr))
@@ -3131,7 +3196,16 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
             Kind::Math => {
                 let a = input(c, outs, 0, 0.0);
                 let b = input(c, outs, 1, 0.0);
-                outs[c.out] = a * param(c, outs, 0) as f32 + b + param(c, outs, 1) as f32;
+                let a = a * param(c, outs, 0) as f32;
+                let y = match param(c, outs, 2) as u32 {
+                    0 => a + b,
+                    1 => a - b,
+                    2 => a * b,
+                    3 => a.min(b),
+                    4 => a.max(b),
+                    _ => (a + b) * 0.5,
+                };
+                outs[c.out] = y + param(c, outs, 1) as f32;
             }
             Kind::Quant => {
                 let x = f64::from(input(c, outs, 0, 0.0));
@@ -3459,6 +3533,75 @@ mod tests {
         let back = m.apply_live(Box::new(other.clone()));
         assert_eq!(*back, other);
         assert_eq!(m.patch(), &base);
+    }
+
+    #[test]
+    fn a_single_input_keeps_one_cable_and_a_summing_input_keeps_all() {
+        let mut p = Patch::default();
+        let lfo = p.free_id();
+        p.nodes.push(Node::new(lfo, Kind::Lfo, [0.0; 2]));
+        // a second cable into the filter's single input, and into the output's summing one
+        p.cables.push(Cable::new(lfo, "out", 4, "in", 1.0));
+        p.cables.push(Cable::new(lfo, "out", 6, "left", 1.0));
+        let back = Patch::from_json(&p.to_json()).unwrap();
+        let into = |q: &Patch, to: u32, input: &str| {
+            q.cables
+                .iter()
+                .filter(|c| c.to == to && c.input == input)
+                .map(|c| c.from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(into(&back, 4, "in"), vec![2]);
+        assert_eq!(into(&back, 6, "left"), vec![5, lfo]);
+        assert!(!Kind::Filter.accepts_many("in"));
+        assert!(Kind::Filter.accepts_many("cutoff"));
+        assert!(Kind::Mix.accepts_many("a"));
+        // every factory patch already keeps to one cable per single input
+        for (name, f) in factory() {
+            let mut g = f.clone();
+            g.one_cable_per_input();
+            assert_eq!(g.cables, f.cables, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_math_module_does_its_operation() {
+        // a = 0.5, b = 0.2
+        let ops = [0.7, 0.3, 0.1, 0.2, 0.5, 0.35];
+        for (op, want) in ops.into_iter().enumerate() {
+            let p = Patch::new(
+                vec![
+                    Node::new(1, Kind::Macro, [0.0; 2])
+                        .with("knob_1", 0.5)
+                        .with("knob_2", 0.2),
+                    Node::new(2, Kind::Math, [0.0; 2]).with("op", op as f64),
+                    Node::new(3, Kind::Output, [0.0; 2]).with("level", 1.0),
+                ],
+                vec![
+                    Cable::new(1, "out_1", 2, "a", 1.0),
+                    Cable::new(1, "out_2", 2, "b", 1.0),
+                    Cable::new(2, "out", 3, "left", 1.0),
+                ],
+                1,
+            );
+            let mut m = Modular::new(&p, SR);
+            m.note_on(60, 1.0);
+            let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+            m.render(&mut l, &mut r);
+            let first = {
+                let mut q = p.clone();
+                q.nodes[1].params.insert("op".into(), 0.0);
+                let mut m = Modular::new(&q, SR);
+                m.note_on(60, 1.0);
+                let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+                m.render(&mut l, &mut r);
+                l[200]
+            };
+            // the output may scale the level: compare against the add result
+            let got = l[200] / first * 0.7;
+            assert!((got - want as f32).abs() < 1e-3, "op {op}: {got} vs {want}");
+        }
+        assert_eq!(Kind::Math.choices("op").unwrap()[2], "multiply");
     }
 
     #[test]
@@ -4275,6 +4418,8 @@ mod control_audit {
                 ("step_8", 0.8),
             ],
             (Kind::Seq, _) => &[("rate", 50.0)],
+            // a and b are the same wave: a scaled tells min from max
+            (Kind::Math, "op") => &[("scale", 0.5)],
             _ => &[],
         }
     }
