@@ -2,6 +2,18 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.63
+
+Weave is easier to patch: choices that work every time, one cable per input, copy and paste, and modules that drop into cables.
+
+- Weave: a choice (an oscillator's or LFO's wave, a filter type, the math operation, any list) opens a clean list on a left click that sits above everything and closes when you pick or click elsewhere. The arrows at its ends, the mouse wheel and a drag step through it. The right click shows only the control's own menu. This works at any zoom.
+- Weave: an input takes one cable, and a new cable replaces the old one, as in Blender. The mixer's inputs, the output, the pitch inputs and the parameters add up several cables. Older patches with several cables in a single input keep the first.
+- Weave: pick modules with a click, Shift or Ctrl click, or a box dragged on the empty canvas. Ctrl+C and Ctrl+V copy and paste them at the mouse with the cables between them, Ctrl+D duplicates, Delete removes, and the right click menus have the same. Undo takes each step back.
+- Weave: drag a module with no cables onto a cable and it goes into it (the cable lights up first). Alt and a drag, or Pull out of chain in its menu, takes a module out and joins its neighbours.
+- Weave: the Math module has an operation (add, subtract, multiply, min, max, average), shown in its title with a symbol, for example "Math: Multiply" and a times sign. Filters, the wavefolder and the quantizer show their type in the title, and oscillators and LFOs show a small picture of their wave.
+- Weave: the canvas menu adds a module where you right clicked, the add menu has a search box, every port has a tooltip that says what it is for and how many cables it takes, port hit areas stay usable when zoomed out, and the middle or right button drags the canvas.
+- Fixed: a click that closes a Weave menu no longer also clicks the canvas under it.
+
 ## 0.2.0-alpha.62
 
 A fuller mixer, controller lanes in the piano roll and a round of fixes.

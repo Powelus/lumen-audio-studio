@@ -4,7 +4,7 @@
 
 use super::Harness;
 use crate::weave_ui::patch_of;
-use eframe::egui::{vec2, Modifiers};
+use eframe::egui::{pos2, vec2, Modifiers};
 use las_dsp::modular::{factory, Kind, Patch};
 use las_engine::{PlayMode, Player};
 use std::sync::Arc;
@@ -316,4 +316,417 @@ fn a_weave_knob_links_to_a_midi_controller_and_follows_it_live() {
     h.app.midi_control(0, 22, 0);
     let after = patch(&h, ch).node(filter).unwrap().param(ps.name);
     assert!((after - ps.max).abs() < 1e-3);
+}
+
+/// The choice popup's entries shown now (each is a selectable label in the popup).
+fn shown_choices(h: &Harness, names: &[&str]) -> usize {
+    names.iter().filter(|n| h.has(n)).count()
+}
+
+#[test]
+fn a_left_click_on_a_choice_opens_a_dropdown_and_a_pick_sets_it() {
+    let (mut h, ch) = weave();
+    let osc = 2;
+    let waves = las_dsp::modular::OSC_WAVES;
+    let wave = h.app.weave.row_at(&patch(&h, ch), osc, 4);
+    assert_eq!(shown_choices(&h, &waves), 0);
+    h.click_at(wave);
+    assert_eq!(
+        shown_choices(&h, &waves),
+        waves.len(),
+        "the dropdown is open"
+    );
+    h.click_at(h.get("triangle").rect.center());
+    assert_eq!(
+        patch(&h, osc as usize * 0 + ch)
+            .node(osc)
+            .unwrap()
+            .param("wave"),
+        1.0
+    );
+    assert_eq!(shown_choices(&h, &waves), 0, "closed on a pick");
+    // a click that wobbles a little still opens it, and a click outside closes it
+    h.press_at(wave);
+    h.move_to(wave + vec2(2.0, 1.0), 2);
+    h.release();
+    h.run(2);
+    assert_eq!(
+        shown_choices(&h, &waves),
+        waves.len(),
+        "opened by a shaky click"
+    );
+    let away = h.app.weave.row_at(&patch(&h, ch), 4, 2) + vec2(0.0, 300.0);
+    h.click_at(away);
+    assert_eq!(shown_choices(&h, &waves), 0, "closed by a click outside");
+    assert_eq!(patch(&h, ch).node(osc).unwrap().param("wave"), 1.0);
+}
+
+#[test]
+fn a_right_click_on_a_choice_shows_only_its_own_menu() {
+    let (mut h, ch) = weave();
+    let waves = las_dsp::modular::OSC_WAVES;
+    let wave = h.app.weave.row_at(&patch(&h, ch), 2, 4);
+    h.right_click_at(wave);
+    assert!(h.has("Create automation clip"));
+    assert!(h.has("Reset to default"));
+    assert_eq!(shown_choices(&h, &waves), 0, "no dropdown under the menu");
+    assert!(!h.has("Paste Ctrl+V"), "no canvas menu as well");
+    assert!(!h.has("Add module here"), "no canvas menu as well");
+}
+
+#[test]
+fn a_choice_works_at_any_zoom_with_arrows_wheel_and_drag() {
+    let (mut h, ch) = weave();
+    let osc = 2;
+    let waves = las_dsp::modular::OSC_WAVES;
+    let wave = |h: &Harness| patch(h, ch).node(osc).unwrap().param("wave");
+    for z in [0.5, 1.0, 1.8] {
+        h.app.weave.set_zoom(z);
+        h.app.weave.set_pan(vec2(20.0, 20.0));
+        h.run(3);
+        let at = h.app.weave.row_at(&patch(&h, ch), osc, 4);
+        h.click_at(at);
+        assert_eq!(shown_choices(&h, &waves), waves.len(), "open at zoom {z}");
+        h.click_at(h.get("square").rect.center());
+        assert_eq!(wave(&h), 3.0, "picked at zoom {z}");
+        assert_eq!(shown_choices(&h, &waves), 0);
+        // the arrows step (round from the last to the first) without opening the list
+        let r = h.app.weave.row_rect_at(&patch(&h, ch), osc, 4);
+        h.click_at(r.right_center() - vec2(3.0, 0.0));
+        assert_eq!(wave(&h), 4.0, "zoom {z}");
+        h.click_at(r.right_center() - vec2(3.0, 0.0));
+        assert_eq!(wave(&h), 0.0, "zoom {z}");
+        h.click_at(r.left_center() + vec2(3.0, 0.0));
+        assert_eq!(wave(&h), 4.0, "zoom {z}");
+        assert_eq!(shown_choices(&h, &waves), 0);
+        // the wheel steps it
+        h.wheel_at(at, -50.0);
+        assert_eq!(wave(&h), 3.0, "zoom {z}");
+    }
+    // a drag steps through the choices
+    h.app.weave.set_zoom(1.0);
+    h.run(2);
+    let at = h.app.weave.row_at(&patch(&h, ch), osc, 4);
+    let w0 = wave(&h);
+    h.drag(at, at + vec2(0.0, 90.0));
+    assert!(wave(&h) < w0, "{w0} -> {}", wave(&h));
+    assert_eq!(
+        shown_choices(&h, &waves),
+        0,
+        "a drag does not open the list"
+    );
+}
+
+#[test]
+fn every_choice_of_every_module_opens_and_picks() {
+    let (mut h, ch) = weave();
+    for k in Kind::ALL {
+        let Some((pi, ps)) = k
+            .spec()
+            .params
+            .iter()
+            .enumerate()
+            .find(|(_, ps)| k.choices(ps.name).is_some())
+        else {
+            continue;
+        };
+        let choices = k.choices(ps.name).unwrap();
+        h.menu(&["Add module"]);
+        h.click(las_dsp::modular::CATEGORIES[k.category()]);
+        h.click(crate::weave_ui::kind_name(k));
+        h.run(2);
+        let id = *h
+            .app
+            .weave
+            .picked()
+            .last()
+            .expect("the new module is picked");
+        assert_eq!(patch(&h, ch).node(id).unwrap().kind, k);
+        let row = k.spec().inputs.len() + pi;
+        let at = h.app.weave.row_at(&patch(&h, ch), id, row);
+        h.click_at(at);
+        let last = choices[choices.len() - 1];
+        let entry = h
+            .find_all(last)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{k:?} {}: no list", ps.name));
+        h.click_at(entry.rect.center());
+        assert_eq!(
+            patch(&h, ch).node(id).unwrap().param(ps.name),
+            (choices.len() - 1) as f64,
+            "{k:?}"
+        );
+        h.key(eframe::egui::Key::Delete);
+        assert!(patch(&h, ch).node(id).is_none(), "{k:?} deleted");
+    }
+}
+
+#[test]
+fn a_new_cable_into_a_single_input_replaces_the_old_one() {
+    let (mut h, ch) = weave();
+    let p0 = patch(&h, ch);
+    // the envelope's output into the filter's audio input (the oscillator is there)
+    let from = h.app.weave.out_at(&p0, 3, 0);
+    let to = h.app.weave.in_at(&p0, 4, 0);
+    h.drag(from, to);
+    let into: Vec<u32> = patch(&h, ch)
+        .cables
+        .iter()
+        .filter(|c| c.to == 4 && c.input == "in")
+        .map(|c| c.from)
+        .collect();
+    assert_eq!(into, vec![3]);
+    h.app.project.undo();
+    h.run(2);
+    assert_eq!(patch(&h, ch), p0);
+}
+
+#[test]
+fn modules_are_picked_copied_pasted_duplicated_and_deleted() {
+    let (mut h, ch) = weave();
+    let p0 = patch(&h, ch);
+    let n = p0.nodes.len();
+    // a click picks one, a Ctrl click adds another
+    h.click_at(h.app.weave.title_at(&p0, 2));
+    assert_eq!(h.app.weave.picked(), vec![2]);
+    h.click_with(
+        h.app.weave.title_at(&p0, 4),
+        eframe::egui::PointerButton::Primary,
+        Modifiers::COMMAND,
+    );
+    assert_eq!(h.app.weave.picked(), vec![2, 4]);
+    // copy, then paste where the pointer is
+    h.key_with(eframe::egui::Key::C, Modifiers::COMMAND);
+    let spot = h.app.weave.row_at(&p0, 6, 0) + vec2(0.0, 250.0);
+    h.hover(spot);
+    h.key_with(eframe::egui::Key::V, Modifiers::COMMAND);
+    let p1 = patch(&h, ch);
+    assert_eq!(p1.nodes.len(), n + 2);
+    let new = h.app.weave.picked();
+    assert_eq!(new.len(), 2);
+    assert!(new.iter().all(|id| !p0.nodes.iter().any(|x| x.id == *id)));
+    // the cable between the two came too
+    assert!(p1.cables.iter().any(|c| c.from == new[0] && c.to == new[1]));
+    let w = h.app.weave.world_at(spot);
+    let corner = new
+        .iter()
+        .map(|id| p1.node(*id).unwrap().pos)
+        .fold([f32::MAX; 2], |m, q| [m[0].min(q[0]), m[1].min(q[1])]);
+    assert!((corner[0] - w.x).abs() < 2.0 && (corner[1] - w.y).abs() < 2.0);
+    // Ctrl+D duplicates the pasted ones
+    h.key_with(eframe::egui::Key::D, Modifiers::COMMAND);
+    assert_eq!(patch(&h, ch).nodes.len(), n + 4);
+    // Delete takes the picked ones out
+    h.hover(spot);
+    h.key(eframe::egui::Key::Delete);
+    assert_eq!(patch(&h, ch).nodes.len(), n + 2);
+    // undo brings them back, step by step
+    h.app.project.undo();
+    h.run(2);
+    assert_eq!(patch(&h, ch).nodes.len(), n + 4);
+    h.app.project.undo();
+    h.app.project.undo();
+    h.run(2);
+    assert_eq!(patch(&h, ch), p0);
+}
+
+#[test]
+fn a_box_drag_on_the_empty_canvas_picks_modules_and_the_menu_has_the_edits() {
+    let (mut h, ch) = weave();
+    h.app.weave.set_zoom(1.0);
+    h.app.weave.set_pan(vec2(120.0, 80.0));
+    h.run(3);
+    let p0 = patch(&h, ch);
+    // a box from just above and left of the oscillator over to the filter's title
+    let a = h.app.weave.title_at(&p0, 2) - vec2(95.0, 20.0);
+    let b = h.app.weave.title_at(&p0, 4) + vec2(10.0, 5.0);
+    h.drag(a, b);
+    let picked = h.app.weave.picked();
+    assert!(picked.contains(&2) && picked.contains(&4), "{picked:?}");
+    assert!(!picked.contains(&6));
+    // nothing moved
+    assert_eq!(patch(&h, ch), p0);
+    // the right click on the empty canvas: its own menu
+    // between the keys and the oscillator
+    let empty = h.app.weave.title_at(&p0, 2) - vec2(108.0, 0.0);
+    h.right_click_at(empty);
+    assert!(h.has("Paste Ctrl+V") && h.has("Duplicate Ctrl+D") && h.has("Add module here"));
+    h.click("Duplicate Ctrl+D");
+    assert_eq!(patch(&h, ch).nodes.len(), p0.nodes.len() + picked.len());
+    // a module added from it lands where the menu was opened
+    h.right_click_at(empty);
+    h.click("Add module here");
+    h.type_text("reverb");
+    h.click("Reverb");
+    let p = patch(&h, ch);
+    let r = p
+        .nodes
+        .iter()
+        .find(|n| n.kind == Kind::Reverb)
+        .expect("added");
+    let w = h.app.weave.world_at(empty);
+    assert!((r.pos[0] - w.x).abs() < 2.0 && (r.pos[1] - w.y).abs() < 2.0);
+}
+
+#[test]
+fn a_module_dropped_on_a_cable_goes_into_it_and_alt_pulls_it_out() {
+    let (mut h, ch) = weave();
+    h.menu(&["Add module"]);
+    h.click(las_dsp::modular::CATEGORIES[Kind::Shaper.category()]);
+    h.click("Wavefolder");
+    h.run(2);
+    let fold = h.app.weave.picked()[0];
+    let p0 = patch(&h, ch);
+    let ci = p0
+        .cables
+        .iter()
+        .position(|c| c.from == 4 && c.to == 5)
+        .unwrap();
+    let target = h.app.weave.cable_at(&p0, ci);
+    // drag by the title so that the pointer ends on the cable's middle
+    let grab = h.app.weave.title_at(&p0, fold);
+    h.press_at(grab);
+    h.move_to(target, 10);
+    assert!(h.app.weave.insert_target().is_some(), "the cable is lit");
+    h.release();
+    let p1 = patch(&h, ch);
+    assert!(p1.cables.iter().any(|c| c.from == 4 && c.to == fold));
+    assert!(p1.cables.iter().any(|c| c.from == fold && c.to == 5));
+    assert!(!p1.cables.iter().any(|c| c.from == 4 && c.to == 5));
+    // Alt and a drag pulls it out and joins the filter to the amp again
+    let grab = h.app.weave.title_at(&p1, fold);
+    h.set_modifiers(Modifiers::ALT);
+    h.press_at(grab);
+    h.move_to(grab + vec2(0.0, 200.0), 6);
+    h.release();
+    h.set_modifiers(Modifiers::NONE);
+    let p2 = patch(&h, ch);
+    assert!(p2.cables.iter().all(|c| c.from != fold && c.to != fold));
+    assert!(p2
+        .cables
+        .iter()
+        .any(|c| c.from == 4 && c.to == 5 && c.input == "in"));
+}
+
+#[test]
+fn the_math_module_shows_its_operation_in_its_title() {
+    let (mut h, ch) = weave();
+    h.menu(&["Add module"]);
+    h.type_text("math");
+    h.click("Math");
+    h.run(2);
+    let id = h.app.weave.picked()[0];
+    assert!(!h.find_prefix("Math: Add").is_empty());
+    let op = Kind::Math.spec().inputs.len() + Kind::Math.input_index("op").unwrap()
+        - Kind::Math.spec().inputs.len();
+    let at = h.app.weave.row_at(&patch(&h, ch), id, op);
+    h.click_at(at);
+    h.click_at(h.get("multiply").rect.center());
+    h.run(2);
+    assert_eq!(patch(&h, ch).node(id).unwrap().param("op"), 2.0);
+    assert!(!h.find_prefix("Math: Multiply").is_empty());
+}
+
+#[test]
+fn every_module_kind_is_added_turned_wired_and_removed_from_the_ui() {
+    let (mut h, ch) = weave();
+    h.app.weave.set_zoom(0.8);
+    h.app.weave.set_pan(vec2(10.0, 10.0));
+    h.run(2);
+    // only the envelope (3) and the output (6) are kept
+    let p0 = patch(&h, ch);
+    h.click_at(h.app.weave.title_at(&p0, 1));
+    for id in [2, 4, 5] {
+        h.click_with(
+            h.app.weave.title_at(&p0, id),
+            eframe::egui::PointerButton::Primary,
+            Modifiers::COMMAND,
+        );
+    }
+    h.key(eframe::egui::Key::Delete);
+    assert_eq!(patch(&h, ch).nodes.len(), 2);
+    for k in Kind::ALL {
+        let add = h.get("Add module").rect;
+        h.menu(&["Add module"]);
+        h.type_text(crate::weave_ui::kind_name(k));
+        // the entry in the menu, under its button (a channel may have the same name)
+        let entry = h
+            .find_all(crate::weave_ui::kind_name(k))
+            .into_iter()
+            .filter(|n| n.rect.top() >= add.bottom())
+            .filter(|n| n.role == eframe::egui::accesskit::Role::Button)
+            .min_by(|a, b| {
+                let d = |n: &super::Node| n.rect.left_top().distance(add.left_bottom());
+                d(a).total_cmp(&d(b))
+            })
+            .unwrap_or_else(|| panic!("{k:?} is not in the menu"));
+        assert!(
+            entry.rect.top() - add.bottom() < 60.0,
+            "{k:?}: found by the search"
+        );
+        h.click_at(entry.rect.center());
+        h.run(2);
+        let id = *h.app.weave.picked().last().expect("added and picked");
+        assert_eq!(patch(&h, ch).node(id).unwrap().kind, k);
+        // moved to the left of the canvas, clear of the others
+        let c = h.app.weave.canvas();
+        let grab = h.app.weave.title_at(&patch(&h, ch), id);
+        let spot = pos2(c.left() + 300.0, c.top() + 30.0);
+        h.drag(grab, spot);
+        let s = k.spec();
+        // number controls turn with a drag (the first two of each: every control's
+        // reach is checked by the engine's own audit)
+        let numbers = s
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, ps)| k.choices(ps.name).is_none())
+            .take(2);
+        for (pi, ps) in numbers {
+            let at = h.app.weave.row_at(&patch(&h, ch), id, s.inputs.len() + pi);
+            assert!(c.contains(at), "{k:?}.{} is on the canvas", ps.name);
+            let v0 = patch(&h, ch).node(id).unwrap().param(ps.name);
+            let dy = if ps.normalize(v0) > 0.5 { 60.0 } else { -60.0 };
+            h.drag(at, at + vec2(0.0, dy));
+            let v1 = patch(&h, ch).node(id).unwrap().param(ps.name);
+            assert_ne!(v0, v1, "{k:?}.{}", ps.name);
+        }
+        // the envelope into every plain input, and every output into the output
+        let before = patch(&h, ch).cables.len();
+        for i in 0..s.inputs.len() {
+            let p = patch(&h, ch);
+            h.drag(h.app.weave.out_at(&p, 3, 0), h.app.weave.in_at(&p, id, i));
+        }
+        for o in 0..s.outputs.len() {
+            let p = patch(&h, ch);
+            h.drag(h.app.weave.out_at(&p, id, o), h.app.weave.in_at(&p, 6, 1));
+        }
+        let p = patch(&h, ch);
+        let ins = p
+            .cables
+            .iter()
+            .filter(|c| c.to == id && c.from == 3)
+            .count();
+        let outs = p
+            .cables
+            .iter()
+            .filter(|c| c.from == id && c.to == 6)
+            .count();
+        assert_eq!((ins, outs), (s.inputs.len(), s.outputs.len()), "{k:?}");
+        // taken out again by their dots (a drag that ends on nothing)
+        for i in 0..s.inputs.len() {
+            let p = patch(&h, ch);
+            let dot = h.app.weave.in_at(&p, id, i);
+            h.drag(dot, pos2(c.left() + 15.0, dot.y));
+        }
+        let p = patch(&h, ch);
+        assert!(!p.cables.iter().any(|c| c.to == id), "{k:?}: unplugged");
+        // and the module goes with Delete, with its cables
+        h.click_at(h.app.weave.title_at(&p, id));
+        h.key(eframe::egui::Key::Delete);
+        let p = patch(&h, ch);
+        assert!(p.node(id).is_none(), "{k:?}");
+        assert_eq!(p.cables.len(), before, "{k:?}");
+    }
 }

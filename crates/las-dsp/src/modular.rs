@@ -553,7 +553,8 @@ impl Kind {
     /// moves it by its own amount, and they add up); a plain input says so in its spec.
     pub fn accepts_many(self, input: &str) -> bool {
         let s = self.spec();
-        s.params.iter().any(|p| p.name == input) || s.inputs.iter().any(|i| i.name == input && i.many)
+        s.params.iter().any(|p| p.name == input)
+            || s.inputs.iter().any(|i| i.name == input && i.many)
     }
 
     pub fn param(self, name: &str) -> Option<&'static ParamSpec> {
