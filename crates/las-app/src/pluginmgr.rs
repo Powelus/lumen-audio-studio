@@ -314,7 +314,7 @@ mod tests {
                 info("Bass", "Acme", Format::Clap, true),
             ],
             failed: vec![Failure {
-                path: "/p/Old32.dll".into(),
+                path: "/p/Old32.clap".into(),
                 reason: "32-bit, not supported".into(),
             }],
             ..Default::default()
