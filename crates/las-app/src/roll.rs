@@ -64,6 +64,10 @@ pub enum Edit {
     /// Snap every note's start and length to the grid.
     Quantize {
         snap: f64,
+        /// The notes to snap (all when empty).
+        ids: Vec<String>,
+        /// How far towards the grid starts move, 0 to 1 (lengths snap only at 1).
+        strength: f64,
     },
     /// One of the Tools menu's operations, on the given notes (all notes when empty).
     Tool {
@@ -654,6 +658,8 @@ pub struct RollState {
     centred: Option<(usize, usize)>,
     /// The event lane shown under the grid.
     pub lane: Lane,
+    /// How far Quantize moves starts towards the grid, 0 to 1.
+    pub q_strength: f64,
     /// Where a drag on a controller lane last was (tick and value).
     ctl_last: Option<(f64, f64)>,
     /// The note whose properties window is open.
@@ -730,6 +736,7 @@ impl Default for RollState {
             drag: None,
             centred: None,
             lane: Lane::Velocity,
+            q_strength: 1.0,
             ctl_last: None,
             props: None,
             props_gesture: false,
@@ -759,6 +766,7 @@ impl RollState {
             stamp: old.stamp,
             clipboard: old.clipboard,
             lane: old.lane,
+            q_strength: old.q_strength,
             ..Self::default()
         };
     }
@@ -883,11 +891,23 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
                 n.fine = (c.abs() > 1e-9).then_some(c);
             }
         }
-        Edit::Quantize { snap } => {
+        Edit::Quantize {
+            snap,
+            ids,
+            strength,
+        } => {
             let g = snap.max(1.0);
-            for n in notes.iter_mut() {
-                n.pos = (n.pos / g).round() * g;
-                n.len = ((n.len / g).round() * g).max(g);
+            let k = strength.clamp(0.0, 1.0);
+            for n in notes
+                .iter_mut()
+                .filter(|n| ids.is_empty() || ids.contains(&n.id))
+            {
+                let to = (n.pos / g).round() * g;
+                n.pos += (to - n.pos) * k;
+                if k >= 1.0 {
+                    n.pos = to;
+                    n.len = ((n.len / g).round() * g).max(g);
+                }
             }
         }
     }
@@ -918,6 +938,8 @@ pub struct Keys {
     pub cut: bool,
     pub paste: bool,
     pub duplicate: bool,
+    /// Ctrl+U: quantize the selection (or all).
+    pub quantize: bool,
     pub up: bool,
     pub down: bool,
     pub left: bool,
@@ -941,6 +963,7 @@ impl Keys {
             paste: ev(|e| matches!(e, egui::Event::Paste(_) | egui::Event::PasteImage(_)))
                 || c && k(egui::Key::V),
             duplicate: c && k(egui::Key::B),
+            quantize: c && k(egui::Key::U),
             up: k(egui::Key::ArrowUp),
             down: k(egui::Key::ArrowDown),
             left: k(egui::Key::ArrowLeft),
@@ -998,6 +1021,15 @@ pub fn keys_edit(
         state.selected = fresh.iter().map(|n| n.id.clone()).collect();
         edits.push(Edit::Begin);
         edits.push(Edit::Paste { notes: fresh });
+        return copied;
+    }
+    if keys.quantize && !notes.is_empty() {
+        edits.push(Edit::Begin);
+        edits.push(Edit::Quantize {
+            snap: state.snap,
+            ids: ids.clone(),
+            strength: state.q_strength,
+        });
         return copied;
     }
     if keys.duplicate && !notes.is_empty() {
@@ -2357,7 +2389,16 @@ mod tests {
         let mut n = new_note(60, 50.0, 30.0);
         n.step = None;
         apply(&mut p, 0, &ch, &Edit::Add(n));
-        apply(&mut p, 0, &ch, &Edit::Quantize { snap: 24.0 });
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Quantize {
+                snap: 24.0,
+                ids: Vec::new(),
+                strength: 1.0,
+            },
+        );
         let (pos, len, id) = {
             let n = &p.patterns[0].notes[&ch][0];
             (n.pos, n.len, n.id.clone())
@@ -2365,8 +2406,39 @@ mod tests {
         assert_eq!((pos, len), (48.0, 24.0));
         // a very short note never vanishes
         apply(&mut p, 0, &ch, &Edit::Resize { id, len: 1.0 });
-        apply(&mut p, 0, &ch, &Edit::Quantize { snap: 24.0 });
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Quantize {
+                snap: 24.0,
+                ids: Vec::new(),
+                strength: 1.0,
+            },
+        );
         assert_eq!(p.patterns[0].notes[&ch][0].len, 24.0);
+        // half strength moves a selected start half way, and leaves the others
+        let mut a = new_note(60, 60.0, 30.0);
+        a.step = None;
+        let a_id = a.id.clone();
+        let mut b = new_note(62, 60.0, 30.0);
+        b.step = None;
+        apply(&mut p, 0, &ch, &Edit::Add(a));
+        apply(&mut p, 0, &ch, &Edit::Add(b));
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Quantize {
+                snap: 24.0,
+                ids: vec![a_id.clone()],
+                strength: 0.5,
+            },
+        );
+        let ns = &p.patterns[0].notes[&ch];
+        let a = ns.iter().find(|n| n.id == a_id).unwrap();
+        assert_eq!((a.pos, a.len), (66.0, 30.0));
+        assert!(ns.iter().any(|n| n.key == 62 && n.pos == 60.0));
     }
 
     #[test]

@@ -801,7 +801,9 @@ impl Instrument {
             // keep up with the channel pitch, so the next note is not bent twice
             self.follow_tune(t0, n);
             let f0 = (t0 * self.sr).round() as usize;
-            if let (Some(f), Core::Sampler(s)) = (self.tune_points(f0, n).last(), &mut self.core) {
+            if let (Some(f), Core::Sampler(s)) =
+                (self.tune_points(f0, n).next_back(), &mut self.core)
+            {
                 s.retune(self.tune_line.get(f as f64 / self.sr, self.tune_base), f);
             }
             return;

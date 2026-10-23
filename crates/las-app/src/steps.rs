@@ -39,6 +39,11 @@ pub enum ChanEdit {
     Delete(usize),
     /// A copy of a channel (with its notes) right after it.
     Clone(usize),
+    /// Move a channel to another place in the rack.
+    Move {
+        channel: usize,
+        to: usize,
+    },
     /// Play the channel through another insert.
     Route {
         channel: usize,
@@ -92,6 +97,7 @@ pub fn apply(project: &mut Project, e: &ChanEdit) {
                 let id = project.channels.remove(*i).id;
                 for pat in &mut project.patterns {
                     pat.notes.remove(&id);
+                    pat.controllers.remove(&id);
                 }
             }
         }
@@ -111,8 +117,18 @@ pub fn apply(project: &mut Project, e: &ChanEdit) {
                             .collect();
                         pat.notes.insert(c.id.clone(), copy);
                     }
+                    if let Some(ctl) = pat.controllers.get(&src.id).cloned() {
+                        pat.controllers.insert(c.id.clone(), ctl);
+                    }
                 }
                 project.channels.insert(*i + 1, c);
+            }
+        }
+        ChanEdit::Move { channel, to } => {
+            let n = project.channels.len();
+            if *channel < n && *to < n && channel != to {
+                let c = project.channels.remove(*channel);
+                project.channels.insert(*to, c);
             }
         }
         ChanEdit::Route { channel, insert } => {
@@ -1183,6 +1199,33 @@ fn channel_menu(
         out.chans.push(ChanEdit::Clone(i));
         ui.close();
     }
+    let n = project.channels.len();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(i > 0, egui::Button::new("Move up"))
+            .on_hover_text("Ctrl+Up with the pointer over the rack")
+            .clicked()
+        {
+            out.chans.push(ChanEdit::Begin);
+            out.chans.push(ChanEdit::Move {
+                channel: i,
+                to: i - 1,
+            });
+            ui.close();
+        }
+        if ui
+            .add_enabled(i + 1 < n, egui::Button::new("Move down"))
+            .on_hover_text("Ctrl+Down with the pointer over the rack")
+            .clicked()
+        {
+            out.chans.push(ChanEdit::Begin);
+            out.chans.push(ChanEdit::Move {
+                channel: i,
+                to: i + 1,
+            });
+            ui.close();
+        }
+    });
     ui.menu_button("Colour", |ui| {
         for hex in las_project::create::PALETTE {
             let col = crate::rack::channel_colour_of(hex);
@@ -1659,6 +1702,25 @@ mod tests {
         // held to range
         crate::roll::apply(&mut p, 0, &ch, &GraphParam::Velocity.edit(&id, Some(4.0)));
         assert_eq!(note(&p).vel, 1.0);
+    }
+
+    #[test]
+    fn a_channel_moves_up_and_down_and_clones_keep_controllers() {
+        let mut p = project();
+        let ids: Vec<String> = p.channels.iter().map(|c| c.id.clone()).collect();
+        apply(&mut p, &ChanEdit::Move { channel: 0, to: 1 });
+        assert_eq!(p.channels[1].id, ids[0]);
+        assert_eq!(p.channels[0].id, ids[1]);
+        apply(&mut p, &ChanEdit::Move { channel: 1, to: 99 });
+        assert_eq!(p.channels[1].id, ids[0], "out of range: nothing");
+        let mut ctl = las_project::Controllers::default();
+        ctl.set(las_project::CtlKind::ModWheel, 0.0, 0.5);
+        p.patterns[0].controllers.insert(ids[0].clone(), ctl);
+        apply(&mut p, &ChanEdit::Clone(1));
+        let copy = p.channels[2].id.clone();
+        assert!(p.patterns[0].controllers.contains_key(&copy));
+        apply(&mut p, &ChanEdit::Delete(2));
+        assert!(!p.patterns[0].controllers.contains_key(&copy));
     }
 
     #[test]

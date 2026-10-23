@@ -1617,3 +1617,61 @@ fn unused_samples_are_cleaned_up_after_asking_and_left_out_when_saving() {
     assert!(!b.project.samples.iter().any(|s| s.id == "smp_unused"));
     assert_eq!(b.project.samples.len(), others);
 }
+
+#[test]
+fn piano_roll_ctrl_u_quantizes_the_selection_with_its_strength() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = roll_harness();
+    let g = roll_grid(&h);
+    h.click_at(g.left_top() + eframe::egui::vec2(40.0, 40.0));
+    h.click_at(g.left_top() + eframe::egui::vec2(200.0, 80.0));
+    // put both off the grid
+    let pat = h.app.project.pattern;
+    let ch = h.project().channels[h.app.project.channel].id.clone();
+    h.app.project.modify(true, |p| {
+        for (i, n) in p.patterns[pat]
+            .notes
+            .get_mut(&ch)
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            n.pos = 30.0 + 96.0 * i as f64;
+        }
+    });
+    h.app.project.roll.snap = 24.0;
+    h.app.project.roll.q_strength = 0.5;
+    let first = roll_notes(&h)[0].id.clone();
+    h.app.project.roll.selected = [first.clone()].into_iter().collect();
+    h.hover(g.center());
+    h.key_with(Key::U, Modifiers::COMMAND);
+    let n = roll_notes(&h);
+    let a = n.iter().find(|x| x.id == first).unwrap();
+    assert_eq!(a.pos, 27.0, "half way to 24");
+    assert!(
+        n.iter().any(|x| x.id != first && x.pos == 126.0),
+        "the other stays"
+    );
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert!(roll_notes(&h)
+        .iter()
+        .all(|x| x.pos == 30.0 || x.pos == 126.0));
+}
+
+#[test]
+fn ctrl_up_and_down_over_the_rack_move_the_selected_channel() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = Harness::demo();
+    h.app.project.channel = 1;
+    h.run(1);
+    let ids: Vec<String> = h.project().channels.iter().map(|c| c.id.clone()).collect();
+    h.hover(rows(&h)[1].rect.center());
+    h.key_with(Key::ArrowUp, Modifiers::COMMAND);
+    assert_eq!(h.project().channels[0].id, ids[1], "moved up");
+    assert_eq!(h.app.project.channel, 0, "and stays selected");
+    h.key_with(Key::ArrowDown, Modifiers::COMMAND);
+    h.key_with(Key::ArrowDown, Modifiers::COMMAND);
+    assert_eq!(h.project().channels[2].id, ids[1]);
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(h.project().channels[1].id, ids[1], "undo");
+}

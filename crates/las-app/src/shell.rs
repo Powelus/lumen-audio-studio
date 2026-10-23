@@ -1979,6 +1979,34 @@ impl App {
         self.shell.steps.footer = ui.cursor().top() - footer_top;
         drop(project);
         self.project.channel = selected;
+        // Ctrl+Up / Ctrl+Down over the rack move the selected channel
+        let (up, down) = ui.input(|i| {
+            let c = i.modifiers.command;
+            (
+                c && i.key_pressed(egui::Key::ArrowUp),
+                c && i.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+        if (up || down) && ui.ui_contains_pointer() {
+            let n = self
+                .project
+                .loaded
+                .as_ref()
+                .map_or(0, |l| l.project.channels.len());
+            let i = selected;
+            let to = if up {
+                i.checked_sub(1)
+            } else {
+                Some(i + 1).filter(|&t| t < n)
+            };
+            if let Some(to) = to {
+                self.project.edit_chans(&[
+                    steps::ChanEdit::Begin,
+                    steps::ChanEdit::Move { channel: i, to },
+                ]);
+                self.project.channel = to;
+            }
+        }
         if let Some(n) = out.steps {
             let pattern = self.project.pattern;
             self.project.modify(true, |p| {
@@ -2005,6 +2033,13 @@ impl App {
         }
         if !out.chans.is_empty() {
             self.project.edit_chans(&out.chans);
+            for e in &out.chans {
+                if let steps::ChanEdit::Move { channel, to } = e {
+                    if *channel == self.project.channel {
+                        self.project.channel = *to;
+                    }
+                }
+            }
         }
     }
 
