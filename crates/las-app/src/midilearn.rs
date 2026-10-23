@@ -139,6 +139,9 @@ pub fn set(p: &mut Project, target: &Value, v: f64, range_of: RangeOf) -> bool {
             let Some(c) = p.channels.iter_mut().find(|c| c.id == id) else {
                 return false;
             };
+            if c.plugin_id == las_engine::weave::WEAVE_ID {
+                return set_weave_param(&mut c.state, &param, v);
+            }
             if set_param(&mut c.state, &param) {
                 return true;
             }
@@ -152,10 +155,31 @@ pub fn set(p: &mut Project, target: &Value, v: f64, range_of: RangeOf) -> bool {
             else {
                 return false;
             };
-            return set_param(&mut slot.state, &param);
+            if param == "mix" {
+                slot.mix = v;
+                return true;
+            }
+            if set_param(&mut slot.state, &param) {
+                return true;
+            }
+            return set_effect_param(&slot.plugin_id.clone(), &mut slot.state, &param, v);
         }
         _ => return false,
     }
+    true
+}
+
+/// Set a knob of a built-in effect (a path into its state) to `v`, 0 to 1 over the
+/// range its automation has.
+fn set_effect_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) -> bool {
+    use las_engine::fxauto::{effect_param_def, map_automation};
+    let Some(def) = effect_param_def(plugin_id, path) else {
+        return false;
+    };
+    let Some(&(_, x)) = map_automation(Some(&def), &[(0.0, v)]).first() else {
+        return false;
+    };
+    set_path(state, path, x);
     true
 }
 
@@ -175,6 +199,12 @@ fn set_instrument_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) 
     let Some(&(_, x)) = map_automation(Some(&def), &[(0.0, v)]).first() else {
         return false;
     };
+    set_path(state, path, x);
+    true
+}
+
+/// Put `x` at a dotted `path` in `state`, making the objects on the way.
+fn set_path(state: &mut Value, path: &str, x: f64) {
     if !state.is_object() {
         *state = serde_json::json!({});
     }
@@ -190,7 +220,39 @@ fn set_instrument_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) 
             at = &mut at[*k];
         }
     }
+}
+
+/// Set parameter `p.<id>` of the Weave patch a channel's state holds to `v` (0 to 1
+/// over the parameter's range, as Weave's automation does).
+fn set_weave_param(state: &mut Value, path: &str, v: f64) -> bool {
+    let Some(id) = path.strip_prefix("p.").and_then(|x| x.parse::<u32>().ok()) else {
+        return false;
+    };
+    let mut patch = las_engine::weave::patch_of(state);
+    let (node, index) = las_dsp::modular::split_param_id(id);
+    let Some(n) = patch.nodes.iter_mut().find(|n| n.id == node) else {
+        return false;
+    };
+    let Some(ps) = n.kind.spec().params.get(index) else {
+        return false;
+    };
+    n.params.insert(ps.name.to_string(), ps.denormalize(v));
+    if !state.is_object() {
+        *state = serde_json::json!({});
+    }
+    state["patch"] = patch.to_json();
     true
+}
+
+/// The channel (by index) of a Weave parameter a link moves, if it is one.
+fn weave_channel(p: &Project, target: &Value) -> Option<usize> {
+    if target.get("kind").and_then(Value::as_str) != Some("plugin") {
+        return None;
+    }
+    let id = target.get("channelId").and_then(Value::as_str)?;
+    p.channels
+        .iter()
+        .position(|c| c.id == id && c.plugin_id == las_engine::weave::WEAVE_ID)
 }
 
 /// The range of a hosted plugin's parameter, from the plugin's own list.
@@ -227,11 +289,87 @@ impl crate::app::App {
         if linked.is_empty() {
             return;
         }
-        self.project.modify_coalesced("midi-controller", |p| {
+        // Weave takes new values while it plays, without a new player
+        let weave: Vec<usize> = linked
+            .iter()
+            .filter_map(|t| weave_channel(&l.project, t))
+            .collect();
+        let live = weave.len() == linked.len() && self.project.takes_live_edits();
+        let f = |p: &mut Project| {
             for t in &linked {
                 set(p, t, v, &hosted_range);
             }
-        });
+        };
+        if live {
+            self.project.modify_coalesced_live("midi-controller", f);
+            for ch in weave {
+                let patch = self
+                    .project
+                    .loaded
+                    .as_ref()
+                    .and_then(|l| l.project.channels.get(ch))
+                    .map(|c| las_engine::weave::patch_of(&c.state));
+                if let Some(patch) = patch {
+                    self.send_weave_live(ch, &patch);
+                }
+            }
+        } else {
+            self.project.modify_coalesced("midi-controller", f);
+        }
+    }
+
+    /// File > Clean up unused samples: count them and ask first (or say there are none).
+    pub(crate) fn ask_cleanup(&mut self) {
+        let n = self
+            .project
+            .loaded
+            .as_ref()
+            .map_or(0, |l| l.project.unused_samples().len());
+        if n == 0 {
+            self.shell.status = "No unused samples: every sample is in use.".into();
+        } else {
+            self.shell.cleanup = Some(n);
+        }
+    }
+
+    /// Remove the unused samples (one undo step).
+    pub(crate) fn clean_up_samples(&mut self) -> usize {
+        let mut n = 0;
+        self.project.modify(true, |p| n = p.drop_unused_samples());
+        self.shell.status = format!(
+            "Removed {n} unused sample{}. Ctrl+Z brings them back.",
+            if n == 1 { "" } else { "s" }
+        );
+        n
+    }
+
+    /// The question "Clean up unused samples" asks.
+    pub(crate) fn cleanup_dialog(&mut self, ctx: &eframe::egui::Context) {
+        let Some(n) = self.shell.cleanup else {
+            return;
+        };
+        let (mut yes, mut no) = (false, false);
+        eframe::egui::Window::new("Clean up unused samples")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(eframe::egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{n} sample{} no longer used by any channel, clip or slicer. Remove {}?",
+                    if n == 1 { " is" } else { "s are" },
+                    if n == 1 { "it" } else { "them" }
+                ));
+                ui.horizontal(|ui| {
+                    yes = ui.button("Remove").clicked();
+                    no = ui.button("Cancel").clicked();
+                });
+            });
+        if no || ctx.input(|i| i.key_pressed(eframe::egui::Key::Escape)) {
+            self.shell.cleanup = None;
+        } else if yes {
+            self.shell.cleanup = None;
+            self.clean_up_samples();
+        }
     }
 
     /// While a control waits for a knob: a note saying so, with Cancel.
@@ -280,6 +418,37 @@ mod tests {
 
     fn no_range(_: &Value, _: u32) -> Option<(f64, f64)> {
         None
+    }
+
+    #[test]
+    fn a_controller_moves_a_slot_mix_and_a_built_in_effect_knob() {
+        let mut p = las_project::create::default_project();
+        let d = las_dsp::fx::registry::descriptor("las-dist").unwrap();
+        p.mixer[1].slots[0] = Some(las_project::EffectSlot {
+            id: "fx_a".into(),
+            plugin_id: "las-dist".into(),
+            enabled: true,
+            mix: 1.0,
+            state: d.default_state.clone(),
+            ..Default::default()
+        });
+        let mix = crate::auto::effect_target(1, "fx_a", "mix");
+        assert!(set(&mut p, &mix, 0.25, &no_range));
+        let s = p.mixer[1].slots[0].as_ref().unwrap();
+        assert!((s.mix - 0.25).abs() < 1e-9);
+        let drive = crate::auto::effect_target(1, "fx_a", "drive");
+        assert!(
+            set(&mut p, &drive, 1.0, &no_range),
+            "a built-in knob is set"
+        );
+        let def = las_engine::fxauto::effect_param_def("las-dist", "drive").unwrap();
+        let v = p.mixer[1].slots[0].as_ref().unwrap().state["drive"]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (v - def.from_normalized(1.0)).abs() < 1e-6,
+            "the top of its range: {v}"
+        );
     }
 
     #[test]
@@ -354,6 +523,40 @@ mod tests {
             assert!(set(&mut p, &t, v, &no_range), "{m}");
             assert!((p.channels[i].state["macros"][m].as_f64().unwrap() - v).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn a_knob_moves_a_weave_parameter_over_its_range() {
+        use las_dsp::modular::{param_id, Kind, Patch};
+        let mut p = las_project::create::empty_project("x");
+        let i = las_project::create::add_channel(&mut p, "weave");
+        let ch = p.channels[i].id.clone();
+        let patch = Patch::default();
+        // the default patch's filter: node 4, parameter 1 (its cutoff, on a log scale)
+        let n = patch.node(4).unwrap();
+        assert_eq!(n.kind, Kind::Filter);
+        let ps = n.kind.spec().params[1];
+        let t = plugin_target(&ch, &format!("p.{}", param_id(4, 1)));
+        assert!(set(&mut p, &t, 0.0, &no_range));
+        let got = las_engine::weave::patch_of(&p.channels[i].state);
+        assert!((got.node(4).unwrap().params[ps.name] - ps.min).abs() < 1e-9);
+        assert!(set(&mut p, &t, 0.5, &no_range));
+        let got = las_engine::weave::patch_of(&p.channels[i].state);
+        assert!((got.node(4).unwrap().params[ps.name] - ps.denormalize(0.5)).abs() < 1e-6);
+        assert_eq!(weave_channel(&p, &t), Some(i));
+        // a module that is not there, or a parameter it does not have
+        assert!(!set(
+            &mut p,
+            &plugin_target(&ch, &format!("p.{}", param_id(99, 0))),
+            0.5,
+            &no_range
+        ));
+        assert!(!set(
+            &mut p,
+            &plugin_target(&ch, &format!("p.{}", param_id(4, 60))),
+            0.5,
+            &no_range
+        ));
     }
 
     #[test]

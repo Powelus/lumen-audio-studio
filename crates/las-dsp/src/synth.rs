@@ -673,6 +673,8 @@ pub struct SynthEngine {
     mw: f64,
     pb: f64,
     at: f64,
+    /// The channel pitch offset last heard (see [`Event::Tune`]).
+    tune: Option<f64>,
     bpm: f64,
     anchor_time: f64,
     anchor_beat: f64,
@@ -731,6 +733,7 @@ impl SynthEngine {
             mw: 0.0,
             pb: 0.0,
             at: 0.0,
+            tune: None,
             bpm: 120.0,
             anchor_time: 0.0,
             anchor_beat: 0.0,
@@ -1489,6 +1492,17 @@ impl SynthEngine {
                         Cc::At => self.at = value,
                         Cc::Pb => self.pb = value,
                     },
+                    Event::Tune { semis, .. } => {
+                        let delta = semis - self.tune.unwrap_or(semis);
+                        self.tune = Some(semis);
+                        if delta != 0.0 {
+                            for v in &mut self.voices {
+                                if v.active {
+                                    v.fine += delta * 100.0;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             self.apply_ramps(t0 + pos as f64 / sr);

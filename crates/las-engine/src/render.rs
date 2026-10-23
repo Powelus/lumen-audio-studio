@@ -10,7 +10,7 @@ use crate::mixer::Mixer;
 use crate::param::{Param, Timeline};
 use crate::timeline::*;
 use las_dsp::wavetable::TableLibrary;
-use las_project::{AutomationClip, AutomationTarget, ClipKind, Project, Sample};
+use las_project::{AutomationClip, AutomationTarget, ClipKind, CtlKind, Project, Sample};
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -144,6 +144,8 @@ pub(crate) struct Engine {
     automation_first: HashSet<String>,
     /// The peak of each insert's output (falling slowly), for the mixer's meters.
     peaks: Vec<f32>,
+    /// The same, left and right apart.
+    peaks_lr: Vec<[f32; 2]>,
     /// Scratch for rendering a block.
     bl: Vec<f32>,
     br: Vec<f32>,
@@ -162,6 +164,36 @@ fn automation_breakpoints(clip: &AutomationClip, from: f64, to: f64) -> Vec<(f64
     }
     if to > from {
         out.push((to, automation_value_at(clip, to)));
+    }
+    out
+}
+
+/// The points of a clip's curve that a channel pitch follows between clip ticks `from`
+/// and `to`: the curve's own points (and the next one after, so it ramps on), never
+/// points made up at the edges of the stretch, so that the line is the same however
+/// the song is cut into stretches (live or rendered). `end` is the clip's end.
+fn tune_breakpoints(
+    clip: &AutomationClip,
+    from: f64,
+    to: f64,
+    end: f64,
+    first: bool,
+) -> Vec<(f64, f64)> {
+    let at = |t: f64| automation_value_at(clip, t).clamp(0.0, 1.0);
+    let mut out = Vec::new();
+    if first {
+        out.push((from, at(from)));
+    }
+    let curve = crate::timeline::automation_curve(clip);
+    for (t, v) in &curve {
+        if *t > from && *t < to {
+            out.push((*t, v.clamp(0.0, 1.0)));
+        }
+    }
+    match curve.iter().find(|(t, _)| *t >= to) {
+        Some(&(t, v)) if t <= end => out.push((t, v.clamp(0.0, 1.0))),
+        _ if to < end => out.push((end, at(end))),
+        _ => {}
     }
     out
 }
@@ -357,10 +389,29 @@ impl Engine {
         let p = &*project;
         let time_of = |tick: f64| anchor.0 + (tick - anchor.1) * sec_per_tick;
         let mut notes = Vec::new();
+        let mut ctls = Vec::new();
         if self.song {
             notes = song_notes_in_range(p, a, b, &self.muted_tracks);
+            ctls = song_controllers_in_range(p, a, b, &self.muted_tracks, self.fresh);
         } else if let Some(pat) = self.pattern.and_then(|i| p.patterns.get(i)) {
             pattern_notes_in_range(pat, 0.0, 0.0, f64::INFINITY, a, b, p, &mut notes);
+            let chase = self.fresh;
+            pattern_controllers_in_range(pat, 0.0, 0.0, f64::INFINITY, a, b, chase, &mut ctls);
+        }
+        // controllers go first, so a note on the same tick starts with them
+        ctls.sort_by(|x, y| x.tick.total_cmp(&y.tick));
+        for c in ctls {
+            let Some(&ci) = self.index.get(c.channel) else {
+                continue;
+            };
+            let cc = match c.kind {
+                CtlKind::ModWheel => las_dsp::engine::Cc::Mw,
+                CtlKind::PitchBend => las_dsp::engine::Cc::Pb,
+                CtlKind::Aftertouch => las_dsp::engine::Cc::At,
+            };
+            self.channels[ci]
+                .inst
+                .controller(cc, c.value, time_of(c.tick));
         }
         if self.song {
             let fresh = self.fresh;
@@ -425,6 +476,27 @@ impl Engine {
                 let first = fresh || !self.automation_first.contains(&c.id) || s == c.start;
                 self.automation_first.insert(c.id.clone());
                 self.automate(&target, &pts, first);
+                if let AutomationTarget::Channel { channel_id, param } = &target {
+                    if param == "pitch" {
+                        let (lo, hi) = target_range(&target).unwrap_or((-12.0, 12.0));
+                        let pts: Vec<(f64, f64)> = tune_breakpoints(
+                            clip,
+                            s - c.start + c.offset,
+                            e - c.start + c.offset,
+                            c.length + c.offset,
+                            first,
+                        )
+                        .into_iter()
+                        .map(|(t, v)| (time_of(t + c.start - c.offset), lo + (hi - lo) * v))
+                        .collect();
+                        if let Some(&ci) = self.index.get(channel_id) {
+                            let ch = &mut self.channels[ci];
+                            if ch.inst.bends_live() {
+                                ch.inst.automate_tune(&pts, first);
+                            }
+                        }
+                    }
+                }
             }
         }
         for n in notes {
@@ -492,6 +564,26 @@ impl Engine {
         }
     }
 
+    pub(crate) fn channel_patch(
+        &mut self,
+        channel: usize,
+        patch: Box<crate::instrument::ChannelPatch>,
+    ) -> Box<crate::instrument::ChannelPatch> {
+        match self.channels.get_mut(channel) {
+            Some(ch) => ch.inst.channel_patch(patch),
+            None => patch,
+        }
+    }
+
+    /// Set one value of a channel's instrument now (see
+    /// [`crate::instrument::live_param`]), `normalised` as an automation clip has it.
+    pub(crate) fn plugin_param(&mut self, channel: usize, path: &str, normalised: f64, time: f64) {
+        let length = self.mixer.length();
+        if let Some(ch) = self.channels.get_mut(channel) {
+            ch.inst.set_live(path, normalised, time, length);
+        }
+    }
+
     pub(crate) fn note_off(&mut self, channel: usize, key: f64, time: f64) {
         if let Some(ch) = self.channels.get_mut(channel) {
             ch.inst.note_off(key, time);
@@ -519,6 +611,9 @@ impl Engine {
         self.fresh = true;
         self.time_anchor = None;
         self.automation_first.clear();
+        for ch in &mut self.channels {
+            ch.inst.set_tune_origin(at);
+        }
         let bpm0 = self.bpm();
         self.anchors.push(Anchor {
             time: at,
@@ -602,6 +697,7 @@ impl Engine {
         }
         for ch in &mut self.channels {
             ch.pitch_line.prune(time);
+            ch.inst.prune_tune(time);
             ch.volume.compact();
             ch.pan.compact();
         }
@@ -797,6 +893,7 @@ impl Engine {
                     }
                 };
             inst.set_smart_disable(smart_disable(&c.extra));
+            inst.set_tune_base(c.pitch);
             index.insert(c.id.clone(), channels.len());
             channels.push(ChannelRt {
                 inst,
@@ -830,6 +927,7 @@ impl Engine {
             automation_first: HashSet::new(),
             project,
             peaks: Vec::new(),
+            peaks_lr: Vec::new(),
             bl: vec![0.0; BLOCK],
             br: vec![0.0; BLOCK],
             vol: vec![0.0; BLOCK],
@@ -901,13 +999,15 @@ impl Engine {
         self.mixer.process(frame, out_l, out_r);
         let inserts = self.mixer.len();
         self.peaks.resize(inserts, 0.0);
+        self.peaks_lr.resize(inserts, [0.0; 2]);
         for i in 0..inserts {
             let (l, r) = self.mixer.insert_output(i);
-            let p = l[..n]
-                .iter()
-                .chain(&r[..n])
-                .fold(0f32, |m, s| m.max(s.abs()));
-            self.peaks[i] = p.max(self.peaks[i] * 0.93);
+            let peak = |b: &[f32]| b[..n].iter().fold(0f32, |m, s| m.max(s.abs()));
+            let (pl, pr) = (peak(l), peak(r));
+            let held = &mut self.peaks_lr[i];
+            held[0] = pl.max(held[0] * 0.93);
+            held[1] = pr.max(held[1] * 0.93);
+            self.peaks[i] = pl.max(pr).max(self.peaks[i] * 0.93);
         }
     }
 
@@ -940,6 +1040,22 @@ impl Engine {
     /// The peak level of each insert, master first.
     pub fn insert_peaks(&self) -> &[f32] {
         &self.peaks
+    }
+
+    /// The peak level of each insert, left and right, master first.
+    pub fn insert_peaks_lr(&self) -> &[[f32; 2]] {
+        &self.peaks_lr
+    }
+
+    /// See [`Mixer::set_live`].
+    pub fn set_live(
+        &mut self,
+        insert: usize,
+        control: &crate::mixer::LiveControl,
+        value: f64,
+        time: f64,
+    ) {
+        self.mixer.set_live(insert, control, value, time);
     }
 }
 

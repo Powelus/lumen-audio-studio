@@ -306,7 +306,7 @@ pub fn piano(ui: &mut Ui, first: u8, last: u8, held: &[u8]) -> Option<u8> {
     }
     let pointer = ui
         .input(|i| i.pointer.interact_pos())
-        .filter(|p| rect.contains(*p));
+        .filter(|p| rect.contains(*p) && on_top(ui, *p));
     let mut hit = None;
     if let Some(p) = pointer {
         hit = blacks.iter().find(|(_, r)| r.contains(p)).map(|(k, _)| *k);
@@ -390,10 +390,46 @@ fn fader_gain(pos: f64, max: f64) -> f64 {
     pos.clamp(0.0, 1.0).powi(2) * max
 }
 
+/// The mouse wheel over a control: the points it turned this frame (up is positive),
+/// taken so that the window around does not scroll too, and whether a new turn of the
+/// wheel began (for an undo step: a turn is one step).
+pub fn wheel(ui: &Ui, resp: &egui::Response) -> Option<(f32, bool)> {
+    if !resp.hovered() || resp.dragged() {
+        return None;
+    }
+    let dy = ui.input_mut(|i| {
+        let d = i.smooth_scroll_delta.y + i.smooth_scroll_delta.x;
+        if d != 0.0 {
+            i.smooth_scroll_delta = egui::Vec2::ZERO;
+        }
+        d
+    });
+    if dy == 0.0 {
+        return None;
+    }
+    let now = ui.input(|i| i.time);
+    let key = resp.id.with("wheel-at");
+    let last: Option<f64> = ui.data(|d| d.get_temp(key));
+    ui.data_mut(|d| d.insert_temp(key, now));
+    Some((dy, last.is_none_or(|t| now - t > 0.6)))
+}
+
+/// Whether a control was Ctrl+clicked (Cmd+click on a Mac): FL's reset.
+pub fn reset_click(ui: &Ui, resp: &egui::Response) -> bool {
+    resp.clicked() && ui.input(|i| i.modifiers.command)
+}
+
 /// A mixer fader in FL's style: a tall groove with a dB scale, a ridged cap and a
 /// segmented level meter beside it. Drag to move it, Shift for fine steps,
-/// double-click for unity. Returns the response; `changed` is set when it moved.
-pub fn fader(ui: &mut Ui, value: &mut f64, max: f64, peak: f32, height: f32) -> egui::Response {
+/// double-click or Ctrl+click for unity, the wheel
+/// for small steps. `peak` is the left and right level. Returns the response; `changed` is set when it moved.
+pub fn fader(
+    ui: &mut Ui,
+    value: &mut f64,
+    max: f64,
+    peak: [f32; 2],
+    height: f32,
+) -> egui::Response {
     let p = crate::theme::pal();
     let (r, mut resp) = ui.allocate_exact_size(vec2(44.0, height), Sense::click_and_drag());
     let groove = Rect::from_center_size(
@@ -401,8 +437,12 @@ pub fn fader(ui: &mut Ui, value: &mut f64, max: f64, peak: f32, height: f32) -> 
         vec2(6.0, height - 16.0),
     );
     let travel = (groove.top() + 6.0, groove.bottom() - 6.0);
-    if resp.double_clicked() {
+    if resp.double_clicked() || reset_click(ui, &resp) {
         *value = 1.0;
+        resp.mark_changed();
+    } else if let Some((dy, _)) = wheel(ui, &resp) {
+        let pos = fader_pos(*value, max) + f64::from(dy) / 900.0;
+        *value = fader_gain(pos.clamp(0.0, 1.0), max);
         resp.mark_changed();
     } else if resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
@@ -455,36 +495,43 @@ pub fn fader(ui: &mut Ui, value: &mut f64, max: f64, peak: f32, height: f32) -> 
         [pos2(cap.left() + 2.0, y), pos2(cap.right() - 2.0, y)],
         Stroke::new(2.0, crate::theme::accent()),
     );
-    // the meter: segments from green through yellow to red
+    // the meter, left and right: segments from green through yellow to red
     let m = Rect::from_min_max(
         pos2(r.right() - 12.0, groove.top()),
         pos2(r.right() - 4.0, groove.bottom()),
     );
     painter.rect_filled(m, 2.0, p.well_deep);
     let segs = 28;
-    let lit = (fader_pos(f64::from(peak), max) * segs as f64).round() as usize;
     let seg_h = m.height() / segs as f32;
-    for s in 0..segs.min(lit) {
-        let frac = s as f32 / segs as f32;
-        let col = if frac > 0.86 {
-            Color32::from_rgb(240, 70, 60)
-        } else if frac > 0.7 {
-            Color32::from_rgb(240, 200, 60)
-        } else {
-            Color32::from_rgb(80, 220, 110)
-        };
-        let yb = m.bottom() - s as f32 * seg_h;
-        painter.rect_filled(
-            Rect::from_min_max(
-                pos2(m.left() + 1.0, yb - seg_h + 1.0),
-                pos2(m.right() - 1.0, yb),
-            ),
-            0.0,
-            col,
-        );
+    let half = m.width() / 2.0;
+    for (side, level) in peak.iter().enumerate() {
+        let lit = (fader_pos(f64::from(*level), max) * segs as f64).round() as usize;
+        let x0 = m.left() + side as f32 * half;
+        for s in 0..segs.min(lit) {
+            let frac = s as f32 / segs as f32;
+            let col = if frac > 0.86 {
+                Color32::from_rgb(240, 70, 60)
+            } else if frac > 0.7 {
+                Color32::from_rgb(240, 200, 60)
+            } else {
+                Color32::from_rgb(80, 220, 110)
+            };
+            let yb = m.bottom() - s as f32 * seg_h;
+            painter.rect_filled(
+                Rect::from_min_max(pos2(x0 + 0.5, yb - seg_h + 1.0), pos2(x0 + half - 0.5, yb)),
+                0.0,
+                col,
+            );
+        }
     }
     resp.on_hover_text(format!(
-        "{:.1} dB\nDrag, Shift for fine, double-click for 0 dB",
+        "{:.1} dB\nDrag, Shift for fine, double-click for 0 dB, wheel for small steps",
         gain_db(*value)
     ))
+}
+
+/// Whether `p` is on this ui's own window, with no other window over it there: a
+/// window under another one takes no wheel, zoom or press meant for the one on top.
+pub fn on_top(ui: &egui::Ui, p: egui::Pos2) -> bool {
+    ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id())
 }

@@ -150,6 +150,17 @@ impl Player {
         self.engine.awake()
     }
 
+    /// The peak level of each mixer insert, left and right (master first).
+    pub fn insert_peaks_lr(&self) -> &[[f32; 2]] {
+        self.engine.insert_peaks_lr()
+    }
+
+    /// Move a mixer control live while it is dragged: it glides there, no zipper.
+    pub fn set_live(&mut self, insert: usize, control: &crate::mixer::LiveControl, value: f64) {
+        let t = self.frame as f64 / self.sr;
+        self.engine.set_live(insert, control, value, t);
+    }
+
     /// The peak level of each mixer insert (master first), falling slowly.
     pub fn insert_peaks(&self) -> &[f32] {
         self.engine.insert_peaks()
@@ -246,6 +257,24 @@ impl Player {
         patch: Box<las_dsp::modular::Patch>,
     ) -> Box<las_dsp::modular::Patch> {
         self.engine.weave_patch(channel, patch)
+    }
+
+    /// A synth channel's new patch (see [`crate::instrument::ChannelPatch`]), taken
+    /// while it plays. Safe on the audio thread; the patch that comes back is to be
+    /// freed elsewhere.
+    pub fn channel_patch(
+        &mut self,
+        channel: usize,
+        patch: Box<crate::instrument::ChannelPatch>,
+    ) -> Box<crate::instrument::ChannelPatch> {
+        self.engine.channel_patch(channel, patch)
+    }
+
+    /// One value of a channel's instrument, changed in its window while it plays
+    /// (`normalised` from 0 to 1 over the parameter's range).
+    pub fn plugin_param(&mut self, channel: usize, path: &str, normalised: f64) {
+        let t = self.now();
+        self.engine.plugin_param(channel, path, normalised, t);
     }
 
     /// A performance controller (mod wheel, pitch bend, aftertouch) moved on a channel.

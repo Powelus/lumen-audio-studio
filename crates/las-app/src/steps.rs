@@ -39,6 +39,11 @@ pub enum ChanEdit {
     Delete(usize),
     /// A copy of a channel (with its notes) right after it.
     Clone(usize),
+    /// Move a channel to another place in the rack.
+    Move {
+        channel: usize,
+        to: usize,
+    },
     /// Play the channel through another insert.
     Route {
         channel: usize,
@@ -92,6 +97,7 @@ pub fn apply(project: &mut Project, e: &ChanEdit) {
                 let id = project.channels.remove(*i).id;
                 for pat in &mut project.patterns {
                     pat.notes.remove(&id);
+                    pat.controllers.remove(&id);
                 }
             }
         }
@@ -111,8 +117,18 @@ pub fn apply(project: &mut Project, e: &ChanEdit) {
                             .collect();
                         pat.notes.insert(c.id.clone(), copy);
                     }
+                    if let Some(ctl) = pat.controllers.get(&src.id).cloned() {
+                        pat.controllers.insert(c.id.clone(), ctl);
+                    }
                 }
                 project.channels.insert(*i + 1, c);
+            }
+        }
+        ChanEdit::Move { channel, to } => {
+            let n = project.channels.len();
+            if *channel < n && *to < n && channel != to {
+                let c = project.channels.remove(*channel);
+                project.channels.insert(*to, c);
             }
         }
         ChanEdit::Route { channel, insert } => {
@@ -165,6 +181,9 @@ pub enum GroupFilter {
     /// Channels in no group.
     Unsorted,
     Named(String),
+    /// The channels that play through a mixer insert (the mixer's "Select all
+    /// channels routed here").
+    Insert(usize),
 }
 
 impl GroupFilter {
@@ -174,6 +193,7 @@ impl GroupFilter {
             GroupFilter::All => true,
             GroupFilter::Unsorted => g.is_none(),
             GroupFilter::Named(n) => g == Some(n.as_str()),
+            GroupFilter::Insert(i) => c.mixer_track == *i,
         }
     }
 
@@ -182,6 +202,8 @@ impl GroupFilter {
             GroupFilter::All => "All".into(),
             GroupFilter::Unsorted => "Unsorted".into(),
             GroupFilter::Named(n) => n.clone(),
+            GroupFilter::Insert(0) => "Routed to the master".into(),
+            GroupFilter::Insert(i) => format!("Routed to insert {i}"),
         }
     }
 }
@@ -206,22 +228,30 @@ pub enum GraphParam {
     Velocity,
     Pan,
     Fine,
+    /// Release velocity (how the note lets go, for instruments that use it).
+    Release,
 }
 
 impl GraphParam {
-    pub const ALL: [GraphParam; 3] = [GraphParam::Velocity, GraphParam::Pan, GraphParam::Fine];
+    pub const ALL: [GraphParam; 4] = [
+        GraphParam::Velocity,
+        GraphParam::Pan,
+        GraphParam::Fine,
+        GraphParam::Release,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             GraphParam::Velocity => "Velocity",
             GraphParam::Pan => "Pan",
             GraphParam::Fine => "Fine pitch",
+            GraphParam::Release => "Release",
         }
     }
 
     /// Whether the bars grow from the middle (pan, fine pitch) or the bottom.
     pub fn centred(self) -> bool {
-        self != GraphParam::Velocity
+        matches!(self, GraphParam::Pan | GraphParam::Fine)
     }
 
     /// A note's value as a height from 0 (bottom) to 1 (top).
@@ -230,6 +260,7 @@ impl GraphParam {
             GraphParam::Velocity => n.vel.clamp(0.0, 1.0),
             GraphParam::Pan => (n.pan.clamp(-1.0, 1.0) + 1.0) / 2.0,
             GraphParam::Fine => (n.fine.unwrap_or(0.0).clamp(-100.0, 100.0) + 100.0) / 200.0,
+            GraphParam::Release => n.release.unwrap_or(0.5).clamp(0.0, 1.0),
         }
     }
 
@@ -251,6 +282,11 @@ impl GraphParam {
                 id,
                 cents: h.map_or(0.0, |h| (h * 200.0 - 100.0).round()),
             },
+            GraphParam::Release => Edit::Lane {
+                id,
+                lane: crate::roll::Lane::Release,
+                value: h.unwrap_or(0.5),
+            },
         }
     }
 
@@ -269,6 +305,7 @@ impl GraphParam {
                 }
             }
             GraphParam::Fine => format!("{:+.0} cents", n.fine.unwrap_or(0.0)),
+            GraphParam::Release => format!("Release {:.0}%", n.release.unwrap_or(0.5) * 100.0),
         }
     }
 }
@@ -307,7 +344,7 @@ impl StepState {
 }
 
 /// The left of step `s`'s cell, from the left of the steps.
-fn cell_offset(s: usize) -> f32 {
+pub(crate) fn cell_offset(s: usize) -> f32 {
     s as f32 * (STEP + 3.0) + (s / 4) as f32 * 4.0
 }
 
@@ -533,10 +570,18 @@ pub fn knob_core(
         *v = (*v + d).clamp(range.0, range.1);
         changed = *v != before;
     }
-    let reset = resp.double_clicked();
+    let reset = resp.double_clicked() || crate::widgets::reset_click(ui, &resp);
     if reset {
         *v = default;
         changed = true;
+    }
+    // the wheel turns it too, a notch a few percent
+    let mut turned = false;
+    if let Some((dy, new_turn)) = crate::widgets::wheel(ui, &resp) {
+        let before = *v;
+        *v = (*v + f64::from(dy) / 1500.0 * (range.1 - range.0)).clamp(range.0, range.1);
+        changed |= *v != before;
+        turned = new_turn;
     }
     let p = pal();
     let painter = ui.painter_at(r);
@@ -548,7 +593,7 @@ pub fn knob_core(
     let ang = (-135.0 + 270.0 * t).to_radians();
     let tip_pt = pos2(c.x + ang.sin() * rad * 0.75, c.y - ang.cos() * rad * 0.75);
     painter.line_segment([c, tip_pt], Stroke::new(2.0, colour));
-    (changed, resp.drag_started() || reset, resp)
+    (changed, resp.drag_started() || reset || turned, resp)
 }
 
 /// What the rack asks for in one frame.
@@ -667,7 +712,7 @@ fn top_bar(
         let g = ui
             .selectable_label(state.graph, "Graph editor")
             .on_hover_text(
-                "The graph editor: bars under the selected channel's steps for each step's velocity, pan and fine pitch",
+                "The graph editor: bars under the selected channel's steps for each step's velocity, pan, fine pitch and release",
             );
         if g.clicked() {
             state.graph = !state.graph;
@@ -1168,6 +1213,33 @@ fn channel_menu(
         out.chans.push(ChanEdit::Clone(i));
         ui.close();
     }
+    let n = project.channels.len();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(i > 0, egui::Button::new("Move up"))
+            .on_hover_text("Ctrl+Up with the pointer over the rack")
+            .clicked()
+        {
+            out.chans.push(ChanEdit::Begin);
+            out.chans.push(ChanEdit::Move {
+                channel: i,
+                to: i - 1,
+            });
+            ui.close();
+        }
+        if ui
+            .add_enabled(i + 1 < n, egui::Button::new("Move down"))
+            .on_hover_text("Ctrl+Down with the pointer over the rack")
+            .clicked()
+        {
+            out.chans.push(ChanEdit::Begin);
+            out.chans.push(ChanEdit::Move {
+                channel: i,
+                to: i + 1,
+            });
+            ui.close();
+        }
+    });
     ui.menu_button("Colour", |ui| {
         for hex in las_project::create::PALETTE {
             let col = crate::rack::channel_colour_of(hex);
@@ -1623,11 +1695,15 @@ mod tests {
             (GraphParam::Velocity, 0.25),
             (GraphParam::Pan, 0.0),
             (GraphParam::Fine, 0.75),
+            (GraphParam::Release, 0.2),
         ] {
             crate::roll::apply(&mut p, 0, &ch, &gp.edit(&id, Some(h)));
         }
         let n = note(&p);
         assert_eq!((n.vel, n.pan, n.fine), (0.25, -1.0, Some(50.0)));
+        assert_eq!(n.release, Some(0.2));
+        assert_eq!(GraphParam::Release.describe(&n), "Release 20%");
+        assert!(!GraphParam::Release.centred());
         assert_eq!(GraphParam::Pan.describe(&n), "100% left");
         assert!((GraphParam::Fine.height(&n) - 0.75).abs() < 1e-9);
         // right click puts each back
@@ -1636,9 +1712,29 @@ mod tests {
         }
         let n = note(&p);
         assert_eq!((n.vel, n.pan, n.fine), (0.78, 0.0, None));
+        assert_eq!(GraphParam::Release.height(&n), 0.5);
         // held to range
         crate::roll::apply(&mut p, 0, &ch, &GraphParam::Velocity.edit(&id, Some(4.0)));
         assert_eq!(note(&p).vel, 1.0);
+    }
+
+    #[test]
+    fn a_channel_moves_up_and_down_and_clones_keep_controllers() {
+        let mut p = project();
+        let ids: Vec<String> = p.channels.iter().map(|c| c.id.clone()).collect();
+        apply(&mut p, &ChanEdit::Move { channel: 0, to: 1 });
+        assert_eq!(p.channels[1].id, ids[0]);
+        assert_eq!(p.channels[0].id, ids[1]);
+        apply(&mut p, &ChanEdit::Move { channel: 1, to: 99 });
+        assert_eq!(p.channels[1].id, ids[0], "out of range: nothing");
+        let mut ctl = las_project::Controllers::default();
+        ctl.set(las_project::CtlKind::ModWheel, 0.0, 0.5);
+        p.patterns[0].controllers.insert(ids[0].clone(), ctl);
+        apply(&mut p, &ChanEdit::Clone(1));
+        let copy = p.channels[2].id.clone();
+        assert!(p.patterns[0].controllers.contains_key(&copy));
+        apply(&mut p, &ChanEdit::Delete(2));
+        assert!(!p.patterns[0].controllers.contains_key(&copy));
     }
 
     #[test]

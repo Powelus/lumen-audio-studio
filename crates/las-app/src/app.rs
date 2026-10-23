@@ -118,6 +118,10 @@ pub struct App {
     pub(crate) bound: Option<crate::inst::Bound>,
     /// The synth panels changed something that belongs in the bound channel.
     pub(crate) synth_dirty: bool,
+    /// Channels handed a new patch live by the synth panel (kept for the tests).
+    pub(crate) live_patches: Vec<usize>,
+    /// Instrument values sent live from an instrument window (kept for the tests).
+    pub(crate) live_params: Vec<(usize, String)>,
     /// Set when the user asked to quit and it is allowed.
     pub(crate) quit: bool,
     /// The app's settings (Options > Settings).
@@ -221,6 +225,8 @@ impl App {
             shell: crate::shell::Shell::new(),
             bound: None,
             synth_dirty: false,
+            live_patches: Vec::new(),
+            live_params: Vec::new(),
             quit: false,
             settings,
             folders: Default::default(),
@@ -245,6 +251,7 @@ impl App {
             app.switch(Instrument::Facet);
         }
         app.new_project();
+        app.shell.leftovers = crate::settings::leftover_autosaves();
         // the windows of last time, unless the command line chooses
         let chooses = std::env::args().any(|a| a == "--open" || a == "--close" || a == "--add");
         if !chooses {
@@ -599,7 +606,13 @@ impl App {
     }
 
     pub(crate) fn set(&mut self, path: &str, v: Value) {
-        if let Some(t) = self.patches[index(self.inst)].pointer_mut(path) {
+        let k = index(self.inst);
+        // a preset stores only what differs from the defaults: a knob for a value it
+        // leaves out gets the defaults filled in first, or turning it would do nothing
+        if self.patches[k].pointer(path).is_none() {
+            self.patches[k] = las_dsp::patch::merge_patch(&self.defaults[k], &self.patches[k]);
+        }
+        if let Some(t) = self.patches[k].pointer_mut(path) {
             *t = v;
         }
     }
@@ -1774,14 +1787,16 @@ impl App {
         if space {
             self.toggle_play();
         }
-        if undo {
+        // in a text box (a name being typed) Ctrl+Z takes back the typing, not an
+        // edit of the project
+        let typing = ctx.egui_wants_keyboard_input();
+        if undo && !typing {
             self.project.undo();
         }
-        if redo {
+        if redo && !typing {
             self.project.redo();
         }
         // the function keys the menus name, as in FL Studio: each toggles its window
-        let typing = ctx.egui_wants_keyboard_input();
         let f = |k: egui::Key| {
             !typing && ctx.input(|i| !i.modifiers.command && !i.modifiers.alt && i.key_pressed(k))
         };
@@ -1965,12 +1980,23 @@ impl eframe::App for App {
         self.forget_old_windows();
         self.poll_midi();
         self.sync_bound();
+        // the window's own close button asks first, as File > Quit does
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit {
+            if self.project.dirty {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.guard(crate::menus::Action::Quit);
+            } else {
+                self.forget_autosave(&self.project.path.clone());
+            }
+        }
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         // something dragged from the browser and let go
+        // (an effect is taken by the mixer slot it is let go on, as the mixer draws)
         if ctx.input(|i| i.pointer.any_released())
-            && egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ctx)
+            && egui::DragAndDrop::payload::<crate::shell::Dragged>(ctx)
+                .is_some_and(|d| !matches!(*d, crate::shell::Dragged::Effect(_)))
         {
             if let Some(item) = egui::DragAndDrop::take_payload::<crate::shell::Dragged>(ctx) {
                 let over = crate::shell::Over::at(ctx, drop_at);
@@ -2069,6 +2095,7 @@ impl eframe::App for App {
             .inner;
         self.windows(&ctx, area);
         self.learn_banner(&ctx);
+        self.cleanup_dialog(&ctx);
     }
 }
 

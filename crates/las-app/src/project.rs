@@ -80,7 +80,7 @@ pub struct ProjectState {
     /// Where "Play song" starts, in ticks.
     pub start_tick: f64,
     /// Earlier and later states of the project, for undo and redo.
-    undo: Vec<Arc<Project>>,
+    pub(crate) undo: Vec<Arc<Project>>,
     redo: Vec<Arc<Project>>,
     /// Changed since it was opened or saved.
     pub dirty: bool,
@@ -91,7 +91,10 @@ pub struct ProjectState {
     /// The kind and time of the last coalesced edit.
     last_edit: Option<(String, std::time::Instant)>,
     /// The player no longer matches the project and is rebuilt when things are quiet.
-    stale: bool,
+    pub(crate) stale: bool,
+    /// A drag has begun: its first change starts an undo step (a click that changes
+    /// nothing leaves no empty step and the project unmodified).
+    pub(crate) armed: bool,
     /// Count in (beats, tempo) before the player that is being built starts.
     pub count_in: Option<(u32, f64)>,
     /// The audio thread's panics seen so far (see [`crate::audio::Meters::faults`]).
@@ -307,6 +310,12 @@ impl ProjectState {
         }
     }
 
+    /// How many steps undo can take back.
+    #[cfg(test)]
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
     /// Carry out the mixer edits of one frame.
     pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
         let mut pending: Vec<AutoRequest> = Vec::new();
@@ -415,6 +424,19 @@ impl ProjectState {
     /// Change the project, starting an undo step only when this is a different kind of
     /// change from the last one or more than a moment after it: a knob drag is one step.
     pub fn modify_coalesced(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
+        let fresh = self.coalesce(key);
+        self.modify(fresh, f);
+    }
+
+    /// [`Self::modify_coalesced`] for an edit the player has already been told about
+    /// (see [`Self::modify_live`]).
+    pub fn modify_coalesced_live(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
+        let fresh = self.coalesce(key);
+        self.modify_live(fresh, f);
+    }
+
+    /// Whether an edit of kind `key` starts a new undo step.
+    fn coalesce(&mut self, key: &str) -> bool {
         let now = std::time::Instant::now();
         let fresh = match &self.last_edit {
             Some((k, t)) => {
@@ -423,7 +445,7 @@ impl ProjectState {
             None => true,
         };
         self.last_edit = Some((key.to_string(), now));
-        self.modify(fresh, f);
+        fresh
     }
 
     /// The steps undo and redo can reach, each described by what it changed: the
@@ -499,7 +521,18 @@ impl ProjectState {
                 serde_json::json!({ "start": a, "end": b, "on": self.playlist.loop_on }),
             );
         }
-        let bytes = encode(&project, &l.samples, true).map_err(|e| e.to_string())?;
+        // samples nothing uses any more are left out of the file (the session keeps
+        // them, so undo still has them)
+        let gone = project.unused_samples();
+        project.drop_unused_samples();
+        let bytes = if gone.is_empty() {
+            encode(&project, &l.samples, true)
+        } else {
+            let mut kept = (*l.samples).clone();
+            kept.retain(|k, _| !gone.contains(k));
+            encode(&project, &kept, true)
+        }
+        .map_err(|e| e.to_string())?;
         let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, bytes).map_err(|e| format!("{tmp}: {e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))?;
@@ -579,6 +612,7 @@ impl App {
             Ok(()) => {
                 self.project.error = None;
                 let path = self.project.path.clone();
+                self.forget_autosave(&path);
                 self.settings.remember(&path);
                 self.settings.save();
             }
@@ -770,13 +804,27 @@ impl App {
                         ui.selectable_value(snap, v, snap_name(v));
                     }
                 });
-            if ui.button("Quantize").clicked() {
-                let snap = self.project.roll.snap;
-                let pattern = self.project.pattern;
+            if ui
+                .button("Quantize")
+                .on_hover_text("Snap the selected notes (or all) to the grid. Ctrl+U")
+                .clicked()
+            {
+                let roll = &self.project.roll;
+                let q = Edit::Quantize {
+                    snap: roll.snap,
+                    ids: roll.selected.iter().cloned().collect(),
+                    strength: roll.q_strength,
+                };
                 let ch = self.project.channel;
-                self.project
-                    .edit_channel(ch, &[Edit::Begin, Edit::Quantize { snap }]);
-                let _ = pattern;
+                self.project.edit_channel(ch, &[Edit::Begin, q]);
+            }
+            let mut pct = self.project.roll.q_strength * 100.0;
+            if ui
+                .add(egui::DragValue::new(&mut pct).range(10.0..=100.0).suffix("%").speed(1.0))
+                .on_hover_text("Quantize strength: how far notes move towards the grid")
+                .changed()
+            {
+                self.project.roll.q_strength = pct / 100.0;
             }
             ui.menu_button("Tools", |ui| {
                 let ids: Vec<String> = self.project.roll.selected.iter().cloned().collect();

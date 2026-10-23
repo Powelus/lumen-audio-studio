@@ -2,6 +2,23 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.62
+
+A fuller mixer, controller lanes in the piano roll and a round of fixes.
+
+- Mixer: every effect slot has a mix knob (automatable, with MIDI link). Fader, pan and mix glide smoothly while the song plays. Stereo meters show the peak in dB. Channels can be renamed and coloured.
+- Mixer: the Insert menu moves a channel left or right (its routing follows), duplicates, clears or resets it. Ctrl+click resets and the wheel turns faders and knobs; Alt+click solos.
+- Mixer: routing arrows show the send level, and you can select the channels routed to a channel. Effects have presets and can be dragged in from the browser. MIDI link works for the built-in effects. An idle mixer stops redrawing.
+- Piano roll and rack: mod wheel, pitch bend and aftertouch lanes. They are saved, played live and in export, and recorded from MIDI.
+- Piano roll and rack: Weave knobs link to MIDI controllers, the step graph editor has a Release lane, and pitch automation bends notes that are already held.
+- Piano roll and rack: Clean up unused samples (saving leaves them out), Ctrl+U quantizes with a strength, and Ctrl+Up/Down moves channels.
+- Fixed: windows under the top one no longer zoom or scroll.
+- Fixed: synth, Nebula, LumaPad, sampler, slicer and instrument effect knobs change a playing song while you drag them.
+- Fixed: the toolbar no longer runs under the master knob on small screens.
+- Fixed: clicking swing or tempo no longer leaves an empty undo step.
+- Fixed: unsaved work after a crash is offered back at start, and closing the window asks to save.
+- Fixed: Ctrl+Z while typing a name no longer undoes the project.
+
 ## 0.2.0-alpha.61
 
 Sound works again on Windows.

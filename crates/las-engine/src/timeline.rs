@@ -2,7 +2,9 @@
 //! Song time: ticks, tempo and where notes fall. Port of the web version's
 //! `core/timeline.ts` and the offline half of its scheduler.
 
-use las_project::{AutomationClip, Clip, ClipKind, Note, Pattern, Project, PPQ, TICKS_PER_STEP};
+use las_project::{
+    AutomationClip, Clip, ClipKind, CtlKind, Note, Pattern, Project, PPQ, TICKS_PER_STEP,
+};
 
 pub const PPQ_F: f64 = PPQ as f64;
 pub const STEP_F: f64 = TICKS_PER_STEP as f64;
@@ -153,6 +155,101 @@ pub fn song_notes_in_range<'a>(
             from,
             to,
             p,
+            &mut out,
+        );
+    }
+    out
+}
+
+/// A performance controller value to send.
+pub struct ScheduledCtl<'a> {
+    pub channel: &'a str,
+    pub kind: CtlKind,
+    pub value: f64,
+    pub tick: f64,
+}
+
+/// The controller points of a pattern in `[from, to)` (placed as in
+/// [`pattern_notes_in_range`]). With `chase`, a stretch that starts inside the pattern
+/// first sends the values in force there, so a song started in the middle sounds right.
+#[allow(clippy::too_many_arguments)]
+pub fn pattern_controllers_in_range<'a>(
+    pattern: &'a Pattern,
+    origin: f64,
+    src_start: f64,
+    src_end: f64,
+    from: f64,
+    to: f64,
+    chase: bool,
+    out: &mut Vec<ScheduledCtl<'a>>,
+) {
+    for (channel, ctl) in &pattern.controllers {
+        for kind in CtlKind::ALL {
+            let lane = ctl.lane(kind);
+            if lane.is_empty() {
+                continue;
+            }
+            // where the stretch starts, in pattern ticks
+            let at = (from - origin + src_start).max(src_start);
+            let starts_here = origin >= from && origin < to;
+            if (chase && at < src_end && from >= origin) || (starts_here && src_start > 0.0) {
+                out.push(ScheduledCtl {
+                    channel,
+                    kind,
+                    value: ctl.value_at(kind, at),
+                    tick: from.max(origin),
+                });
+            }
+            for p in lane {
+                if p.pos < src_start || p.pos >= src_end {
+                    continue;
+                }
+                let tick = origin + (p.pos - src_start);
+                if tick >= from && tick < to {
+                    out.push(ScheduledCtl {
+                        channel,
+                        kind,
+                        value: p.v,
+                        tick,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The controller points of the song's pattern clips in `[from, to)`.
+pub fn song_controllers_in_range<'a>(
+    p: &'a Project,
+    from: f64,
+    to: f64,
+    muted_tracks: &[bool],
+    chase: bool,
+) -> Vec<ScheduledCtl<'a>> {
+    let mut out = Vec::new();
+    for clip in &p.playlist.clips {
+        if clip.kind != ClipKind::Pattern
+            || clip.muted == Some(true)
+            || muted_tracks.get(clip.track).copied().unwrap_or(false)
+            || clip.start >= to
+            || clip.start + clip.length <= from
+        {
+            continue;
+        }
+        let Some(pat) = p.pattern(&clip.ref_id) else {
+            continue;
+        };
+        if pat.controllers.is_empty() {
+            continue;
+        }
+        pattern_controllers_in_range(
+            pat,
+            clip.start,
+            clip.offset,
+            clip.offset + clip.length,
+            from,
+            to,
+            chase,
             &mut out,
         );
     }

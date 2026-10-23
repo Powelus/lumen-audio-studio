@@ -664,7 +664,10 @@ fn a_saved_project_reopens_as_it_was_with_its_loop() {
     h.run(2);
     h.key_with(Key::S, Modifiers::COMMAND);
     assert!(!h.app.project.dirty, "Ctrl+S saved");
-    let saved = serde_json::to_value(h.project()).unwrap();
+    // what is saved: the project without the samples nothing uses
+    let mut sp = h.project().clone();
+    sp.drop_unused_samples();
+    let saved = serde_json::to_value(&sp).unwrap();
     h.menu(&["File", "New Ctrl+N"]);
     assert_eq!(h.app.project.playlist.song_loop, None);
     h.app.open_project(&path);
@@ -832,6 +835,11 @@ fn windows_shrink_to_fit_when_the_interface_is_made_bigger() {
     h.app.settings.ui_scale = 150;
     h.run(10);
     let screen = h.ctx.content_rect();
+    eprintln!(
+        "PLAY {:?} EXPORT {:?}",
+        h.get("Play (Space)").rect,
+        h.get("Export").rect
+    );
     for n in h
         .nodes
         .iter()
@@ -1090,7 +1098,7 @@ fn mixer_faders_and_knobs_keep_their_clicks_inside_a_strip() {
         h.project().mixer[ins].eq
     );
     // a click on the strip's background selects it, a right click there gives its menu
-    let pill = h.find_all("Click to select, right-click for render, sidechain and tuner");
+    let pill = h.find_all("Click to select, double-click to rename, right-click for colour, render, sidechain and tuner");
     let mut pill: Vec<_> = pill.into_iter().collect();
     pill.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
     h.click_at(pill[2].rect.center());
@@ -1307,7 +1315,7 @@ fn opens_a_dialog(label: &str) -> bool {
 
 /// Click every button of the window titled `title` once, checking the app never
 /// panics and the project stays valid.
-fn mash(h: &mut Harness, title: &str) -> usize {
+pub(super) fn mash(h: &mut Harness, title: &str) -> usize {
     let Some(win) = h
         .find_all(title)
         .into_iter()
@@ -1468,4 +1476,210 @@ fn a_rack_row_with_piano_roll_notes_previews_them_and_a_click_opens_the_roll() {
         .map(Vec::len)
         .sum::<usize>();
     assert_eq!(before, after, "the preview toggles no steps");
+}
+
+fn roll_ctl(h: &Harness) -> las_project::Controllers {
+    let p = h.project();
+    let id = &p.channels[h.app.project.channel].id;
+    p.patterns[h.app.project.pattern]
+        .controllers
+        .get(id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn piano_roll_mod_wheel_lane_draws_erases_and_undoes() {
+    use eframe::egui::{Key, Modifiers, PointerButton};
+    use las_project::CtlKind;
+    let mut h = roll_harness();
+    let g = roll_grid(&h);
+    h.click("Mod wheel");
+    assert_eq!(h.app.project.roll.lane, crate::roll::Lane::ModWheel);
+    h.run(2);
+    let tab = h.get("Mod wheel").rect;
+    // the lane sits right under its row of names, 84 points high
+    let top = tab.bottom() + 12.0;
+    let a = eframe::egui::pos2(g.left() + 20.0, top + 10.0);
+    let b = eframe::egui::pos2(g.left() + 260.0, top + 70.0);
+    h.drag(a, b);
+    let c = roll_ctl(&h);
+    let w = &c.mod_wheel;
+    assert!(w.len() >= 4, "a drag draws a line of points: {}", w.len());
+    assert!(w.first().unwrap().v > w.last().unwrap().v, "high to low");
+    assert!(w.windows(2).all(|p| p[0].pos < p[1].pos), "in time order");
+    assert!(c.pitch_bend.is_empty() && c.aftertouch.is_empty());
+    // the notes are left alone
+    assert!(roll_notes(&h).is_empty());
+    // a right drag over part of it erases that part
+    let n = w.len();
+    h.drag_with(
+        eframe::egui::pos2(g.left() + 20.0, top + 40.0),
+        eframe::egui::pos2(g.left() + 100.0, top + 40.0),
+        PointerButton::Secondary,
+        Modifiers::NONE,
+    );
+    let left = roll_ctl(&h).mod_wheel.len();
+    assert!(left < n && left > 0, "erased some: {n} -> {left}");
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(roll_ctl(&h).mod_wheel.len(), n, "undo brings them back");
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert!(roll_ctl(&h).mod_wheel.is_empty(), "and undoes the drawing");
+    // pitch bend draws around the middle
+    h.click("Pitch bend");
+    h.run(2);
+    h.drag(
+        eframe::egui::pos2(g.left() + 20.0, top + 2.0),
+        eframe::egui::pos2(g.left() + 60.0, top + 2.0),
+    );
+    let pb = roll_ctl(&h).pitch_bend;
+    assert!(!pb.is_empty() && pb.iter().all(|p| p.v > 0.8), "{pb:?}");
+    assert_eq!(
+        roll_ctl(&h).value_at(CtlKind::PitchBend, -1.0),
+        0.0,
+        "no bend before the first point"
+    );
+}
+
+#[test]
+fn the_step_graph_editor_sets_a_steps_release() {
+    let mut h = Harness::demo();
+    h.app.project.channel = 0;
+    h.run(2);
+    h.click("Graph editor");
+    h.click("Release");
+    h.run(2);
+    // the graph sits under the selected channel's steps
+    let graph = h
+        .find_prefix("Release: drag over")
+        .first()
+        .map(|n| n.rect)
+        .expect("the graph row");
+    let sel = (0..rows(&h).len())
+        .filter(|&i| rows(&h)[i].rect.top() < graph.top())
+        .last()
+        .unwrap();
+    let pat = h.app.project.pattern;
+    let ch = h.project().channels[sel].id.clone();
+    let step = |h: &Harness| {
+        h.project().patterns[pat].notes[&ch]
+            .iter()
+            .find(|n| n.step == Some(true))
+            .cloned()
+            .expect("a step that is on")
+    };
+    let n = step(&h);
+    let s = (n.pos / f64::from(las_project::TICKS_PER_STEP)).round() as usize;
+    let x = graph.left() + crate::steps::cell_offset(s) + 10.0;
+    // dragged low: a short release
+    h.drag(
+        eframe::egui::pos2(x, graph.top() + 10.0),
+        eframe::egui::pos2(x, graph.bottom() - 6.0),
+    );
+    let r = step(&h).release.expect("a release is set");
+    assert!(r < 0.2, "{r}");
+    // a right click puts it back to the middle
+    h.right_click_at(eframe::egui::pos2(x, graph.center().y));
+    assert_eq!(step(&h).release.unwrap_or(0.5), 0.5);
+    h.key_with(eframe::egui::Key::Z, eframe::egui::Modifiers::COMMAND);
+    assert!(step(&h).release.unwrap_or(0.5) < 0.2, "undo");
+}
+
+#[test]
+fn unused_samples_are_cleaned_up_after_asking_and_left_out_when_saving() {
+    let mut h = Harness::demo();
+    let add = |h: &mut Harness| {
+        h.app.project.modify(true, |p| {
+            p.samples.push(las_project::SampleRef {
+                id: "smp_unused".into(),
+                name: "Old take".into(),
+                ..Default::default()
+            })
+        });
+        h.run(1);
+    };
+    let has = |h: &Harness| h.project().samples.iter().any(|s| s.id == "smp_unused");
+    add(&mut h);
+    let others = h.project().samples.len() - h.project().unused_samples().len();
+    h.menu(&["File", "Clean up unused samples..."]);
+    h.run(2);
+    assert!(h.has("Clean up unused samples"), "asks first");
+    h.click("Cancel");
+    h.run(1);
+    assert!(has(&h), "Cancel keeps it");
+    h.menu(&["File", "Clean up unused samples..."]);
+    h.run(2);
+    h.click("Remove");
+    h.run(1);
+    assert!(!has(&h));
+    assert_eq!(h.project().samples.len(), others, "the used ones stay");
+    h.key_with(eframe::egui::Key::Z, eframe::egui::Modifiers::COMMAND);
+    assert!(has(&h), "undo brings it back");
+    // saving leaves it out of the file, but the session keeps it
+    let path = std::env::temp_dir().join(format!("las-cleanup-{}.las", std::process::id()));
+    let path = path.to_string_lossy().to_string();
+    h.app.project.save_to(&path).unwrap();
+    assert!(has(&h));
+    let b = las_project::decode(&std::fs::read(&path).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert!(!b.project.samples.iter().any(|s| s.id == "smp_unused"));
+    assert_eq!(b.project.samples.len(), others);
+}
+
+#[test]
+fn piano_roll_ctrl_u_quantizes_the_selection_with_its_strength() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = roll_harness();
+    let g = roll_grid(&h);
+    h.click_at(g.left_top() + eframe::egui::vec2(40.0, 40.0));
+    h.click_at(g.left_top() + eframe::egui::vec2(200.0, 80.0));
+    // put both off the grid
+    let pat = h.app.project.pattern;
+    let ch = h.project().channels[h.app.project.channel].id.clone();
+    h.app.project.modify(true, |p| {
+        for (i, n) in p.patterns[pat]
+            .notes
+            .get_mut(&ch)
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            n.pos = 30.0 + 96.0 * i as f64;
+        }
+    });
+    h.app.project.roll.snap = 24.0;
+    h.app.project.roll.q_strength = 0.5;
+    let first = roll_notes(&h)[0].id.clone();
+    h.app.project.roll.selected = [first.clone()].into_iter().collect();
+    h.hover(g.center());
+    h.key_with(Key::U, Modifiers::COMMAND);
+    let n = roll_notes(&h);
+    let a = n.iter().find(|x| x.id == first).unwrap();
+    assert_eq!(a.pos, 27.0, "half way to 24");
+    assert!(
+        n.iter().any(|x| x.id != first && x.pos == 126.0),
+        "the other stays"
+    );
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert!(roll_notes(&h)
+        .iter()
+        .all(|x| x.pos == 30.0 || x.pos == 126.0));
+}
+
+#[test]
+fn ctrl_up_and_down_over_the_rack_move_the_selected_channel() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = Harness::demo();
+    h.app.project.channel = 1;
+    h.run(1);
+    let ids: Vec<String> = h.project().channels.iter().map(|c| c.id.clone()).collect();
+    h.hover(rows(&h)[1].rect.center());
+    h.key_with(Key::ArrowUp, Modifiers::COMMAND);
+    assert_eq!(h.project().channels[0].id, ids[1], "moved up");
+    assert_eq!(h.app.project.channel, 0, "and stays selected");
+    h.key_with(Key::ArrowDown, Modifiers::COMMAND);
+    h.key_with(Key::ArrowDown, Modifiers::COMMAND);
+    assert_eq!(h.project().channels[2].id, ids[1]);
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(h.project().channels[1].id, ids[1], "undo");
 }

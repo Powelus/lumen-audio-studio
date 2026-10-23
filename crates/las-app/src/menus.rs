@@ -335,7 +335,11 @@ impl App {
                 }
             }
             Action::Demo => self.open_demo(),
-            Action::Quit => self.quit = true,
+            Action::Quit => {
+                // the changes were saved or let go: nothing to restore next time
+                self.forget_autosave(&self.project.path.clone());
+                self.quit = true;
+            }
         }
     }
 
@@ -387,8 +391,11 @@ impl App {
                 path.set_extension("las");
             }
             let path = path.to_string_lossy().into_owned();
+            let was = self.project.path.clone();
             match self.project.save_to(&path) {
                 Ok(()) => {
+                    self.forget_autosave(&was);
+                    self.forget_autosave(&path);
                     self.project.error = None;
                     self.settings.remember(&path);
                     self.settings.save();
@@ -621,6 +628,14 @@ impl App {
                 .clicked()
             {
                 self.import_dialog();
+                ui.close();
+            }
+            if ui
+                .add_enabled(loaded, egui::Button::new("Clean up unused samples..."))
+                .on_hover_text("Remove samples that no channel, clip or slicer uses any more")
+                .clicked()
+            {
+                self.ask_cleanup();
                 ui.close();
             }
             if ui

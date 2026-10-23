@@ -7,7 +7,7 @@ use crate::widgets::note_name;
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui};
 use las_engine::timeline::{pattern_length, ticks_per_bar};
 use las_project::create::uid;
-use las_project::{Note, Pattern, Project, PPQ, TICKS_PER_STEP};
+use las_project::{Controllers, CtlKind, Note, Pattern, Project, PPQ, TICKS_PER_STEP};
 use std::collections::HashSet;
 
 const KEYS: i32 = 128;
@@ -64,6 +64,10 @@ pub enum Edit {
     /// Snap every note's start and length to the grid.
     Quantize {
         snap: f64,
+        /// The notes to snap (all when empty).
+        ids: Vec<String>,
+        /// How far towards the grid starts move, 0 to 1 (lengths snap only at 1).
+        strength: f64,
     },
     /// One of the Tools menu's operations, on the given notes (all notes when empty).
     Tool {
@@ -75,6 +79,18 @@ pub enum Edit {
         id: String,
         lane: Lane,
         value: f64,
+    },
+    /// Put a controller value (mod wheel, pitch bend, aftertouch) at a tick.
+    CtlSet {
+        kind: CtlKind,
+        pos: f64,
+        value: f64,
+    },
+    /// Remove a controller's points in ticks `[a, b)`.
+    CtlClear {
+        kind: CtlKind,
+        a: f64,
+        b: f64,
     },
     /// Replace a note's properties (found by its id), from the note properties window.
     SetNote(Box<Note>),
@@ -352,10 +368,14 @@ pub enum Lane {
     Pan,
     Fine,
     Release,
+    /// The channel's controllers over time, kept apart from the notes.
+    ModWheel,
+    PitchBend,
+    Aftertouch,
 }
 
 /// The lanes, their names and tooltips.
-pub const LANES: [(Lane, &str, &str); 4] = [
+pub const LANES: [(Lane, &str, &str); 7] = [
     (Lane::Velocity, "Velocity", "How hard each note is played"),
     (
         Lane::Pan,
@@ -372,6 +392,21 @@ pub const LANES: [(Lane, &str, &str); 4] = [
         "Release",
         "Release velocity of each note (for instruments that use it)",
     ),
+    (
+        Lane::ModWheel,
+        "Mod wheel",
+        "Draw the mod wheel (MIDI CC 1) over time, for instruments that use it",
+    ),
+    (
+        Lane::PitchBend,
+        "Pitch bend",
+        "Draw pitch bends over time; the middle line is no bend",
+    ),
+    (
+        Lane::Aftertouch,
+        "Aftertouch",
+        "Draw key pressure over time, for instruments that use it",
+    ),
 ];
 
 /// The fine pitch a note can be tuned by, in cents either way.
@@ -382,9 +417,19 @@ impl Lane {
         LANES.iter().find(|l| l.0 == self).map_or("", |l| l.1)
     }
 
-    /// Whether the lane's bars grow from the middle (pan, fine pitch).
+    /// Whether the lane's bars grow from the middle (pan, fine pitch, pitch bend).
     pub fn centred(self) -> bool {
-        matches!(self, Lane::Pan | Lane::Fine)
+        matches!(self, Lane::Pan | Lane::Fine | Lane::PitchBend)
+    }
+
+    /// The controller a lane draws, for the controller lanes.
+    pub fn ctl(self) -> Option<CtlKind> {
+        match self {
+            Lane::ModWheel => Some(CtlKind::ModWheel),
+            Lane::PitchBend => Some(CtlKind::PitchBend),
+            Lane::Aftertouch => Some(CtlKind::Aftertouch),
+            _ => None,
+        }
     }
 
     /// A note's value on this lane, 0 to 1.
@@ -394,6 +439,7 @@ impl Lane {
             Lane::Pan => ((n.pan + 1.0) / 2.0).clamp(0.0, 1.0),
             Lane::Fine => ((n.fine.unwrap_or(0.0) / FINE_RANGE + 1.0) / 2.0).clamp(0.0, 1.0),
             Lane::Release => n.release.unwrap_or(0.5).clamp(0.0, 1.0),
+            Lane::ModWheel | Lane::PitchBend | Lane::Aftertouch => 0.0,
         }
     }
 
@@ -417,6 +463,7 @@ impl Lane {
                 n.fine = (c != 0.0).then_some(c);
             }
             Lane::Release => n.release = Some(v),
+            Lane::ModWheel | Lane::PitchBend | Lane::Aftertouch => {}
         }
     }
 
@@ -427,8 +474,42 @@ impl Lane {
             Lane::Pan => format!("Pan {}", pan_text(n.pan)),
             Lane::Fine => format!("Fine pitch {:+.0} cents", n.fine.unwrap_or(0.0)),
             Lane::Release => format!("Release {:.0}%", n.release.unwrap_or(0.5) * 100.0),
+            Lane::ModWheel | Lane::PitchBend | Lane::Aftertouch => String::new(),
         }
     }
+}
+
+/// A controller value in words: "Mod wheel 64%", "Pitch bend +50%".
+pub fn ctl_text(kind: CtlKind, v: f64) -> String {
+    match kind {
+        CtlKind::ModWheel => format!("Mod wheel {:.0}%", v * 100.0),
+        CtlKind::PitchBend if v.abs() < 0.005 => "Pitch bend: none".into(),
+        CtlKind::PitchBend => format!("Pitch bend {:+.0}%", v * 100.0),
+        CtlKind::Aftertouch => format!("Aftertouch {:.0}%", v * 100.0),
+    }
+}
+
+/// The controller values a drag from `(t0, v0)` to `(t1, v1)` lays down: one on each
+/// grid step it passes (the value along the line between), at least at `t1`.
+pub fn ctl_line(t0: f64, v0: f64, t1: f64, v1: f64, snap: f64) -> Vec<(f64, f64)> {
+    let g = snap.max(1.0);
+    let s = |t: f64| (t / g).floor() * g;
+    let (a, b) = (s(t0.min(t1)).max(0.0), s(t0.max(t1)).max(0.0));
+    let mut out = Vec::new();
+    let mut t = a;
+    while t <= b + 1e-9 {
+        let k = if (t1 - t0).abs() < 1e-9 {
+            1.0
+        } else {
+            ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
+        };
+        out.push((t, v0 + (v1 - v0) * k));
+        t += g;
+        if out.len() > 4096 {
+            break;
+        }
+    }
+    out
 }
 
 /// A pan in words: "Centre", "40% L", "100% R".
@@ -577,6 +658,10 @@ pub struct RollState {
     centred: Option<(usize, usize)>,
     /// The event lane shown under the grid.
     pub lane: Lane,
+    /// How far Quantize moves starts towards the grid, 0 to 1.
+    pub q_strength: f64,
+    /// Where a drag on a controller lane last was (tick and value).
+    ctl_last: Option<(f64, f64)>,
     /// The note whose properties window is open.
     pub props: Option<String>,
     /// Whether the properties window's change in progress has been made undoable.
@@ -651,6 +736,8 @@ impl Default for RollState {
             drag: None,
             centred: None,
             lane: Lane::Velocity,
+            q_strength: 1.0,
+            ctl_last: None,
             props: None,
             props_gesture: false,
             key_down: None,
@@ -679,6 +766,7 @@ impl RollState {
             stamp: old.stamp,
             clipboard: old.clipboard,
             lane: old.lane,
+            q_strength: old.q_strength,
             ..Self::default()
         };
     }
@@ -712,9 +800,28 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
     let Some(p) = project.patterns.get_mut(pattern) else {
         return;
     };
+    match edit {
+        Edit::CtlSet { kind, pos, value } => {
+            p.controllers
+                .entry(channel.to_string())
+                .or_default()
+                .set(*kind, *pos, *value);
+            return;
+        }
+        Edit::CtlClear { kind, a, b } => {
+            if let Some(c) = p.controllers.get_mut(channel) {
+                c.clear_range(*kind, *a, *b);
+                if c.is_empty() {
+                    p.controllers.remove(channel);
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
     let notes = p.notes.entry(channel.to_string()).or_default();
     match edit {
-        Edit::Begin | Edit::Audition { .. } => {}
+        Edit::Begin | Edit::Audition { .. } | Edit::CtlSet { .. } | Edit::CtlClear { .. } => {}
         Edit::Add(n) => notes.push(n.clone()),
         Edit::Move { id, pos, key } => {
             if let Some(n) = notes.iter_mut().find(|n| &n.id == id) {
@@ -784,11 +891,23 @@ pub fn apply(project: &mut Project, pattern: usize, channel: &str, edit: &Edit) 
                 n.fine = (c.abs() > 1e-9).then_some(c);
             }
         }
-        Edit::Quantize { snap } => {
+        Edit::Quantize {
+            snap,
+            ids,
+            strength,
+        } => {
             let g = snap.max(1.0);
-            for n in notes.iter_mut() {
-                n.pos = (n.pos / g).round() * g;
-                n.len = ((n.len / g).round() * g).max(g);
+            let k = strength.clamp(0.0, 1.0);
+            for n in notes
+                .iter_mut()
+                .filter(|n| ids.is_empty() || ids.contains(&n.id))
+            {
+                let to = (n.pos / g).round() * g;
+                n.pos += (to - n.pos) * k;
+                if k >= 1.0 {
+                    n.pos = to;
+                    n.len = ((n.len / g).round() * g).max(g);
+                }
             }
         }
     }
@@ -819,6 +938,8 @@ pub struct Keys {
     pub cut: bool,
     pub paste: bool,
     pub duplicate: bool,
+    /// Ctrl+U: quantize the selection (or all).
+    pub quantize: bool,
     pub up: bool,
     pub down: bool,
     pub left: bool,
@@ -842,6 +963,7 @@ impl Keys {
             paste: ev(|e| matches!(e, egui::Event::Paste(_) | egui::Event::PasteImage(_)))
                 || c && k(egui::Key::V),
             duplicate: c && k(egui::Key::B),
+            quantize: c && k(egui::Key::U),
             up: k(egui::Key::ArrowUp),
             down: k(egui::Key::ArrowDown),
             left: k(egui::Key::ArrowLeft),
@@ -901,6 +1023,15 @@ pub fn keys_edit(
         edits.push(Edit::Paste { notes: fresh });
         return copied;
     }
+    if keys.quantize && !notes.is_empty() {
+        edits.push(Edit::Begin);
+        edits.push(Edit::Quantize {
+            snap: state.snap,
+            ids: ids.clone(),
+            strength: state.q_strength,
+        });
+        return copied;
+    }
     if keys.duplicate && !notes.is_empty() {
         let fresh = duplicate(notes, &state.selected, state.snap);
         state.selected = fresh.iter().map(|n| n.id.clone()).collect();
@@ -948,7 +1079,7 @@ const LANE: f32 = 84.0;
 fn wheel_zoom(ui: &mut Ui, region: Rect, state: &mut RollState) {
     let Some(p) = ui
         .input(|i| i.pointer.hover_pos())
-        .filter(|p| region.contains(*p))
+        .filter(|p| region.contains(*p) && crate::widgets::on_top(ui, *p))
     else {
         return;
     };
@@ -1628,14 +1759,21 @@ pub fn draw(
     state.scroll_x = out.state.clamped_offset().x;
     state.scroll_y = out.state.clamped_offset().y;
     keyboard(ui, out.inner_rect, notes, state, playhead, &mut edits);
-    lanes(ui, notes, state, &mut edits);
+    let ctl = pat.and_then(|p| p.controllers.get(&ch.id));
+    lanes(ui, notes, ctl, state, &mut edits);
     properties(ui, notes, state, &mut edits);
     edits
 }
 
 /// The event lane under the grid: a row of lane names to pick from, and a bar for each
 /// note that a drag sets (only the selected notes' bars when some are selected).
-fn lanes(ui: &mut Ui, notes: &[Note], state: &mut RollState, edits: &mut Vec<Edit>) {
+fn lanes(
+    ui: &mut Ui,
+    notes: &[Note],
+    ctl: Option<&Controllers>,
+    state: &mut RollState,
+    edits: &mut Vec<Edit>,
+) {
     let pl = crate::theme::pal();
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Event lane").weak().size(11.0));
@@ -1644,12 +1782,19 @@ fn lanes(ui: &mut Ui, notes: &[Note], state: &mut RollState, edits: &mut Vec<Edi
                 .on_hover_text(tip);
         }
         // cut short where the window ends, so it never widens the window
-        const HELP: &str =
-            "Drag over the bars to set them. Double click a note for all its properties.";
-        ui.add(egui::Label::new(egui::RichText::new(HELP).weak().size(11.0)).truncate())
-            .on_hover_text(HELP);
+        let help = if state.lane.ctl().is_some() {
+            "Drag to draw. Right drag to erase."
+        } else {
+            "Drag over the bars to set them. Double click a note for all its properties."
+        };
+        ui.add(egui::Label::new(egui::RichText::new(help).weak().size(11.0)).truncate())
+            .on_hover_text(help);
     });
     let lane = state.lane;
+    if let Some(kind) = lane.ctl() {
+        ctl_lane(ui, kind, ctl, state, edits);
+        return;
+    }
     let (rect, lresp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), LANE),
         Sense::click_and_drag(),
@@ -1735,6 +1880,129 @@ fn lanes(ui: &mut Ui, notes: &[Note], state: &mut RollState, edits: &mut Vec<Edi
                 });
             }
         }
+    }
+}
+
+/// A controller lane: the values as a line that holds from point to point, drawn
+/// with the mouse (snapped to the grid) and erased with a right drag.
+fn ctl_lane(
+    ui: &mut Ui,
+    kind: CtlKind,
+    ctl: Option<&Controllers>,
+    state: &mut RollState,
+    edits: &mut Vec<Edit>,
+) {
+    let pl = crate::theme::pal();
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), LANE),
+        Sense::click_and_drag(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, pl.well_deep);
+    painter.text(
+        rect.left_top() + egui::vec2(6.0, 4.0),
+        egui::Align2::LEFT_TOP,
+        kind_name(kind).to_uppercase(),
+        egui::FontId::proportional(9.5),
+        pl.muted,
+    );
+    let (top, bottom) = (rect.top() + 6.0, rect.bottom() - 4.0);
+    let h = bottom - top;
+    // the lane's scale, 0 to 1 on screen (pitch bend's middle is no bend)
+    let to01 = |v: f64| if kind.bipolar() { (v + 1.0) / 2.0 } else { v };
+    let from01 = |u: f64| if kind.bipolar() { u * 2.0 - 1.0 } else { u };
+    let y_of = |v: f64| bottom - h * to01(v).clamp(0.0, 1.0) as f32;
+    let left = rect.left() + GUTTER;
+    if kind.bipolar() {
+        painter.line_segment(
+            [
+                egui::pos2(left, y_of(0.0)),
+                egui::pos2(rect.right(), y_of(0.0)),
+            ],
+            Stroke::new(1.0, pl.grid_bar),
+        );
+    }
+    let (zoom, scroll) = (state.zoom, state.scroll_x);
+    let lx = |t: f64| left + t as f32 * zoom - scroll;
+    let at = |p: egui::Pos2| f64::from((p.x - left + scroll) / zoom).max(0.0);
+    let empty = Vec::new();
+    let pts = ctl.map_or(&empty, |c| c.lane(kind));
+    // the held line, filled under it
+    let mut prev = (left, y_of(kind.rest()));
+    let fill = pl.accent.gamma_multiply(0.25);
+    let base = y_of(if kind.bipolar() { 0.0 } else { kind.rest() });
+    let seg = |x0: f32, x1: f32, y: f32| {
+        let (x0, x1) = (x0.max(left), x1.min(rect.right()));
+        if x1 > x0 {
+            painter.rect_filled(
+                Rect::from_min_max(egui::pos2(x0, y.min(base)), egui::pos2(x1, y.max(base))),
+                0.0,
+                fill,
+            );
+            painter.line_segment(
+                [egui::pos2(x0, y), egui::pos2(x1, y)],
+                Stroke::new(1.5, pl.accent),
+            );
+        }
+    };
+    for p in pts {
+        let x = lx(p.pos);
+        seg(prev.0, x, prev.1);
+        prev = (x, y_of(p.v));
+    }
+    seg(prev.0, rect.right(), prev.1);
+    for p in pts {
+        let x = lx(p.pos);
+        if x >= left - 2.0 && x <= rect.right() {
+            painter.circle_filled(egui::pos2(x, y_of(p.v)), 2.5, pl.accent);
+        }
+    }
+    let value_at = |p: egui::Pos2| from01(f64::from(((bottom - p.y) / h).clamp(0.0, 1.0)));
+    if let Some(p) = resp.hover_pos() {
+        let v = ctl.map_or(kind.rest(), |c| c.value_at(kind, at(p)));
+        resp.clone().on_hover_text_at_pointer(ctl_text(kind, v));
+    }
+    let snap = state.snap;
+    let started = resp.drag_started() || resp.clicked() || resp.secondary_clicked();
+    if started {
+        edits.push(Edit::Begin);
+        state.ctl_last = None;
+    }
+    let primary = resp.dragged_by(egui::PointerButton::Primary)
+        || resp.clicked_by(egui::PointerButton::Primary);
+    let secondary = resp.dragged_by(egui::PointerButton::Secondary)
+        || resp.clicked_by(egui::PointerButton::Secondary);
+    if let Some(p) = resp.interact_pointer_pos().filter(|_| primary || secondary) {
+        let t = at(p);
+        if primary {
+            let mut v = value_at(p);
+            if kind.bipolar() && v.abs() < 0.04 {
+                v = 0.0;
+            }
+            let (t0, v0) = state.ctl_last.unwrap_or((t, v));
+            for (pos, value) in ctl_line(t0, v0, t, v, snap) {
+                edits.push(Edit::CtlSet { kind, pos, value });
+            }
+            state.ctl_last = Some((t, v));
+        } else {
+            let g = snap.max(1.0);
+            let (t0, _) = state.ctl_last.unwrap_or((t, 0.0));
+            let a = ((t0.min(t)) / g).floor() * g;
+            let b = ((t0.max(t)) / g).floor() * g + g;
+            edits.push(Edit::CtlClear { kind, a, b });
+            state.ctl_last = Some((t, 0.0));
+        }
+    }
+    if resp.drag_stopped() {
+        state.ctl_last = None;
+    }
+}
+
+fn kind_name(kind: CtlKind) -> &'static str {
+    match kind {
+        CtlKind::ModWheel => "Mod wheel",
+        CtlKind::PitchBend => "Pitch bend",
+        CtlKind::Aftertouch => "Aftertouch",
     }
 }
 
@@ -2121,7 +2389,16 @@ mod tests {
         let mut n = new_note(60, 50.0, 30.0);
         n.step = None;
         apply(&mut p, 0, &ch, &Edit::Add(n));
-        apply(&mut p, 0, &ch, &Edit::Quantize { snap: 24.0 });
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Quantize {
+                snap: 24.0,
+                ids: Vec::new(),
+                strength: 1.0,
+            },
+        );
         let (pos, len, id) = {
             let n = &p.patterns[0].notes[&ch][0];
             (n.pos, n.len, n.id.clone())
@@ -2129,8 +2406,39 @@ mod tests {
         assert_eq!((pos, len), (48.0, 24.0));
         // a very short note never vanishes
         apply(&mut p, 0, &ch, &Edit::Resize { id, len: 1.0 });
-        apply(&mut p, 0, &ch, &Edit::Quantize { snap: 24.0 });
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Quantize {
+                snap: 24.0,
+                ids: Vec::new(),
+                strength: 1.0,
+            },
+        );
         assert_eq!(p.patterns[0].notes[&ch][0].len, 24.0);
+        // half strength moves a selected start half way, and leaves the others
+        let mut a = new_note(60, 60.0, 30.0);
+        a.step = None;
+        let a_id = a.id.clone();
+        let mut b = new_note(62, 60.0, 30.0);
+        b.step = None;
+        apply(&mut p, 0, &ch, &Edit::Add(a));
+        apply(&mut p, 0, &ch, &Edit::Add(b));
+        apply(
+            &mut p,
+            0,
+            &ch,
+            &Edit::Quantize {
+                snap: 24.0,
+                ids: vec![a_id.clone()],
+                strength: 0.5,
+            },
+        );
+        let ns = &p.patterns[0].notes[&ch];
+        let a = ns.iter().find(|n| n.id == a_id).unwrap();
+        assert_eq!((a.pos, a.len), (66.0, 30.0));
+        assert!(ns.iter().any(|n| n.key == 62 && n.pos == 60.0));
     }
 
     #[test]

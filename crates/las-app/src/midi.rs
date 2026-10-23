@@ -24,6 +24,12 @@ pub enum MidiEvent {
         cc: u8,
         value: u8,
     },
+    /// Pitch bend (-1 to 1) or channel pressure (0 to 1), for recording into the
+    /// piano roll's controller lanes (the mod wheel comes as [`MidiEvent::Control`] 1).
+    Perf {
+        kind: las_project::CtlKind,
+        value: f64,
+    },
 }
 
 /// No channel: keys play the synth.
@@ -249,6 +255,17 @@ pub fn event(msg: &[u8]) -> Option<MidiEvent> {
             cc: a,
             value: b.min(127),
         }),
+        0xD0 => Some(MidiEvent::Perf {
+            kind: las_project::CtlKind::Aftertouch,
+            value: f64::from(a.min(127)) / 127.0,
+        }),
+        0xE0 => {
+            let v = f64::from((u16::from(b & 0x7F) << 7) | u16::from(a & 0x7F));
+            Some(MidiEvent::Perf {
+                kind: las_project::CtlKind::PitchBend,
+                value: ((v - 8192.0) / 8192.0).clamp(-1.0, 1.0),
+            })
+        }
         _ => None,
     }
 }
@@ -311,6 +328,32 @@ mod tests {
             Some(Command::Controller { cc: Cc::Pb, value }) => assert!(value.abs() < 1e-9),
             _ => panic!("expected a pitch bend"),
         }
+    }
+
+    #[test]
+    fn bend_and_pressure_reach_the_interface_for_recording() {
+        use las_project::CtlKind;
+        assert_eq!(
+            event(&[0xE0, 0, 64]),
+            Some(MidiEvent::Perf {
+                kind: CtlKind::PitchBend,
+                value: 0.0
+            })
+        );
+        assert_eq!(
+            event(&[0xE2, 127, 127]),
+            Some(MidiEvent::Perf {
+                kind: CtlKind::PitchBend,
+                value: 8191.0 / 8192.0
+            })
+        );
+        assert_eq!(
+            event(&[0xD0, 127]),
+            Some(MidiEvent::Perf {
+                kind: CtlKind::Aftertouch,
+                value: 1.0
+            })
+        );
     }
 
     #[test]

@@ -279,3 +279,41 @@ fn every_preset_loads_and_plays_and_nothing_stale_is_left() {
     assert_eq!(a.params, b.params);
     assert_eq!(p.cables, moved.cables);
 }
+
+#[test]
+fn a_weave_knob_links_to_a_midi_controller_and_follows_it_live() {
+    let (mut h, ch) = weave();
+    let filter = 4;
+    let ps = Kind::Filter.spec().params[1];
+    let cutoff = h.app.weave.row_at(&patch(&h, ch), filter, 2);
+    h.right_click_at(cutoff);
+    h.run(2);
+    h.click("Link to MIDI controller...");
+    assert!(crate::midilearn::waiting().is_some(), "waits for a knob");
+    // the knob moved on the keyboard: linked, and the control takes its value
+    h.app.midi_control(0, 21, 0);
+    h.run(1);
+    assert!(crate::midilearn::waiting().is_none());
+    let map = h.project().midi_map.clone().unwrap_or_default();
+    assert_eq!(map.len(), 1);
+    assert_eq!(map[0].cc, 21);
+    let v = patch(&h, ch).node(filter).unwrap().param(ps.name);
+    assert!((v - ps.min).abs() < 1e-6, "{v}");
+    // turned again while the player has the project: heard at once, no new player
+    let from = h.app.weave.sent.len();
+    h.app.midi_control(0, 21, 127);
+    h.run(1);
+    let v = patch(&h, ch).node(filter).unwrap().param(ps.name);
+    assert!((v - ps.max).abs() < 1e-3, "{v}");
+    let sent = &h.app.weave.sent[from..];
+    assert!(
+        sent.iter().any(
+            |(c, p)| *c == ch && (p.node(filter).unwrap().param(ps.name) - ps.max).abs() < 1e-3
+        ),
+        "sent live"
+    );
+    // another knob moves nothing
+    h.app.midi_control(0, 22, 0);
+    let after = patch(&h, ch).node(filter).unwrap().param(ps.name);
+    assert!((after - ps.max).abs() < 1e-3);
+}

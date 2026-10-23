@@ -110,6 +110,8 @@ pub enum Dragged {
     Factory(&'static str, &'static str),
     /// A preset of the browser's Presets tab: the synth it is for, and its name.
     Preset(Instrument, String),
+    /// An effect of the browser's Plugins tab, by its id: dropped on a mixer slot.
+    Effect(String),
 }
 
 impl Dragged {
@@ -120,6 +122,9 @@ impl Dragged {
                 .map_or("Sample".into(), |s| s.to_string_lossy().into_owned()),
             Dragged::Factory(_, n) => (*n).to_string(),
             Dragged::Preset(_, n) => n.clone(),
+            Dragged::Effect(id) => {
+                las_dsp::fx::registry::descriptor(id).map_or(id.clone(), |d| d.name.clone())
+            }
         }
     }
 }
@@ -223,6 +228,11 @@ impl App {
             .filter(|_| self.shell.open.rack && matches!(over, Over::Rack | Over::Unknown))
             .filter(|_| place.is_none())
             .and_then(|pos| self.shell.steps.row_at(pos));
+        if let Dragged::Effect(_) = &item {
+            // a mixer slot takes it as it is let go; anywhere else it has no place
+            self.shell.status = "Drop an effect on a slot of the mixer to add it there.".into();
+            return;
+        }
         if let Dragged::Preset(inst, name) = &item {
             match row {
                 Some(ch) => self.drop_preset(ch, *inst, name),
@@ -266,7 +276,7 @@ impl App {
                 }
             }
             (Dragged::Factory(id, name), None) => self.add_factory_channel(id, name),
-            (Dragged::Preset(..), _) => {}
+            (Dragged::Preset(..) | Dragged::Effect(_), _) => {}
         }
     }
 
@@ -277,7 +287,7 @@ impl App {
         let from_os = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if !from_os
             && !egui::DragAndDrop::payload::<Dragged>(ctx)
-                .is_some_and(|d| !matches!(*d, Dragged::Preset(..)))
+                .is_some_and(|d| !matches!(*d, Dragged::Preset(..) | Dragged::Effect(_)))
         {
             return;
         }
@@ -415,7 +425,7 @@ impl App {
                     set_channel_sample(p, ch, &id, &name);
                 });
             }
-            Dragged::Preset(..) => return false,
+            Dragged::Preset(..) | Dragged::Effect(_) => return false,
         }
         self.project.channel = ch;
         true
@@ -439,7 +449,9 @@ impl App {
                     ui.label(format!("\u{266A} {}", item.name()));
                     ui.label(
                         RichText::new(
-                            if matches!(*item, Dragged::Preset(..)) {
+                            if matches!(*item, Dragged::Effect(_)) {
+                                "Drop on an effect slot of the mixer"
+                            } else if matches!(*item, Dragged::Preset(..)) {
                                 "Drop on a channel of the same synth in the channel rack"
                             } else {
                                 "Drop on the playlist for a clip, on a sampler channel to replace its sample, anywhere else for a new channel"
@@ -523,6 +535,8 @@ pub const FORMATS: [(&str, &str, u32); 7] = [
 ];
 
 pub struct Shell {
+    /// "Clean up unused samples" asks first: how many would go.
+    pub cleanup: Option<usize>,
     /// The size of the screen last frame (to notice it getting smaller).
     pub last_screen: Option<Rect>,
     /// The height of the keyboard under the synth panels (from the last frame), so the
@@ -571,6 +585,8 @@ pub struct Shell {
     pub synth_id: Option<egui::Id>,
     /// A message shown in a window until the user closes it.
     pub notice: Option<String>,
+    /// Autosaves to offer at the start (see [`crate::settings::leftover_autosaves`]).
+    pub leftovers: Vec<std::path::PathBuf>,
     pub recent_target: Option<String>,
     placed: bool,
 }
@@ -631,8 +647,10 @@ impl Shell {
             synth_id: None,
             file_hover: None,
             notice: None,
+            leftovers: Vec::new(),
             placed: false,
             synth_footer: 0.0,
+            cleanup: None,
             last_screen: None,
         }
     }
@@ -956,7 +974,28 @@ impl App {
             .as_ref()
             .map_or(120.0, |l| l.project.bpm);
         let busy = self.project.is_building();
-        ui.horizontal_centered(|ui| {
+        // the master knob keeps its place at the right
+        let bar = egui::Layout::right_to_left(egui::Align::Center);
+        // as tall as the master knob; a second row adds to that
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 52.0), bar, |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+            ui.spacing_mut().interact_size.y = TOOL_H;
+                if let Some(a) = &self.audio {
+                    let (l, r) = a.meters.peaks();
+                    meter(ui, r, vec2(8.0, 26.0));
+                    meter(ui, l, vec2(8.0, 26.0));
+                }
+                let mut vol = self.volume;
+                if knob(ui, &mut vol, 0.0..=1.0, 0.8, "Master", false, &|v| {
+                    format!("{:.0}%", v * 100.0)
+                }) {
+                    self.volume = vol;
+                    self.send(Command::Volume(vol as f32));
+                }
+            // too narrow a window scrolls the rest sideways (Shift+wheel, or its bar)
+            // rather than running it under the knob or taking rows from the windows
+            let row = egui::Layout::left_to_right(egui::Align::Center);
+            egui::ScrollArea::horizontal().id_salt("toolbar").show(ui, |ui| ui.with_layout(row, |ui| {
             // every control in the toolbar is as tall as the others and sits on the
             // same centre line
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
@@ -1024,13 +1063,14 @@ impl App {
             });
             let r = lcd(ui, &format!("{:.2}", live.unwrap_or(bpm)), "BPM", 86.0);
             if r.drag_started() {
-                self.project.modify(true, |_| {});
+                self.project.armed = true;
             }
             if r.dragged() {
                 let d = -f64::from(r.drag_delta().y) * 0.25;
                 if d != 0.0 {
+                    let begin = std::mem::take(&mut self.project.armed);
                     self.project
-                        .modify(false, |pr| pr.bpm = (pr.bpm + d).clamp(30.0, 300.0));
+                        .modify(begin, |pr| pr.bpm = (pr.bpm + d).clamp(30.0, 300.0));
                 }
             }
             let r = r.on_hover_text(
@@ -1208,21 +1248,7 @@ impl App {
             {
                 self.shell.open.show(crate::raise::Win::Export);
             }
-            // master
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(a) = &self.audio {
-                    let (l, r) = a.meters.peaks();
-                    meter(ui, r, vec2(8.0, 26.0));
-                    meter(ui, l, vec2(8.0, 26.0));
-                }
-                let mut vol = self.volume;
-                if knob(ui, &mut vol, 0.0..=1.0, 0.8, "Master", false, &|v| {
-                    format!("{:.0}%", v * 100.0)
-                }) {
-                    self.volume = vol;
-                    self.send(Command::Volume(vol as f32));
-                }
-            });
+            }));
         });
         let _ = p;
     }
@@ -1563,7 +1589,13 @@ impl App {
                     last = d.category.clone();
                     ui.label(RichText::new(&last).size(10.5).color(p.accent_text));
                 }
-                ui.label(&d.name).on_hover_text(&d.description);
+                let r = ui
+                    .add(egui::Label::new(&d.name).sense(egui::Sense::click_and_drag()))
+                    .on_hover_text(format!(
+                        "{}\nDrag onto an effect slot of the mixer",
+                        d.description
+                    ));
+                r.dnd_set_drag_payload(Dragged::Effect(d.id.clone()));
             }
             self.hosted_list(ui);
         });
@@ -1665,10 +1697,11 @@ impl App {
 
     /// The floating windows. `area` is the workspace they sit in.
     pub(crate) fn windows(&mut self, ctx: &egui::Context, area: Rect) {
-        // the screen got smaller (a smaller window, a larger interface scale): windows
+        // the room got smaller (a smaller window, a larger interface scale): windows
         // that no longer fit are laid out afresh, at their first places and sizes, so
         // no edge, title or close button is left out of reach
-        let screen = ctx.content_rect();
+        // (the room under the toolbar, which also shrinks when the toolbar wraps)
+        let screen = area;
         let shrank = self.shell.last_screen.is_some_and(|s| {
             screen.width() < s.width() - 1.0 || screen.height() < s.height() - 1.0
         });
@@ -1771,8 +1804,9 @@ impl App {
             crate::raise::front(ctx, Win::Mixer, Win::Mixer.id());
             win(
                 "Mixer",
-                a.min + vec2(30.0, (a.height() - 470.0).max(10.0)),
-                vec2(a.width() - 60.0, 450.0),
+                // tall enough for whole strips with routing at 1080p
+                a.min + vec2(30.0, (a.height() - 640.0).max(10.0)),
+                vec2(a.width() - 60.0, 620.0f32.min(a.height() - 20.0)),
             )
             .id(Win::Mixer.id())
             .open(&mut open.mixer)
@@ -1909,6 +1943,7 @@ impl App {
         self.history_window(ctx);
         self.settings_window(ctx);
         self.notice_window(ctx);
+        self.restore_window(ctx);
         self.drag_label(ctx);
         self.analyser_window(ctx);
         self.rename_dialog(ctx);
@@ -1965,10 +2000,11 @@ impl App {
                     steps::mini_knob(ui, &mut sw, (0.0, 1.0), 0.0, "Swing", pal().accent);
                 ui.label(RichText::new("SWING").size(10.0).color(pal().muted));
                 if start {
-                    self.project.modify(true, |_| {});
+                    self.project.armed = true;
                 }
                 if ch {
-                    self.project.modify(false, |pr| pr.swing = sw);
+                    let begin = std::mem::take(&mut self.project.armed);
+                    self.project.modify(begin, |pr| pr.swing = sw);
                 }
             });
         });
@@ -1976,6 +2012,34 @@ impl App {
         self.shell.steps.footer = ui.cursor().top() - footer_top;
         drop(project);
         self.project.channel = selected;
+        // Ctrl+Up / Ctrl+Down over the rack move the selected channel
+        let (up, down) = ui.input(|i| {
+            let c = i.modifiers.command;
+            (
+                c && i.key_pressed(egui::Key::ArrowUp),
+                c && i.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+        if (up || down) && ui.ui_contains_pointer() {
+            let n = self
+                .project
+                .loaded
+                .as_ref()
+                .map_or(0, |l| l.project.channels.len());
+            let i = selected;
+            let to = if up {
+                i.checked_sub(1)
+            } else {
+                Some(i + 1).filter(|&t| t < n)
+            };
+            if let Some(to) = to {
+                self.project.edit_chans(&[
+                    steps::ChanEdit::Begin,
+                    steps::ChanEdit::Move { channel: i, to },
+                ]);
+                self.project.channel = to;
+            }
+        }
         if let Some(n) = out.steps {
             let pattern = self.project.pattern;
             self.project.modify(true, |p| {
@@ -2002,6 +2066,13 @@ impl App {
         }
         if !out.chans.is_empty() {
             self.project.edit_chans(&out.chans);
+            for e in &out.chans {
+                if let steps::ChanEdit::Move { channel, to } = e {
+                    if *channel == self.project.channel {
+                        self.project.channel = *to;
+                    }
+                }
+            }
         }
     }
 
@@ -2088,9 +2159,9 @@ impl App {
             return;
         };
         let project = l.project.clone();
-        let peaks: Vec<f32> = match &self.audio {
+        let peaks: Vec<[f32; 2]> = match &self.audio {
             Some(a) if a.meters.playing() => (0..project.mixer.len())
-                .map(|i| a.meters.insert_peak(i))
+                .map(|i| a.meters.insert_peak_lr(i))
                 .collect(),
             _ => Vec::new(),
         };
@@ -2144,9 +2215,49 @@ impl App {
             _ => true,
         });
         edits.extend(more);
+        // the rack shows the channels that play through an insert
+        edits.retain(|e| match e {
+            MixEdit::SelectRouted(i) => {
+                self.shell.steps.filter = crate::steps::GroupFilter::Insert(*i);
+                self.shell.open.rack = true;
+                if let Some(c) = project.channels.iter().position(|c| c.mixer_track == *i) {
+                    self.project.channel = c;
+                }
+                false
+            }
+            _ => true,
+        });
+        self.mixer_live(&project, &edits);
         let edits = self.workflow_mix_edits(edits);
         drop(project);
         self.project.edit_mixer(&edits);
+    }
+
+    /// While the song plays, faders, pan knobs and slot mixes being dragged are heard
+    /// at once (gliding, so without zipper noise), not only when the mouse is let go.
+    pub(crate) fn mixer_live(&mut self, project: &las_project::Project, edits: &[MixEdit]) {
+        use las_engine::mixer::{slot_key, LiveControl};
+        let Some(a) = &mut self.audio else {
+            return;
+        };
+        if !a.meters.playing() {
+            return;
+        }
+        for e in edits {
+            let (insert, control, value) = match e {
+                MixEdit::Volume { insert, value } => (*insert, LiveControl::Volume, *value),
+                MixEdit::Pan { insert, value } => (*insert, LiveControl::Pan, *value),
+                MixEdit::SlotMix { insert, slot, mix } => {
+                    let Some(Some(s)) = project.mixer.get(*insert).and_then(|t| t.slots.get(*slot))
+                    else {
+                        continue;
+                    };
+                    (*insert, LiveControl::SlotMix(slot_key(&s.id)), *mix)
+                }
+                _ => continue,
+            };
+            a.send(crate::audio::Command::MixerLive(insert, control, value));
+        }
     }
 
     /// The window of a channel whose instrument has its own face (not the synth panels).
