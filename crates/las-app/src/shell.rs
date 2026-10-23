@@ -523,6 +523,8 @@ pub const FORMATS: [(&str, &str, u32); 7] = [
 ];
 
 pub struct Shell {
+    /// "Clean up unused samples" asks first: how many would go.
+    pub cleanup: Option<usize>,
     /// The size of the screen last frame (to notice it getting smaller).
     pub last_screen: Option<Rect>,
     /// The height of the keyboard under the synth panels (from the last frame), so the
@@ -633,6 +635,7 @@ impl Shell {
             notice: None,
             placed: false,
             synth_footer: 0.0,
+            cleanup: None,
             last_screen: None,
         }
     }

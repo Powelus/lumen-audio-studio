@@ -756,3 +756,73 @@ impl Project {
         self.patterns.iter().find(|p| p.id == id)
     }
 }
+
+/// Whether some string in `v` names sample `id` (as is, or as a `user:` wavetable).
+fn names_sample(v: &Value, id: &str) -> bool {
+    match v {
+        Value::String(s) => s == id || s.strip_prefix("user:") == Some(id),
+        Value::Array(a) => a.iter().any(|x| names_sample(x, id)),
+        Value::Object(o) => o.values().any(|x| names_sample(x, id)),
+        _ => false,
+    }
+}
+
+impl Project {
+    /// The project's samples (not factory ones) that nothing uses any more: no channel,
+    /// sampler or slicer, audio clip, pad or wavetable names them.
+    pub fn unused_samples(&self) -> Vec<Id> {
+        let Ok(mut v) = serde_json::to_value(self) else {
+            return Vec::new();
+        };
+        if let Some(o) = v.as_object_mut() {
+            o.remove("samples");
+        }
+        self.samples
+            .iter()
+            .filter(|s| s.factory != Some(true) && !names_sample(&v, &s.id))
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    /// Forget the samples nothing uses; how many went.
+    pub fn drop_unused_samples(&mut self) -> usize {
+        let gone = self.unused_samples();
+        self.samples.retain(|s| !gone.contains(&s.id));
+        gone.len()
+    }
+}
+
+#[cfg(test)]
+mod unused_tests {
+    use super::*;
+
+    #[test]
+    fn samples_used_anywhere_are_kept_and_the_rest_go() {
+        let mut p = crate::create::empty_project("x");
+        for id in ["smp_ch", "smp_clip", "smp_pad", "smp_wt", "smp_none"] {
+            p.samples.push(SampleRef {
+                id: id.into(),
+                name: id.into(),
+                ..Default::default()
+            });
+        }
+        p.samples.push(SampleRef {
+            id: "smp_factory".into(),
+            factory: Some(true),
+            ..Default::default()
+        });
+        let c = crate::create::add_channel(&mut p, "sampler");
+        p.channels[c].sample_id = Some("smp_ch".into());
+        p.channels[c].state =
+            serde_json::json!({"pads": [{"sampleId": "smp_pad"}], "t": "user:smp_wt"});
+        p.playlist.clips.push(Clip {
+            kind: ClipKind::Audio,
+            ref_id: "smp_clip".into(),
+            ..Default::default()
+        });
+        assert_eq!(p.unused_samples(), vec!["smp_none".to_string()]);
+        assert_eq!(p.drop_unused_samples(), 1);
+        assert_eq!(p.samples.len(), 5);
+        assert_eq!(p.drop_unused_samples(), 0);
+    }
+}

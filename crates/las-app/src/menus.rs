@@ -624,6 +624,14 @@ impl App {
                 ui.close();
             }
             if ui
+                .add_enabled(loaded, egui::Button::new("Clean up unused samples..."))
+                .on_hover_text("Remove samples that no channel, clip or slicer uses any more")
+                .clicked()
+            {
+                self.ask_cleanup();
+                ui.close();
+            }
+            if ui
                 .add_enabled(loaded, egui::Button::new("Export...    Ctrl+R"))
                 .clicked()
             {

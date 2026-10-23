@@ -512,7 +512,18 @@ impl ProjectState {
                 serde_json::json!({ "start": a, "end": b, "on": self.playlist.loop_on }),
             );
         }
-        let bytes = encode(&project, &l.samples, true).map_err(|e| e.to_string())?;
+        // samples nothing uses any more are left out of the file (the session keeps
+        // them, so undo still has them)
+        let gone = project.unused_samples();
+        project.drop_unused_samples();
+        let bytes = if gone.is_empty() {
+            encode(&project, &l.samples, true)
+        } else {
+            let mut kept = (*l.samples).clone();
+            kept.retain(|k, _| !gone.contains(k));
+            encode(&project, &kept, true)
+        }
+        .map_err(|e| e.to_string())?;
         let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, bytes).map_err(|e| format!("{tmp}: {e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))?;

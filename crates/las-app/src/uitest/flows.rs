@@ -1576,3 +1576,44 @@ fn the_step_graph_editor_sets_a_steps_release() {
     h.key_with(eframe::egui::Key::Z, eframe::egui::Modifiers::COMMAND);
     assert!(step(&h).release.unwrap_or(0.5) < 0.2, "undo");
 }
+
+#[test]
+fn unused_samples_are_cleaned_up_after_asking_and_left_out_when_saving() {
+    let mut h = Harness::demo();
+    let add = |h: &mut Harness| {
+        h.app.project.modify(true, |p| {
+            p.samples.push(las_project::SampleRef {
+                id: "smp_unused".into(),
+                name: "Old take".into(),
+                ..Default::default()
+            })
+        });
+        h.run(1);
+    };
+    let has = |h: &Harness| h.project().samples.iter().any(|s| s.id == "smp_unused");
+    add(&mut h);
+    let others = h.project().samples.len() - h.project().unused_samples().len();
+    h.menu(&["File", "Clean up unused samples..."]);
+    h.run(2);
+    assert!(h.has("Clean up unused samples"), "asks first");
+    h.click("Cancel");
+    h.run(1);
+    assert!(has(&h), "Cancel keeps it");
+    h.menu(&["File", "Clean up unused samples..."]);
+    h.run(2);
+    h.click("Remove");
+    h.run(1);
+    assert!(!has(&h));
+    assert_eq!(h.project().samples.len(), others, "the used ones stay");
+    h.key_with(eframe::egui::Key::Z, eframe::egui::Modifiers::COMMAND);
+    assert!(has(&h), "undo brings it back");
+    // saving leaves it out of the file, but the session keeps it
+    let path = std::env::temp_dir().join(format!("las-cleanup-{}.las", std::process::id()));
+    let path = path.to_string_lossy().to_string();
+    h.app.project.save_to(&path).unwrap();
+    assert!(has(&h));
+    let b = las_project::decode(&std::fs::read(&path).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert!(!b.project.samples.iter().any(|s| s.id == "smp_unused"));
+    assert_eq!(b.project.samples.len(), others);
+}

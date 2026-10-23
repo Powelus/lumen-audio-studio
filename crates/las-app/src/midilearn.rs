@@ -292,6 +292,60 @@ impl crate::app::App {
         }
     }
 
+    /// File > Clean up unused samples: count them and ask first (or say there are none).
+    pub(crate) fn ask_cleanup(&mut self) {
+        let n = self
+            .project
+            .loaded
+            .as_ref()
+            .map_or(0, |l| l.project.unused_samples().len());
+        if n == 0 {
+            self.shell.status = "No unused samples: every sample is in use.".into();
+        } else {
+            self.shell.cleanup = Some(n);
+        }
+    }
+
+    /// Remove the unused samples (one undo step).
+    pub(crate) fn clean_up_samples(&mut self) -> usize {
+        let mut n = 0;
+        self.project.modify(true, |p| n = p.drop_unused_samples());
+        self.shell.status = format!(
+            "Removed {n} unused sample{}. Ctrl+Z brings them back.",
+            if n == 1 { "" } else { "s" }
+        );
+        n
+    }
+
+    /// The question "Clean up unused samples" asks.
+    pub(crate) fn cleanup_dialog(&mut self, ctx: &eframe::egui::Context) {
+        let Some(n) = self.shell.cleanup else {
+            return;
+        };
+        let (mut yes, mut no) = (false, false);
+        eframe::egui::Window::new("Clean up unused samples")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(eframe::egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{n} sample{} no longer used by any channel, clip or slicer. Remove {}?",
+                    if n == 1 { " is" } else { "s are" },
+                    if n == 1 { "it" } else { "them" }
+                ));
+                ui.horizontal(|ui| {
+                    yes = ui.button("Remove").clicked();
+                    no = ui.button("Cancel").clicked();
+                });
+            });
+        if no || ctx.input(|i| i.key_pressed(eframe::egui::Key::Escape)) {
+            self.shell.cleanup = None;
+        } else if yes {
+            self.shell.cleanup = None;
+            self.clean_up_samples();
+        }
+    }
+
     /// While a control waits for a knob: a note saying so, with Cancel.
     pub(crate) fn learn_banner(&mut self, ctx: &eframe::egui::Context) {
         let Some(req) = waiting() else {
