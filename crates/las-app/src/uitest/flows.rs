@@ -1098,7 +1098,7 @@ fn mixer_faders_and_knobs_keep_their_clicks_inside_a_strip() {
         h.project().mixer[ins].eq
     );
     // a click on the strip's background selects it, a right click there gives its menu
-    let pill = h.find_all("Click to select, right-click for render, sidechain and tuner");
+    let pill = h.find_all("Click to select, double-click to rename, right-click for colour, render, sidechain and tuner");
     let mut pill: Vec<_> = pill.into_iter().collect();
     pill.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
     h.click_at(pill[2].rect.center());
@@ -1315,7 +1315,7 @@ fn opens_a_dialog(label: &str) -> bool {
 
 /// Click every button of the window titled `title` once, checking the app never
 /// panics and the project stays valid.
-fn mash(h: &mut Harness, title: &str) -> usize {
+pub(super) fn mash(h: &mut Harness, title: &str) -> usize {
     let Some(win) = h
         .find_all(title)
         .into_iter()

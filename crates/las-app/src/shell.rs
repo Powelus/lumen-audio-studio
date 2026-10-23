@@ -110,6 +110,8 @@ pub enum Dragged {
     Factory(&'static str, &'static str),
     /// A preset of the browser's Presets tab: the synth it is for, and its name.
     Preset(Instrument, String),
+    /// An effect of the browser's Plugins tab, by its id: dropped on a mixer slot.
+    Effect(String),
 }
 
 impl Dragged {
@@ -120,6 +122,9 @@ impl Dragged {
                 .map_or("Sample".into(), |s| s.to_string_lossy().into_owned()),
             Dragged::Factory(_, n) => (*n).to_string(),
             Dragged::Preset(_, n) => n.clone(),
+            Dragged::Effect(id) => {
+                las_dsp::fx::registry::descriptor(id).map_or(id.clone(), |d| d.name.clone())
+            }
         }
     }
 }
@@ -223,6 +228,11 @@ impl App {
             .filter(|_| self.shell.open.rack && matches!(over, Over::Rack | Over::Unknown))
             .filter(|_| place.is_none())
             .and_then(|pos| self.shell.steps.row_at(pos));
+        if let Dragged::Effect(_) = &item {
+            // a mixer slot takes it as it is let go; anywhere else it has no place
+            self.shell.status = "Drop an effect on a slot of the mixer to add it there.".into();
+            return;
+        }
         if let Dragged::Preset(inst, name) = &item {
             match row {
                 Some(ch) => self.drop_preset(ch, *inst, name),
@@ -266,7 +276,7 @@ impl App {
                 }
             }
             (Dragged::Factory(id, name), None) => self.add_factory_channel(id, name),
-            (Dragged::Preset(..), _) => {}
+            (Dragged::Preset(..) | Dragged::Effect(_), _) => {}
         }
     }
 
@@ -277,7 +287,7 @@ impl App {
         let from_os = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if !from_os
             && !egui::DragAndDrop::payload::<Dragged>(ctx)
-                .is_some_and(|d| !matches!(*d, Dragged::Preset(..)))
+                .is_some_and(|d| !matches!(*d, Dragged::Preset(..) | Dragged::Effect(_)))
         {
             return;
         }
@@ -415,7 +425,7 @@ impl App {
                     set_channel_sample(p, ch, &id, &name);
                 });
             }
-            Dragged::Preset(..) => return false,
+            Dragged::Preset(..) | Dragged::Effect(_) => return false,
         }
         self.project.channel = ch;
         true
@@ -439,7 +449,9 @@ impl App {
                     ui.label(format!("\u{266A} {}", item.name()));
                     ui.label(
                         RichText::new(
-                            if matches!(*item, Dragged::Preset(..)) {
+                            if matches!(*item, Dragged::Effect(_)) {
+                                "Drop on an effect slot of the mixer"
+                            } else if matches!(*item, Dragged::Preset(..)) {
                                 "Drop on a channel of the same synth in the channel rack"
                             } else {
                                 "Drop on the playlist for a clip, on a sampler channel to replace its sample, anywhere else for a new channel"
@@ -1577,7 +1589,13 @@ impl App {
                     last = d.category.clone();
                     ui.label(RichText::new(&last).size(10.5).color(p.accent_text));
                 }
-                ui.label(&d.name).on_hover_text(&d.description);
+                let r = ui
+                    .add(egui::Label::new(&d.name).sense(egui::Sense::click_and_drag()))
+                    .on_hover_text(format!(
+                        "{}\nDrag onto an effect slot of the mixer",
+                        d.description
+                    ));
+                r.dnd_set_drag_payload(Dragged::Effect(d.id.clone()));
             }
             self.hosted_list(ui);
         });
@@ -1786,8 +1804,9 @@ impl App {
             crate::raise::front(ctx, Win::Mixer, Win::Mixer.id());
             win(
                 "Mixer",
-                a.min + vec2(30.0, (a.height() - 470.0).max(10.0)),
-                vec2(a.width() - 60.0, 450.0),
+                // tall enough for whole strips with routing at 1080p
+                a.min + vec2(30.0, (a.height() - 640.0).max(10.0)),
+                vec2(a.width() - 60.0, 620.0f32.min(a.height() - 20.0)),
             )
             .id(Win::Mixer.id())
             .open(&mut open.mixer)
@@ -2140,9 +2159,9 @@ impl App {
             return;
         };
         let project = l.project.clone();
-        let peaks: Vec<f32> = match &self.audio {
+        let peaks: Vec<[f32; 2]> = match &self.audio {
             Some(a) if a.meters.playing() => (0..project.mixer.len())
-                .map(|i| a.meters.insert_peak(i))
+                .map(|i| a.meters.insert_peak_lr(i))
                 .collect(),
             _ => Vec::new(),
         };
@@ -2196,9 +2215,49 @@ impl App {
             _ => true,
         });
         edits.extend(more);
+        // the rack shows the channels that play through an insert
+        edits.retain(|e| match e {
+            MixEdit::SelectRouted(i) => {
+                self.shell.steps.filter = crate::steps::GroupFilter::Insert(*i);
+                self.shell.open.rack = true;
+                if let Some(c) = project.channels.iter().position(|c| c.mixer_track == *i) {
+                    self.project.channel = c;
+                }
+                false
+            }
+            _ => true,
+        });
+        self.mixer_live(&project, &edits);
         let edits = self.workflow_mix_edits(edits);
         drop(project);
         self.project.edit_mixer(&edits);
+    }
+
+    /// While the song plays, faders, pan knobs and slot mixes being dragged are heard
+    /// at once (gliding, so without zipper noise), not only when the mouse is let go.
+    pub(crate) fn mixer_live(&mut self, project: &las_project::Project, edits: &[MixEdit]) {
+        use las_engine::mixer::{slot_key, LiveControl};
+        let Some(a) = &mut self.audio else {
+            return;
+        };
+        if !a.meters.playing() {
+            return;
+        }
+        for e in edits {
+            let (insert, control, value) = match e {
+                MixEdit::Volume { insert, value } => (*insert, LiveControl::Volume, *value),
+                MixEdit::Pan { insert, value } => (*insert, LiveControl::Pan, *value),
+                MixEdit::SlotMix { insert, slot, mix } => {
+                    let Some(Some(s)) = project.mixer.get(*insert).and_then(|t| t.slots.get(*slot))
+                    else {
+                        continue;
+                    };
+                    (*insert, LiveControl::SlotMix(slot_key(&s.id)), *mix)
+                }
+                _ => continue,
+            };
+            a.send(crate::audio::Command::MixerLive(insert, control, value));
+        }
     }
 
     /// The window of a channel whose instrument has its own face (not the synth panels).

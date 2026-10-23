@@ -1993,8 +1993,10 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         // something dragged from the browser and let go
+        // (an effect is taken by the mixer slot it is let go on, as the mixer draws)
         if ctx.input(|i| i.pointer.any_released())
-            && egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ctx)
+            && egui::DragAndDrop::payload::<crate::shell::Dragged>(ctx)
+                .is_some_and(|d| !matches!(*d, crate::shell::Dragged::Effect(_)))
         {
             if let Some(item) = egui::DragAndDrop::take_payload::<crate::shell::Dragged>(ctx) {
                 let over = crate::shell::Over::at(ctx, drop_at);

@@ -153,6 +153,161 @@ pub enum MixEdit {
     Tuner {
         insert: usize,
     },
+    /// The dry and wet mix of an effect slot, 0 to 1 (FL's slot volume knob).
+    SlotMix {
+        insert: usize,
+        slot: usize,
+        mix: f64,
+    },
+    /// The insert's colour, `#rrggbb`.
+    Color {
+        insert: usize,
+        color: String,
+    },
+    /// Trade places with the insert next to it (`right`: the next one).
+    MoveInsert {
+        insert: usize,
+        right: bool,
+    },
+    /// Copy the insert, with its effects, to the next free insert.
+    DuplicateInsert(usize),
+    /// Back to a fresh insert: no effects, 0 dB, centred, to the master.
+    ClearInsert(usize),
+    /// The fader back to 0 dB.
+    ResetFader(usize),
+    /// Not a change: show the channels that play through the insert in the rack.
+    SelectRouted(usize),
+}
+
+/// The colours the insert menu offers, as FL's palette.
+pub const COLOURS: [&str; 12] = [
+    "#3a4256", "#7c5cff", "#e5484d", "#f76b15", "#ffb547", "#c2d94c", "#3ddc97", "#22d3ee",
+    "#3e9bff", "#c26bff", "#ff5c8a", "#9aa4b8",
+];
+
+/// The name a fresh insert `i` has.
+fn default_name(i: usize) -> String {
+    if i == 0 {
+        "Master".into()
+    } else {
+        format!("Insert {i}")
+    }
+}
+
+/// Change the insert number in an automation or MIDI target (`kind` mixer or effect).
+fn remap_target(v: &mut serde_json::Value, m: &dyn Fn(usize) -> usize) {
+    let kind = v
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if kind != "mixer" && kind != "effect" {
+        return;
+    }
+    if let Some(t) = v.get("track").and_then(serde_json::Value::as_u64) {
+        v["track"] = (m(t as usize) as u64).into();
+    }
+}
+
+/// Trade the places of inserts `a` and `b` (not the master): their settings and
+/// effects, the channels playing through them, the routing to and from them, and the
+/// automation clips and MIDI links that move them all follow.
+pub fn swap_inserts(p: &mut Project, a: usize, b: usize) -> bool {
+    let n = p.mixer.len();
+    if a == 0 || b == 0 || a >= n || b >= n || a == b {
+        return false;
+    }
+    let m = |x: usize| {
+        if x == a {
+            b
+        } else if x == b {
+            a
+        } else {
+            x
+        }
+    };
+    p.mixer.swap(a, b);
+    for (i, t) in [(a, b), (b, a)] {
+        // a default name follows the place, as in FL
+        if p.mixer[i].name == default_name(t) {
+            p.mixer[i].name = default_name(i);
+        }
+    }
+    for c in &mut p.channels {
+        c.mixer_track = m(c.mixer_track);
+    }
+    for t in &mut p.mixer {
+        t.output = t.output.map(m);
+        for s in &mut t.sends {
+            s.target = m(s.target);
+        }
+        for slot in t.slots.iter_mut().flatten() {
+            if let Some(x) = slot
+                .state
+                .get("sidechain")
+                .and_then(serde_json::Value::as_u64)
+            {
+                slot.state["sidechain"] = (m(x as usize) as u64).into();
+            }
+        }
+    }
+    for c in &mut p.automation {
+        remap_target(&mut c.target, &m);
+    }
+    for x in p.midi_map.iter_mut().flatten() {
+        remap_target(&mut x.target, &m);
+    }
+    true
+}
+
+/// Whether nothing uses insert `i`: no effects, no channel, nothing routed to it, its
+/// own name and the settings of a fresh insert.
+fn is_free(p: &Project, i: usize) -> bool {
+    let t = &p.mixer[i];
+    i > 0
+        && t.slots.iter().all(Option::is_none)
+        && t.sends.is_empty()
+        && (t.name.is_empty() || t.name == default_name(i))
+        && (t.volume - 1.0).abs() < 1e-9
+        && t.pan == 0.0
+        && t.eq.is_flat()
+        && !p.channels.iter().any(|c| c.mixer_track == i)
+        && !p
+            .mixer
+            .iter()
+            .any(|o| o.output == Some(i) || o.sends.iter().any(|s| s.target == i))
+}
+
+/// Copy insert `i` (its effects, with new ids, and its settings and routing) to the
+/// first free insert after it. Returns where it went.
+pub fn duplicate_insert(p: &mut Project, i: usize) -> Option<usize> {
+    if i == 0 || i >= p.mixer.len() {
+        return None;
+    }
+    let to = (i + 1..p.mixer.len()).find(|&j| is_free(p, j))?;
+    let mut t = p.mixer[i].clone();
+    t.id = p.mixer[to].id.clone();
+    for s in t.slots.iter_mut().flatten() {
+        s.id = las_project::create::uid("fx");
+    }
+    let name = if p.mixer[i].name.is_empty() {
+        default_name(i)
+    } else {
+        p.mixer[i].name.clone()
+    };
+    t.name = format!("{name} copy");
+    // a send to the copy itself would be a loop
+    t.sends.retain(|s| s.target != to);
+    p.mixer[to] = t;
+    Some(to)
+}
+
+/// Make insert `i` a fresh one again (keeping its place and id).
+pub fn clear_insert(p: &mut Project, i: usize) {
+    if let Some(t) = p.mixer.get_mut(i) {
+        let mut fresh = las_project::create::mixer_track(i, None);
+        fresh.id = t.id.clone();
+        *t = fresh;
+    }
 }
 
 /// Settings of the compressor that "Sidechain to this track" adds: deep, quick ducking
@@ -280,6 +435,10 @@ impl MeterHold {
             // falls about 20 dB a second
             let dt = (now - self.at - Self::HOLD).min(0.1) as f32;
             self.hold = (self.hold * 0.1f32.powf(dt)).max(peak);
+            // below -80 dB it is gone: the meter stops moving (and asking to be drawn)
+            if self.hold < 1e-4 {
+                self.hold = 0.0;
+            }
         }
         if peak > 1.0 {
             self.clip = true;
@@ -358,7 +517,43 @@ pub fn apply(project: &mut Project, edit: &MixEdit) {
                 project.mixer[i].solo = *on;
             }
         }
+        MixEdit::SlotMix { insert, slot, mix } => {
+            if let Some(Some(s)) = project
+                .mixer
+                .get_mut(*insert)
+                .and_then(|t| t.slots.get_mut(*slot))
+            {
+                s.mix = if mix.is_finite() {
+                    mix.clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+            }
+        }
+        MixEdit::Color { insert, color } => {
+            if let Some(t) = project.mixer.get_mut(*insert) {
+                t.color = color.clone();
+            }
+        }
+        MixEdit::MoveInsert { insert, right } => {
+            let to = if *right {
+                insert + 1
+            } else {
+                insert.wrapping_sub(1)
+            };
+            swap_inserts(project, *insert, to);
+        }
+        MixEdit::DuplicateInsert(i) => {
+            duplicate_insert(project, *i);
+        }
+        MixEdit::ClearInsert(i) => clear_insert(project, *i),
+        MixEdit::ResetFader(i) => {
+            if let Some(t) = project.mixer.get_mut(*i) {
+                t.volume = 1.0;
+            }
+        }
         MixEdit::OpenEffect { .. }
+        | MixEdit::SelectRouted(_)
         | MixEdit::Automate(_)
         | MixEdit::SaveChain(_)
         | MixEdit::LoadChain(_)
@@ -579,7 +774,14 @@ pub struct MixerState {
     pub selected: usize,
     /// Peak hold and clip of each insert's meter.
     pub meters: Vec<MeterHold>,
+    /// The insert whose name is being typed (double click on it), and the text so far.
+    pub renaming: Option<(usize, String)>,
+    /// The height of the faders this frame, points.
+    pub fader_h: f32,
 }
+
+/// The height of a strip without its fader, points.
+const FIXED_H: f32 = 285.0;
 
 /// An effect slot being dragged to another slot.
 #[derive(Clone, Copy, Debug)]
@@ -595,7 +797,7 @@ pub fn draw(
     ui: &mut Ui,
     project: &Project,
     state: &mut MixerState,
-    peaks: &[f32],
+    peaks: &[[f32; 2]],
     channel: Selected,
 ) -> Vec<MixEdit> {
     let mut edits = Vec::new();
@@ -605,11 +807,16 @@ pub fn draw(
         .meters
         .resize(project.mixer.len(), MeterHold::default());
     for (i, m) in state.meters.iter_mut().enumerate() {
-        m.update(peaks.get(i).copied().unwrap_or(0.0), now);
+        let [l, r] = peaks.get(i).copied().unwrap_or_default();
+        m.update(l.max(r), now);
     }
-    if !peaks.is_empty() || state.meters.iter().any(|m| m.hold > 0.0) {
+    // drawn again only while a meter moves: sound comes in, or a hold line falls
+    let sounding = peaks.iter().any(|p| p[0] > 1e-5 || p[1] > 1e-5);
+    if sounding || state.meters.iter().any(|m| m.hold > 0.0) {
         ui.ctx().request_repaint();
     }
+    // the faders take the height the window leaves, so a strip never scrolls
+    state.fader_h = (ui.available_height() - FIXED_H).clamp(90.0, 190.0);
     // Ctrl+L, as in FL: the selected channel plays through the selected insert
     if let Some((c, _)) = channel {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
@@ -631,7 +838,7 @@ pub fn draw(
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for i in 0..project.mixer.len() {
-                        let peak = peaks.get(i).copied().unwrap_or(0.0);
+                        let peak = peaks.get(i).copied().unwrap_or_default();
                         strip(ui, project, i, state, peak, channel, &mut edits);
                     }
                 });
@@ -703,7 +910,7 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                     });
                 }
                 let b = ui
-                    .add(egui::Button::new(slot_label(s)).min_size(egui::vec2(100.0, 0.0)))
+                    .add(egui::Button::new(slot_label(s)).min_size(egui::vec2(96.0, 0.0)))
                     .interact(egui::Sense::click_and_drag())
                     .on_hover_text(format!(
                         "{}\nClick: open. Drag onto another slot to move it. Right click: more.",
@@ -713,6 +920,42 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                 if b.clicked() {
                     edits.push(MixEdit::OpenEffect { insert: i, slot: n });
                 }
+                // the slot's mix (FL's slot volume): dry to wet
+                let mut mix = s.mix;
+                let (ch, start, kr) = crate::steps::knob_core(
+                    ui,
+                    &mut mix,
+                    (0.0, 1.0),
+                    1.0,
+                    18.0,
+                    if s.enabled { p.accent } else { p.muted },
+                );
+                let kr = kr.on_hover_text(format!(
+                    "Mix {:.0}% (0% dry, 100% the effect alone)\nDrag or wheel; double or Ctrl+click for 100%. Right click: automate",
+                    s.mix * 100.0
+                ));
+                if start {
+                    edits.push(MixEdit::Begin);
+                }
+                if ch {
+                    edits.push(MixEdit::SlotMix {
+                        insert: i,
+                        slot: n,
+                        mix,
+                    });
+                }
+                kr.context_menu(|ui| {
+                    let req = || crate::auto::AutoRequest {
+                        target: crate::auto::effect_target(i, &s.id, "mix"),
+                        name: format!("{} {} mix", insert_name(project, i), slot_label(s)),
+                        start: s.mix.clamp(0.0, 1.0),
+                    };
+                    if ui.button("Create automation clip").clicked() {
+                        edits.push(MixEdit::Automate(req()));
+                        ui.close();
+                    }
+                    crate::midilearn::menu_item(ui, req);
+                });
                 b.context_menu(|ui| {
                     if ui
                         .add_enabled(n > 0, egui::Button::new("Move up"))
@@ -804,8 +1047,37 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
                 r.response.on_hover_text("Add an effect");
             }
         });
-        // a slot dragged here moves (trading places with what is here)
         let rr = row.response;
+        // an effect dragged from the browser goes in here (in place of what is here)
+        if let Some(fx) = browser_effect(ui.ctx()) {
+            if rr.contains_pointer() {
+                ui.painter().rect_stroke(
+                    rr.rect.expand(1.0),
+                    3.0,
+                    egui::Stroke::new(1.5, p.accent),
+                    egui::StrokeKind::Outside,
+                );
+                if ui.input(|x| x.pointer.any_released()) {
+                    egui::DragAndDrop::clear_payload(ui.ctx());
+                    edits.push(MixEdit::Begin);
+                    if t.slots.get(n).is_some_and(Option::is_some) {
+                        edits.push(MixEdit::ReplaceEffect {
+                            insert: i,
+                            slot: n,
+                            plugin: fx,
+                            hosted: false,
+                        });
+                    } else {
+                        edits.push(MixEdit::AddEffect {
+                            insert: i,
+                            slot: n,
+                            plugin: fx,
+                        });
+                    }
+                }
+            }
+        }
+        // a slot dragged here moves (trading places with what is here)
         if let Some(d) = carrying {
             if d.slot != n && rr.contains_pointer() {
                 ui.painter().rect_stroke(
@@ -871,6 +1143,15 @@ fn detail(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
             });
         }
     });
+}
+
+/// The effect being dragged from the browser, if one is.
+fn browser_effect(ctx: &egui::Context) -> Option<String> {
+    let d = egui::DragAndDrop::payload::<crate::shell::Dragged>(ctx)?;
+    match &*d {
+        crate::shell::Dragged::Effect(id) => Some(id.clone()),
+        _ => None,
+    }
 }
 
 /// The menu of effects to put in a slot: the built-in ones by category, then the
@@ -1027,7 +1308,7 @@ fn strip(
     project: &Project,
     i: usize,
     state: &mut MixerState,
-    peak: f32,
+    peak: [f32; 2],
     channel: Selected,
     edits: &mut Vec<MixEdit>,
 ) {
@@ -1049,7 +1330,7 @@ fn strip(
             .inner_margin(4.0)
             .show(ui, |ui| {
                 ui.set_width(58.0);
-                ui.set_min_height(420.0);
+                ui.set_min_height(state.fader_h + FIXED_H - 40.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new(if i == 0 {
@@ -1066,23 +1347,59 @@ fn strip(
                     } else {
                         t.name.clone()
                     };
-                    let (r, resp) =
-                        ui.allocate_exact_size(egui::vec2(54.0, 17.0), egui::Sense::click());
-                    ui.painter().rect_filled(r, 4.0, col.gamma_multiply(0.55));
-                    ui.painter().with_clip_rect(r).text(
-                        r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        name,
-                        egui::FontId::proportional(10.5),
-                        p.text,
-                    );
-                    if resp.clicked() {
-                        state.selected = i;
+                    if let Some((_, text)) = state.renaming.as_mut().filter(|(r, _)| *r == i) {
+                        // typing a new name: Enter or a click elsewhere keeps it, Escape not
+                        let te = ui.add(
+                            egui::TextEdit::singleline(text)
+                                .desired_width(50.0)
+                                .font(egui::FontId::proportional(10.5)),
+                        );
+                        te.request_focus();
+                        let (enter, escape) = ui.input(|x| {
+                            (x.key_pressed(egui::Key::Enter), x.key_pressed(egui::Key::Escape))
+                        });
+                        if escape {
+                            state.renaming = None;
+                        } else if enter || te.lost_focus() {
+                            let name = text.trim().to_string();
+                            if name != t.name {
+                                edits.push(MixEdit::Begin);
+                                edits.push(MixEdit::Rename { insert: i, name });
+                            }
+                            state.renaming = None;
+                        }
+                    } else {
+                        let (r, resp) =
+                            ui.allocate_exact_size(egui::vec2(54.0, 17.0), egui::Sense::click());
+                        ui.painter().rect_filled(r, 4.0, col.gamma_multiply(0.55));
+                        ui.painter().with_clip_rect(r).text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            &name,
+                            egui::FontId::proportional(10.5),
+                            p.text,
+                        );
+                        if resp.clicked() {
+                            state.selected = i;
+                        }
+                        // (a click on the pill re-lays the strip, so egui's own
+                        // double-click can be missed: two clicks in 0.4 s are one)
+                        let mut double = resp.double_clicked();
+                        if resp.clicked() {
+                            let key = egui::Id::unique("mixer-pill-click").with(i);
+                            let now = ui.input(|x| x.time);
+                            let last: Option<f64> = ui.data(|d| d.get_temp(key));
+                            double |= last.is_some_and(|t| now - t < 0.4);
+                            ui.data_mut(|d| d.insert_temp(key, now));
+                        }
+                        if double {
+                            state.renaming = Some((i, t.name.clone()));
+                        }
+                        resp.on_hover_text(
+                            "Click to select, double-click to rename, right-click for colour, render, sidechain and tuner",
+                        )
+                        .context_menu(|ui| insert_menu(ui, project, i, edits));
                     }
-                    resp.on_hover_text(
-                        "Click to select, right-click for render, sidechain and tuner",
-                    )
-                    .context_menu(|ui| insert_menu(ui, project, i, edits));
                     let mut pan = t.pan;
                     let (ch, start, pr) = crate::steps::mini_knob_resp(
                         ui,
@@ -1116,13 +1433,22 @@ fn strip(
                     eq_strip(ui, t, i, edits);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        let m = ui.selectable_label(t.mute, "M");
+                        let m = ui
+                            .selectable_label(t.mute, "M")
+                            .on_hover_text("Mute. Alt+click: solo (as in FL)");
                         if m.clicked() {
                             edits.push(MixEdit::Begin);
-                            edits.push(MixEdit::Mute {
-                                insert: i,
-                                on: !t.mute,
-                            });
+                            if ui.input(|x| x.modifiers.alt) {
+                                edits.push(MixEdit::Solo {
+                                    insert: i,
+                                    on: !t.solo,
+                                });
+                            } else {
+                                edits.push(MixEdit::Mute {
+                                    insert: i,
+                                    on: !t.mute,
+                                });
+                            }
                         }
                         let s = ui.selectable_label(t.solo, "S");
                         if s.clicked() {
@@ -1146,11 +1472,19 @@ fn strip(
                             p.well_deep
                         },
                     );
+                    // the peak reached, in dB, or CLIP once it went over
+                    let light = if meter.clip {
+                        "CLIP".to_string()
+                    } else if meter.hold > 1e-4 {
+                        format!("{:.1}", 20.0 * meter.hold.log10())
+                    } else {
+                        "-\u{221e}".to_string()
+                    };
                     ui.painter().text(
                         cr.center(),
                         egui::Align2::CENTER_CENTER,
-                        "CLIP",
-                        egui::FontId::proportional(7.5),
+                        light,
+                        egui::FontId::proportional(8.0),
                         if meter.clip {
                             egui::Color32::WHITE
                         } else {
@@ -1164,7 +1498,9 @@ fn strip(
                     };
                     if cresp
                         .on_hover_text(format!(
-                        "Peak {peak_db}. Lights red when the level goes over 0 dB. Click to reset."
+                        "Peak {peak_db} (left {:.1}, right {:.1} dB now). Lights red when the level goes over 0 dB. Click to reset.",
+                        20.0 * peak[0].max(1e-6).log10(),
+                        20.0 * peak[1].max(1e-6).log10()
                     ))
                         .clicked()
                     {
@@ -1173,7 +1509,7 @@ fn strip(
                         }
                     }
                     let mut vol = t.volume;
-                    let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, 190.0);
+                    let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, state.fader_h.max(90.0));
                     // the peak hold line over the fader's meter
                     if meter.hold > 0.0 {
                         let fr = r.rect;
@@ -1231,6 +1567,7 @@ fn strip(
                         format!("{:.1}", db(vol))
                     };
                     ui.label(RichText::new(label).weak().size(10.0));
+                    route_button(ui, project, state.selected, i, edits);
                 });
             });
     });
@@ -1281,6 +1618,19 @@ fn strip_menu(
                 .size(11.0),
         );
     }
+    if ui
+        .add_enabled(
+            !feeding.is_empty(),
+            egui::Button::new("Select all channels routed here"),
+        )
+        .on_hover_text("The channel rack shows just the channels that play through this insert")
+        .clicked()
+    {
+        edits.push(MixEdit::SelectRouted(i));
+        ui.close();
+    }
+    ui.menu_button("Insert", |ui| insert_items(ui, project, i, edits));
+    ui.menu_button("Colour", |ui| colour_row(ui, project, i, edits));
     ui.separator();
     let t = &project.mixer[i];
     if ui
@@ -1394,6 +1744,10 @@ fn eq_strip(ui: &mut Ui, t: &las_project::MixerTrack, i: usize, edits: &mut Vec<
 
 /// The right-click menu of an insert's name: render it, sidechain it, tune it.
 fn insert_menu(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
+    colour_row(ui, project, i, edits);
+    ui.separator();
+    insert_items(ui, project, i, edits);
+    ui.separator();
     if ui
         .button("Render to audio clip (song)")
         .on_hover_text("Bounce what this insert plays in the song to a WAV in the project and put it on the playlist")
@@ -1443,6 +1797,199 @@ fn insert_menu(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit
     {
         edits.push(MixEdit::Tuner { insert: i });
         ui.close();
+    }
+}
+
+/// The colour swatches of an insert's menu.
+fn colour_row(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
+    ui.label(RichText::new("Colour").weak().size(11.0));
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(150.0);
+        ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+        for c in COLOURS {
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 14.0), egui::Sense::click());
+            ui.painter().rect_filled(r, 3.0, channel_colour_of(c));
+            if project.mixer[i].color.eq_ignore_ascii_case(c) {
+                ui.painter().rect_stroke(
+                    r,
+                    3.0,
+                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if resp.on_hover_text(c).clicked() {
+                edits.push(MixEdit::Begin);
+                edits.push(MixEdit::Color {
+                    insert: i,
+                    color: c.to_string(),
+                });
+                ui.close();
+            }
+        }
+    });
+}
+
+/// FL's "Insert" menu items: move, duplicate, clear, reset the fader.
+fn insert_items(ui: &mut Ui, project: &Project, i: usize, edits: &mut Vec<MixEdit>) {
+    let n = project.mixer.len();
+    let mut item = |ui: &mut Ui, on: bool, label: &str, tip: &str, e: MixEdit| {
+        if ui
+            .add_enabled(on, egui::Button::new(label))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            edits.push(MixEdit::Begin);
+            edits.push(e);
+            ui.close();
+        }
+    };
+    item(
+        ui,
+        i > 1,
+        "Move left",
+        "Trade places with the insert on the left; channels and routing follow",
+        MixEdit::MoveInsert {
+            insert: i,
+            right: false,
+        },
+    );
+    item(
+        ui,
+        i > 0 && i + 1 < n,
+        "Move right",
+        "Trade places with the insert on the right; channels and routing follow",
+        MixEdit::MoveInsert {
+            insert: i,
+            right: true,
+        },
+    );
+    item(
+        ui,
+        i > 0 && (i + 1..n).any(|j| is_free(project, j)),
+        "Duplicate insert",
+        "Copy this insert with its effects to the next free insert",
+        MixEdit::DuplicateInsert(i),
+    );
+    item(
+        ui,
+        true,
+        "Clear insert",
+        "Remove its effects and set it back to 0 dB, centred, to the master",
+        MixEdit::ClearInsert(i),
+    );
+    item(
+        ui,
+        (project.mixer[i].volume - 1.0).abs() > 1e-9,
+        "Reset fader",
+        "Back to 0 dB (Ctrl+click on the fader does it too)",
+        MixEdit::ResetFader(i),
+    );
+}
+
+/// The routing button at the foot of strip `i`, as FL's: lit when the selected insert
+/// plays into it; a click routes the selected insert there or takes the route away. A
+/// send shows its level knob under it.
+fn route_button(ui: &mut Ui, project: &Project, sel: usize, i: usize, edits: &mut Vec<MixEdit>) {
+    let p = crate::theme::pal();
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(30.0, 14.0), egui::Sense::click());
+    if sel == i || sel >= project.mixer.len() {
+        // the selected strip: a mark that the arrows on the others are its routes
+        ui.painter().text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            "SEL",
+            egui::FontId::proportional(8.0),
+            p.accent_text,
+        );
+        ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        return;
+    }
+    let from = &project.mixer[sel];
+    let send = from.sends.iter().position(|s| s.target == i);
+    let out = from.output == Some(i) || (i == 0 && sel > 0 && from.output.is_none());
+    let lit = send.is_some() || out;
+    let can = sel > 0 && !would_cycle(project, sel, i);
+    let col = if lit {
+        crate::theme::accent()
+    } else if can && resp.hovered() {
+        p.text2
+    } else {
+        p.border2
+    };
+    // an arrow pointing up into the strip, painted (the fonts have no filled triangle)
+    let c = r.center();
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x - 7.0, c.y + 4.0),
+            egui::pos2(c.x + 7.0, c.y + 4.0),
+            egui::pos2(c.x, c.y - 4.0),
+        ],
+        col,
+        egui::Stroke::NONE,
+    ));
+    let (from_name, to_name) = (insert_name(project, sel), insert_name(project, i));
+    let tip = if out {
+        format!("{from_name} plays into {to_name} (its output).")
+    } else if send.is_some() {
+        format!("{from_name} sends to {to_name}. Click to take the send away.")
+    } else if can {
+        format!("Click to send {from_name} to {to_name}.")
+    } else {
+        format!("{from_name} cannot play into {to_name} (it would make a loop).")
+    };
+    let resp = resp.on_hover_text(tip);
+    if resp.clicked() && can {
+        edits.push(MixEdit::Begin);
+        if let Some(index) = send {
+            edits.push(MixEdit::RemoveSend { insert: sel, index });
+        } else if out {
+            if i != 0 {
+                edits.push(MixEdit::Output {
+                    insert: sel,
+                    target: 0,
+                });
+            }
+        } else if i == 0 {
+            edits.push(MixEdit::Output {
+                insert: sel,
+                target: 0,
+            });
+        } else {
+            edits.push(MixEdit::AddSend {
+                insert: sel,
+                target: i,
+            });
+        }
+    }
+    match send {
+        Some(index) => {
+            let mut amount = from.sends[index].amount;
+            let (ch, start, kr) = crate::steps::knob_core(
+                ui,
+                &mut amount,
+                (0.0, 1.25),
+                1.0,
+                16.0,
+                crate::theme::accent(),
+            );
+            kr.on_hover_text(format!(
+                "Send level from {from_name}: {:.1} dB\nDrag or wheel; double or Ctrl+click for 0 dB",
+                db(amount)
+            ));
+            if start {
+                edits.push(MixEdit::Begin);
+            }
+            if ch {
+                edits.push(MixEdit::SetSend {
+                    insert: sel,
+                    index,
+                    amount,
+                });
+            }
+        }
+        None => {
+            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        }
     }
 }
 
@@ -1819,6 +2366,214 @@ mod tests {
         assert_eq!(db(0.0), -99.0);
     }
 
+    fn fx(id: &str, plugin: &str) -> Option<las_project::EffectSlot> {
+        Some(las_project::EffectSlot {
+            id: id.into(),
+            plugin_id: plugin.into(),
+            enabled: true,
+            mix: 1.0,
+            state: serde_json::json!({}),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_slot_mix_is_set_and_held_to_range_and_old_projects_read_as_100() {
+        let mut p = las_project::create::default_project();
+        p.mixer[1].slots[2] = fx("fx_a", "las-delay");
+        apply(
+            &mut p,
+            &MixEdit::SlotMix {
+                insert: 1,
+                slot: 2,
+                mix: 0.3,
+            },
+        );
+        assert_eq!(p.mixer[1].slots[2].as_ref().unwrap().mix, 0.3);
+        apply(
+            &mut p,
+            &MixEdit::SlotMix {
+                insert: 1,
+                slot: 2,
+                mix: 7.0,
+            },
+        );
+        assert_eq!(p.mixer[1].slots[2].as_ref().unwrap().mix, 1.0);
+        apply(
+            &mut p,
+            &MixEdit::SlotMix {
+                insert: 1,
+                slot: 2,
+                mix: f64::NAN,
+            },
+        );
+        assert_eq!(p.mixer[1].slots[2].as_ref().unwrap().mix, 1.0);
+        // an empty slot is left alone
+        apply(
+            &mut p,
+            &MixEdit::SlotMix {
+                insert: 1,
+                slot: 3,
+                mix: 0.5,
+            },
+        );
+        assert!(p.mixer[1].slots[3].is_none());
+        let old: las_project::EffectSlot =
+            serde_json::from_str(r#"{"id":"x","pluginId":"las-delay","state":{}}"#).unwrap();
+        assert!(
+            old.enabled && old.mix == 1.0,
+            "a slot saved without them is on at 100%"
+        );
+    }
+
+    #[test]
+    fn moving_an_insert_takes_its_channels_routing_automation_and_links_along() {
+        let mut p = las_project::create::default_project();
+        p.mixer[2].name = "Bass".into();
+        p.mixer[3].name = "Insert 3".into();
+        p.mixer[2].slots[0] = fx("fx_b", "las-comp");
+        p.mixer[3].slots[0] = fx("fx_c", "las-comp");
+        p.mixer[3].slots[0].as_mut().unwrap().state = serde_json::json!({ "sidechain": 2 });
+        p.mixer[2].sends.push(las_project::MixSend {
+            target: 4,
+            amount: 0.5,
+            ..Default::default()
+        });
+        p.mixer[5].output = Some(2);
+        p.channels[0].mixer_track = 2;
+        p.channels[1].mixer_track = 3;
+        p.automation.push(las_project::AutomationClip {
+            id: "a".into(),
+            target: crate::auto::effect_target(2, "fx_b", "mix"),
+            ..Default::default()
+        });
+        crate::midilearn::link(&mut p, 0, 7, &crate::auto::mixer_target(3, "volume"));
+        apply(
+            &mut p,
+            &MixEdit::MoveInsert {
+                insert: 2,
+                right: true,
+            },
+        );
+        assert_eq!(p.mixer[3].name, "Bass");
+        assert_eq!(
+            p.mixer[2].name, "Insert 2",
+            "a default name stays with its place"
+        );
+        assert_eq!(p.mixer[3].slots[0].as_ref().unwrap().id, "fx_b");
+        assert_eq!(p.mixer[3].sends[0].target, 4);
+        assert_eq!(p.mixer[5].output, Some(3));
+        assert_eq!(
+            (p.channels[0].mixer_track, p.channels[1].mixer_track),
+            (3, 2)
+        );
+        assert_eq!(p.mixer[2].slots[0].as_ref().unwrap().state["sidechain"], 3);
+        assert_eq!(p.automation[0].target["track"], 3);
+        assert_eq!(p.midi_map.as_ref().unwrap()[0].target["track"], 2);
+        // and back
+        apply(
+            &mut p,
+            &MixEdit::MoveInsert {
+                insert: 3,
+                right: false,
+            },
+        );
+        assert_eq!(p.mixer[2].name, "Bass");
+        assert_eq!(p.channels[0].mixer_track, 2);
+        // the master never moves, and nothing moves past the ends
+        let before = p.clone();
+        apply(
+            &mut p,
+            &MixEdit::MoveInsert {
+                insert: 1,
+                right: false,
+            },
+        );
+        apply(
+            &mut p,
+            &MixEdit::MoveInsert {
+                insert: 0,
+                right: true,
+            },
+        );
+        let last = p.mixer.len() - 1;
+        apply(
+            &mut p,
+            &MixEdit::MoveInsert {
+                insert: last,
+                right: true,
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+    }
+
+    #[test]
+    fn duplicate_clear_reset_and_colour_an_insert() {
+        let mut p = las_project::create::default_project();
+        for c in &mut p.channels {
+            c.mixer_track = 0;
+        }
+        for i in 1..p.mixer.len() {
+            clear_insert(&mut p, i);
+        }
+        p.mixer[1].name = "Vox".into();
+        p.mixer[1].volume = 0.5;
+        p.mixer[1].slots[0] = fx("fx_v", "las-reverb");
+        p.mixer[1].sends.push(las_project::MixSend {
+            target: 3,
+            amount: 0.4,
+            ..Default::default()
+        });
+        // insert 2 is in use (a channel plays there) and 3 is sent to: the copy goes to 4
+        p.channels[0].mixer_track = 2;
+        assert_eq!(duplicate_insert(&mut p, 1), Some(4));
+        let c = &p.mixer[4];
+        assert_eq!(c.name, "Vox copy");
+        assert_eq!(c.volume, 0.5);
+        assert_eq!(c.sends[0].target, 3);
+        let s = c.slots[0].as_ref().unwrap();
+        assert_eq!(s.plugin_id, "las-reverb");
+        assert_ne!(s.id, "fx_v", "the copied effect has an id of its own");
+        assert_ne!(c.id, p.mixer[1].id);
+        // reset the fader, then clear
+        apply(&mut p, &MixEdit::ResetFader(1));
+        assert_eq!(p.mixer[1].volume, 1.0);
+        let id = p.mixer[1].id.clone();
+        apply(&mut p, &MixEdit::ClearInsert(1));
+        let t = &p.mixer[1];
+        assert_eq!(t.id, id);
+        assert!(t.slots.iter().all(Option::is_none) && t.sends.is_empty());
+        assert_eq!((t.name.as_str(), t.output), ("Insert 1", Some(0)));
+        apply(
+            &mut p,
+            &MixEdit::Color {
+                insert: 1,
+                color: COLOURS[3].into(),
+            },
+        );
+        assert_eq!(p.mixer[1].color, COLOURS[3]);
+        // nothing free after the last insert: no copy
+        let last = p.mixer.len() - 1;
+        p.mixer[last].name = "Used".into();
+        assert_eq!(duplicate_insert(&mut p, last), None);
+    }
+
+    #[test]
+    fn a_falling_hold_reaches_zero_so_the_mixer_stops_redrawing() {
+        let mut m = MeterHold::default();
+        m.update(0.5, 0.0);
+        let mut t = 0.0;
+        while m.hold > 0.0 && t < 60.0 {
+            t += 1.0 / 60.0;
+            m.update(0.0, t);
+        }
+        assert_eq!(m.hold, 0.0, "the hold line is gone after {t} s");
+        assert!(t < 10.0);
+    }
+
     #[test]
     fn the_mixer_draws() {
         let p = project();
@@ -1827,7 +2582,13 @@ mod tests {
         let mut state = MixerState::default();
         for _ in 0..2 {
             crate::widgets::run_frame(&ctx, egui::RawInput::default(), |ui| {
-                out = draw(ui, &p, &mut state, &[0.5, 1.4], Some((0, "Kick")));
+                out = draw(
+                    ui,
+                    &p,
+                    &mut state,
+                    &[[0.5, 0.2], [0.3, 1.4]],
+                    Some((0, "Kick")),
+                );
             });
         }
         assert!(out.is_empty());

@@ -310,6 +310,12 @@ impl ProjectState {
         }
     }
 
+    /// How many steps undo can take back.
+    #[cfg(test)]
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
     /// Carry out the mixer edits of one frame.
     pub fn edit_mixer(&mut self, edits: &[MixEdit]) {
         let mut pending: Vec<AutoRequest> = Vec::new();

@@ -155,10 +155,31 @@ pub fn set(p: &mut Project, target: &Value, v: f64, range_of: RangeOf) -> bool {
             else {
                 return false;
             };
-            return set_param(&mut slot.state, &param);
+            if param == "mix" {
+                slot.mix = v;
+                return true;
+            }
+            if set_param(&mut slot.state, &param) {
+                return true;
+            }
+            return set_effect_param(&slot.plugin_id.clone(), &mut slot.state, &param, v);
         }
         _ => return false,
     }
+    true
+}
+
+/// Set a knob of a built-in effect (a path into its state) to `v`, 0 to 1 over the
+/// range its automation has.
+fn set_effect_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) -> bool {
+    use las_engine::fxauto::{effect_param_def, map_automation};
+    let Some(def) = effect_param_def(plugin_id, path) else {
+        return false;
+    };
+    let Some(&(_, x)) = map_automation(Some(&def), &[(0.0, v)]).first() else {
+        return false;
+    };
+    set_path(state, path, x);
     true
 }
 
@@ -178,6 +199,12 @@ fn set_instrument_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) 
     let Some(&(_, x)) = map_automation(Some(&def), &[(0.0, v)]).first() else {
         return false;
     };
+    set_path(state, path, x);
+    true
+}
+
+/// Put `x` at a dotted `path` in `state`, making the objects on the way.
+fn set_path(state: &mut Value, path: &str, x: f64) {
     if !state.is_object() {
         *state = serde_json::json!({});
     }
@@ -193,7 +220,6 @@ fn set_instrument_param(plugin_id: &str, state: &mut Value, path: &str, v: f64) 
             at = &mut at[*k];
         }
     }
-    true
 }
 
 /// Set parameter `p.<id>` of the Weave patch a channel's state holds to `v` (0 to 1
@@ -392,6 +418,37 @@ mod tests {
 
     fn no_range(_: &Value, _: u32) -> Option<(f64, f64)> {
         None
+    }
+
+    #[test]
+    fn a_controller_moves_a_slot_mix_and_a_built_in_effect_knob() {
+        let mut p = las_project::create::default_project();
+        let d = las_dsp::fx::registry::descriptor("las-dist").unwrap();
+        p.mixer[1].slots[0] = Some(las_project::EffectSlot {
+            id: "fx_a".into(),
+            plugin_id: "las-dist".into(),
+            enabled: true,
+            mix: 1.0,
+            state: d.default_state.clone(),
+            ..Default::default()
+        });
+        let mix = crate::auto::effect_target(1, "fx_a", "mix");
+        assert!(set(&mut p, &mix, 0.25, &no_range));
+        let s = p.mixer[1].slots[0].as_ref().unwrap();
+        assert!((s.mix - 0.25).abs() < 1e-9);
+        let drive = crate::auto::effect_target(1, "fx_a", "drive");
+        assert!(
+            set(&mut p, &drive, 1.0, &no_range),
+            "a built-in knob is set"
+        );
+        let def = las_engine::fxauto::effect_param_def("las-dist", "drive").unwrap();
+        let v = p.mixer[1].slots[0].as_ref().unwrap().state["drive"]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (v - def.from_normalized(1.0)).abs() < 1e-6,
+            "the top of its range: {v}"
+        );
     }
 
     #[test]

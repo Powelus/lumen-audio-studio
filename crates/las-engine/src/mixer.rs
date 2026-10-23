@@ -163,6 +163,26 @@ struct Track {
     quiet_out: usize,
 }
 
+/// Time constant of a live change, seconds.
+const LIVE_GLIDE: f64 = 0.015;
+
+/// A control of an insert that follows the user's hand while the song plays.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiveControl {
+    Volume,
+    Pan,
+    /// The dry and wet mix of an effect slot, by the [`slot_key`] of its id (no string
+    /// travels to the audio thread, where freeing one would not be safe).
+    SlotMix(u64),
+}
+
+/// A number for an effect slot's id (FNV-1a).
+pub fn slot_key(id: &str) -> u64 {
+    id.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 pub struct Mixer {
     tracks: Vec<Track>,
     order: Vec<usize>,
@@ -461,6 +481,32 @@ impl Mixer {
             "volume" => t.fader.ramp(points, first),
             "pan" => t.pan.ramp(points, first),
             _ => {}
+        }
+    }
+
+    /// Move a control of insert `index` to `value` while the user drags it: it glides
+    /// there from engine time `time` (seconds) in 15 ms, so a drag never zippers.
+    /// What was scheduled on it after `time` is forgotten.
+    pub fn set_live(&mut self, index: usize, control: &LiveControl, value: f64, time: f64) {
+        let Some(t) = self.tracks.get_mut(index) else {
+            return;
+        };
+        let glide = |p: &mut Param, v: f64| {
+            p.cancel_scheduled_values(time);
+            p.set_target_at_time(v, time, LIVE_GLIDE);
+        };
+        match control {
+            LiveControl::Volume => glide(&mut t.fader, value.clamp(0.0, 1.25)),
+            LiveControl::Pan => glide(&mut t.pan, value.clamp(-1.0, 1.0)),
+            LiveControl::SlotMix(key) => {
+                if let Some(s) = t.slots.iter_mut().find(|s| slot_key(&s.id) == *key) {
+                    if s.fx.enabled {
+                        let m = value.clamp(0.0, 1.0);
+                        glide(&mut s.auto.wet, m);
+                        glide(&mut s.auto.dry, 1.0 - m);
+                    }
+                }
+            }
         }
     }
 

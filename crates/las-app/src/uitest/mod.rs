@@ -6,6 +6,7 @@
 mod flows;
 mod glyphs;
 mod hunt2;
+mod mixer;
 mod weave;
 
 use crate::app::App;
