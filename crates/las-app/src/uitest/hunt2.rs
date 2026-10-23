@@ -379,3 +379,255 @@ fn a_clean_quit_leaves_nothing_to_restore() {
         "the autosave is still there after a clean quit"
     );
 }
+
+#[test]
+fn markers_on_the_ruler_set_a_loop_and_alt_arrows_jump_to_them() {
+    use eframe::egui::{pos2, Key, Modifiers};
+    let mut h = Harness::demo();
+    let o = &mut h.app.shell.open;
+    o.rack = false;
+    o.mixer = false;
+    o.roll = false;
+    h.run(3);
+    let a = h.app.project.playlist.area.expect("the playlist was drawn");
+    let bar = 384.0_f32;
+    let ruler = |t: f32| pos2(a.left + t * a.zoom, a.top - 8.0);
+    let before = h.project().markers.iter().flatten().count();
+    for t in [bar * 2.0, bar * 4.0] {
+        h.right_click_at(ruler(t));
+        h.click("Add marker here");
+    }
+    let marks: Vec<f64> = h
+        .project()
+        .markers
+        .iter()
+        .flatten()
+        .map(|m| m.tick)
+        .collect();
+    assert_eq!(marks.len(), before + 2, "markers {marks:?}");
+    h.right_click_at(ruler(bar * 3.0));
+    h.click("Loop between these markers");
+    assert_eq!(h.app.project.playlist.song_loop, Some((768.0, 1536.0)));
+    assert!(h.app.project.playlist.loop_on);
+    h.click("Loop");
+    assert!(
+        !h.app.project.playlist.loop_on,
+        "the Loop button does not switch it off"
+    );
+    // Alt+Right jumps to the next marker
+    h.app.project.start_tick = 0.0;
+    h.hover(a_center(&h));
+    h.key_with(Key::ArrowRight, Modifiers::ALT);
+    let first = marks
+        .iter()
+        .copied()
+        .filter(|&t| t > 0.0)
+        .fold(f64::MAX, f64::min);
+    assert_eq!(h.app.project.start_tick, first, "Alt+Right");
+    // undo takes the markers back
+    for _ in 0..2 {
+        h.key_with(Key::Z, Modifiers::COMMAND);
+    }
+    assert_eq!(h.project().markers.iter().flatten().count(), before);
+}
+
+fn a_center(h: &Harness) -> eframe::egui::Pos2 {
+    let a = h.app.project.playlist.area.expect("the playlist was drawn");
+    eframe::egui::pos2(a.left + 200.0, a.top + 40.0)
+}
+
+#[test]
+fn notes_typed_while_recording_go_into_the_pattern() {
+    use eframe::egui::Key;
+    let mut h = Harness::new().with_audio();
+    h.settle();
+    h.app.settings.record_audio = false;
+    h.app.settings.record_notes = true;
+    h.app.settings.count_in = false;
+    let notes = |h: &Harness| -> usize {
+        h.project().patterns[h.app.project.pattern]
+            .notes
+            .values()
+            .map(Vec::len)
+            .sum()
+    };
+    let before = notes(&h);
+    h.click("PAT");
+    h.app.shell.record = true;
+    h.key(Key::Space);
+    h.settle();
+    assert!(playing(&h));
+    h.run(10);
+    h.key(Key::A);
+    h.run(10);
+    h.key(Key::S);
+    h.run(10);
+    h.key(Key::Space);
+    h.run(3);
+    assert_eq!(notes(&h), before + 2, "the typed notes were not recorded");
+    // one Ctrl+Z takes the whole take back
+    h.key_with(Key::Z, eframe::egui::Modifiers::COMMAND);
+    assert_eq!(notes(&h), before);
+}
+
+#[test]
+fn every_theme_applies_and_is_kept() {
+    let mut h = Harness::demo();
+    let mut seen = Vec::new();
+    for t in crate::theme::themes() {
+        h.app.choose_theme(&t.id);
+        h.run(3);
+        let p = crate::theme::pal();
+        seen.push((t.id.clone(), p.accent, p.panel2));
+    }
+    let mut looks: Vec<_> = seen.iter().map(|s| (s.1, s.2)).collect();
+    looks.sort_by_key(|c| (c.0.to_array(), c.1.to_array()));
+    looks.dedup();
+    assert!(looks.len() > 1, "every theme looks the same: {seen:?}");
+    let last = seen.last().unwrap().0.clone();
+    let h = h.restart();
+    assert_eq!(h.app.shell.theme, last, "the theme is not kept");
+}
+
+#[test]
+fn slicing_a_sound_makes_a_slicer_channel_and_a_pattern_that_plays_it() {
+    let mut h = Harness::new();
+    h.app
+        .add_factory_channel("factory:kick-punch", "Kick Punch");
+    let ch = h.project().channels.len() - 1;
+    let id = h.project().channels[ch].id.clone();
+    let (chans, pats) = (h.project().channels.len(), h.project().patterns.len());
+    crate::sampleedit::request(crate::sampleedit::Request::Slice(id));
+    h.run(6);
+    assert_eq!(h.project().channels.len(), chans + 1, "no slicer channel");
+    assert_eq!(
+        h.project().patterns.len(),
+        pats + 1,
+        "no pattern for the slices"
+    );
+    let slicer = h.project().channels.last().unwrap().clone();
+    assert_eq!(slicer.plugin_id, las_project::slicer::SLICER_ID);
+    let pat = h.project().patterns.last().unwrap().clone();
+    assert!(
+        pat.notes.get(&slicer.id).is_some_and(|n| !n.is_empty()),
+        "the pattern does not play the slices"
+    );
+    // its window opens, and the pattern is heard
+    h.app.open_channel(chans);
+    h.run(4);
+    let l = h.app.project.loaded.as_ref().unwrap();
+    let opts = las_engine::RenderOptions {
+        sample_rate: 44_100.0,
+        mode: las_engine::Mode::Pattern {
+            id: Some(pat.id.clone()),
+            loops: 1,
+        },
+        ..Default::default()
+    };
+    let r = las_engine::render_mix_with(&l.project, &l.samples, &opts).unwrap();
+    let peak = r.left.iter().fold(0f32, |m, x| m.max(x.abs()));
+    assert!(peak > 0.01, "the slices are silent");
+}
+
+#[test]
+fn a_samplers_channel_settings_tabs_each_change_the_sound() {
+    let mut h = Harness::new();
+    h.app.shell.open.rack = false;
+    h.app.shell.open.playlist = false;
+    h.app
+        .add_factory_channel("factory:kick-punch", "Kick Punch");
+    let ch = h.project().channels.len() - 1;
+    h.app.open_channel(ch);
+    h.run(6);
+    for tab in ["Sample", "Envelope", "Misc", "Arp"] {
+        h.click(tab);
+        h.run(2);
+        let before = h.project().channels[ch].state.clone();
+        let all = knobs(&h);
+        let mut changed = false;
+        for k in all.iter().take(4) {
+            h.drag(
+                k.rect.center(),
+                k.rect.center() - eframe::egui::vec2(0.0, 40.0),
+            );
+            if h.project().channels[ch].state != before {
+                changed = true;
+                break;
+            }
+        }
+        if tab == "Arp" && !changed {
+            // the Arp tab has buttons rather than knobs
+            h.click("Up");
+            changed = h.project().channels[ch].state != before;
+        }
+        assert!(
+            changed,
+            "{tab}: nothing on it changes the channel ({} knobs)",
+            all.len()
+        );
+    }
+}
+
+#[test]
+fn a_browser_sample_dragged_to_the_rack_or_playlist_is_added_there() {
+    let mut h = Harness::demo();
+    h.app.shell.open.roll = false;
+    h.app.shell.open.mixer = false;
+    h.run(3);
+    let chans = h.project().channels.len();
+    let item = h.get("Kick Hard").rect.center();
+    let rack = h.get("Channel Rack").rect;
+    h.drag(item, rack.center_bottom() - eframe::egui::vec2(0.0, 40.0));
+    h.run(3);
+    assert_eq!(
+        h.project().channels.len(),
+        chans + 1,
+        "the rack did not take the sample"
+    );
+    // to the playlist: an audio clip
+    h.app.shell.open.rack = false;
+    h.run(3);
+    let clips = h.project().playlist.clips.len();
+    let a = h.app.project.playlist.area.expect("the playlist was drawn");
+    let to = eframe::egui::pos2(a.left + 384.0 * 6.0 * a.zoom, a.top + a.row * 7.5);
+    let item = h.get("Kick Hard").rect.center();
+    h.drag(item, to);
+    h.run(3);
+    assert_eq!(
+        h.project().playlist.clips.len(),
+        clips + 1,
+        "the playlist did not take the sample"
+    );
+}
+
+#[test]
+fn keyboard_shortcuts_do_what_the_menus_say() {
+    use eframe::egui::{Key, Modifiers};
+    let mut h = Harness::demo();
+    let pats = h.project().patterns.len();
+    h.key(Key::F4);
+    assert_eq!(h.project().patterns.len(), pats + 1, "F4 makes a pattern");
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(h.project().patterns.len(), pats, "Ctrl+Z");
+    h.key_with(Key::Y, Modifiers::COMMAND);
+    assert_eq!(h.project().patterns.len(), pats + 1, "Ctrl+Y");
+    h.key_with(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    h.key_with(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert_eq!(h.project().patterns.len(), pats + 1, "Ctrl+Shift+Z");
+    // Ctrl+Z while a name is typed takes back the typing only
+    h.app.project.rename = Some((crate::project::RenameTarget::Channel(0), "Kick".into()));
+    h.run(3);
+    h.type_text("xyz");
+    h.key_with(Key::Z, Modifiers::COMMAND);
+    assert_eq!(
+        h.project().patterns.len(),
+        pats + 1,
+        "Ctrl+Z in a text box undid the project"
+    );
+    h.key(Key::Escape);
+    h.run(2);
+    // Ctrl+N with changes asks first
+    h.key_with(Key::N, Modifiers::COMMAND);
+    assert!(h.has("Unsaved changes"), "Ctrl+N would drop the changes");
+}

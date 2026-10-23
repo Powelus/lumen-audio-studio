@@ -1787,14 +1787,16 @@ impl App {
         if space {
             self.toggle_play();
         }
-        if undo {
+        // in a text box (a name being typed) Ctrl+Z takes back the typing, not an
+        // edit of the project
+        let typing = ctx.egui_wants_keyboard_input();
+        if undo && !typing {
             self.project.undo();
         }
-        if redo {
+        if redo && !typing {
             self.project.redo();
         }
         // the function keys the menus name, as in FL Studio: each toggles its window
-        let typing = ctx.egui_wants_keyboard_input();
         let f = |k: egui::Key| {
             !typing && ctx.input(|i| !i.modifiers.command && !i.modifiers.alt && i.key_pressed(k))
         };
