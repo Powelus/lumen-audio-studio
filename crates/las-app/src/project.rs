@@ -595,6 +595,7 @@ impl App {
             Ok(()) => {
                 self.project.error = None;
                 let path = self.project.path.clone();
+                self.forget_autosave(&path);
                 self.settings.remember(&path);
                 self.settings.save();
             }

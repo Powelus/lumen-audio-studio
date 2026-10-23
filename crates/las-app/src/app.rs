@@ -251,6 +251,7 @@ impl App {
             app.switch(Instrument::Facet);
         }
         app.new_project();
+        app.shell.leftovers = crate::settings::leftover_autosaves();
         // the windows of last time, unless the command line chooses
         let chooses = std::env::args().any(|a| a == "--open" || a == "--close" || a == "--add");
         if !chooses {
@@ -1977,6 +1978,15 @@ impl eframe::App for App {
         self.forget_old_windows();
         self.poll_midi();
         self.sync_bound();
+        // the window's own close button asks first, as File > Quit does
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit {
+            if self.project.dirty {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.guard(crate::menus::Action::Quit);
+            } else {
+                self.forget_autosave(&self.project.path.clone());
+            }
+        }
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

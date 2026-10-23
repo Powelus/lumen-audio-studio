@@ -262,6 +262,37 @@ impl Default for Autosave {
     }
 }
 
+/// The autosave of the project saved at `path` ("" for one not saved yet).
+pub fn autosave_file(path: &str) -> Option<PathBuf> {
+    let name = Path::new(path)
+        .file_stem()
+        .map_or("Untitled".to_string(), |s| s.to_string_lossy().into_owned());
+    Some(autosave_dir()?.join(format!("{name}.autosave.las")))
+}
+
+/// Autosaves left from a session that ended with changes not saved (a crash, or the
+/// power going): a clean quit or a save removes the project's autosave.
+pub fn leftover_autosaves() -> Vec<PathBuf> {
+    let Some(dir) = autosave_dir() else {
+        return Vec::new();
+    };
+    let mut all: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".autosave.las"))
+        .map(|p| {
+            let t = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (t, p)
+        })
+        .collect();
+    all.sort_by(|a, b| b.0.cmp(&a.0));
+    all.into_iter().map(|(_, p)| p).collect()
+}
+
 /// The folder autosaves go to.
 pub fn autosave_dir() -> Option<PathBuf> {
     Some(crate::presets::config_dir()?.join("autosave"))
@@ -309,15 +340,85 @@ impl App {
         let Some(l) = &self.project.loaded else {
             return;
         };
-        let name = Path::new(&l.path)
-            .file_stem()
-            .map_or("Untitled".to_string(), |s| s.to_string_lossy().into_owned());
+        let Some(to) = autosave_file(&l.path) else {
+            return;
+        };
         let Ok(bytes) = las_project::encode(&l.project, &l.samples, true) else {
             return;
         };
-        let to = dir.join(format!("{name}.autosave.las"));
         if std::fs::write(&to, bytes).is_ok() {
             self.status = format!("Autosaved to {}", to.display());
+        }
+    }
+
+    /// The open project's work is safe (saved, or the user chose to lose it): its
+    /// autosave goes, so it is not offered again at the next start.
+    pub(crate) fn forget_autosave(&self, path: &str) {
+        if let Some(f) = autosave_file(path) {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    /// Open an autosave as an unsaved project (saving asks where, so the autosave
+    /// folder is never written as if it were the project's file).
+    pub(crate) fn restore_autosave(&mut self, file: &Path) {
+        self.open_project(&file.to_string_lossy());
+        if let Some(l) = &mut self.project.loaded {
+            l.path = String::new();
+            self.project.path = String::new();
+            self.project.dirty = true;
+        }
+        self.settings
+            .recent
+            .retain(|r| !r.ends_with(".autosave.las"));
+        self.settings.save();
+        self.shell.status = format!("Restored {}. Save it to keep it.", file.display());
+    }
+
+    /// At the start: offer the autosaves of work that was not saved.
+    pub(crate) fn restore_window(&mut self, ctx: &egui::Context) {
+        if self.shell.leftovers.is_empty() {
+            return;
+        }
+        let mut open = None;
+        let mut drop_all = false;
+        let mut later = false;
+        egui::Window::new("Restore unsaved work")
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.label("Lumen did not close normally last time. These autosaves have work that was not saved:");
+                ui.add_space(4.0);
+                for f in &self.shell.leftovers {
+                    ui.horizontal(|ui| {
+                        let name = f.file_name().map(|n| n.to_string_lossy().replace(".autosave.las", ""));
+                        ui.label(name.unwrap_or_default());
+                        if ui.button("Open").clicked() {
+                            open = Some(f.clone());
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete them").clicked() {
+                        drop_all = true;
+                    }
+                    if ui.button("Later").clicked() {
+                        later = true;
+                    }
+                });
+            });
+        if let Some(f) = open {
+            self.shell.leftovers.clear();
+            self.restore_autosave(&f);
+        } else if drop_all {
+            for f in std::mem::take(&mut self.shell.leftovers) {
+                let _ = std::fs::remove_file(f);
+            }
+        } else if later {
+            self.shell.leftovers.clear();
         }
     }
 

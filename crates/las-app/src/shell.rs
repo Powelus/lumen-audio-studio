@@ -571,6 +571,8 @@ pub struct Shell {
     pub synth_id: Option<egui::Id>,
     /// A message shown in a window until the user closes it.
     pub notice: Option<String>,
+    /// Autosaves to offer at the start (see [`crate::settings::leftover_autosaves`]).
+    pub leftovers: Vec<std::path::PathBuf>,
     pub recent_target: Option<String>,
     placed: bool,
 }
@@ -631,6 +633,7 @@ impl Shell {
             synth_id: None,
             file_hover: None,
             notice: None,
+            leftovers: Vec::new(),
             placed: false,
             synth_footer: 0.0,
             last_screen: None,
@@ -1918,6 +1921,7 @@ impl App {
         self.history_window(ctx);
         self.settings_window(ctx);
         self.notice_window(ctx);
+        self.restore_window(ctx);
         self.drag_label(ctx);
         self.analyser_window(ctx);
         self.rename_dialog(ctx);

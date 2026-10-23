@@ -334,3 +334,48 @@ fn the_wheel_over_the_top_window_does_not_reach_the_one_under_it() {
         "the playlist's tracks changed"
     );
 }
+
+#[test]
+fn an_autosave_of_unsaved_work_is_offered_after_a_crash_and_opens() {
+    let mut h = Harness::demo();
+    h.app.settings.autosave_minutes = 1;
+    h.app.project.modify(true, |p| p.bpm = 99.0);
+    h.app.autosaved.last = std::time::Instant::now() - std::time::Duration::from_secs(120);
+    h.run(2);
+    let file = crate::settings::autosave_file("").unwrap();
+    assert!(file.exists(), "no autosave at {}", file.display());
+    // the app ends without quitting (a crash) and starts again
+    let mut h = h.restart();
+    h.run(3);
+    assert!(h.has("Restore unsaved work"), "the autosave is not offered");
+    h.click("Open");
+    h.run(3);
+    assert_eq!(h.project().bpm, 99.0);
+    assert!(
+        h.app.project.dirty && !h.app.project.has_file(),
+        "it opens as unsaved work"
+    );
+    assert!(!h.has("Restore unsaved work"));
+}
+
+#[test]
+fn a_clean_quit_leaves_nothing_to_restore() {
+    let mut h = Harness::demo();
+    h.app.settings.autosave_minutes = 1;
+    h.app.project.modify(true, |p| p.bpm = 99.0);
+    h.app.autosaved.last = std::time::Instant::now() - std::time::Duration::from_secs(120);
+    h.run(2);
+    let file = crate::settings::autosave_file("").unwrap();
+    assert!(file.exists());
+    // File > Quit asks about the changes; the user lets them go
+    h.app.guard(crate::menus::Action::Quit);
+    h.run(2);
+    assert!(h.has("Unsaved changes"));
+    h.app.project.dirty = false;
+    h.app.guard(crate::menus::Action::Quit);
+    h.run(1);
+    assert!(
+        !file.exists(),
+        "the autosave is still there after a clean quit"
+    );
+}
