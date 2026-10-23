@@ -435,6 +435,10 @@ impl MeterHold {
             // falls about 20 dB a second
             let dt = (now - self.at - Self::HOLD).min(0.1) as f32;
             self.hold = (self.hold * 0.1f32.powf(dt)).max(peak);
+            // below -80 dB it is gone: the meter stops moving (and asking to be drawn)
+            if self.hold < 1e-4 {
+                self.hold = 0.0;
+            }
         }
         if peak > 1.0 {
             self.clip = true;
@@ -772,7 +776,12 @@ pub struct MixerState {
     pub meters: Vec<MeterHold>,
     /// The insert whose name is being typed (double click on it), and the text so far.
     pub renaming: Option<(usize, String)>,
+    /// The height of the faders this frame, points.
+    pub fader_h: f32,
 }
+
+/// The height of a strip without its fader, points.
+const FIXED_H: f32 = 285.0;
 
 /// An effect slot being dragged to another slot.
 #[derive(Clone, Copy, Debug)]
@@ -801,9 +810,13 @@ pub fn draw(
         let [l, r] = peaks.get(i).copied().unwrap_or_default();
         m.update(l.max(r), now);
     }
-    if !peaks.is_empty() || state.meters.iter().any(|m| m.hold > 0.0) {
+    // drawn again only while a meter moves: sound comes in, or a hold line falls
+    let sounding = peaks.iter().any(|p| p[0] > 1e-5 || p[1] > 1e-5);
+    if sounding || state.meters.iter().any(|m| m.hold > 0.0) {
         ui.ctx().request_repaint();
     }
+    // the faders take the height the window leaves, so a strip never scrolls
+    state.fader_h = (ui.available_height() - FIXED_H).clamp(90.0, 190.0);
     // Ctrl+L, as in FL: the selected channel plays through the selected insert
     if let Some((c, _)) = channel {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
@@ -1317,7 +1330,7 @@ fn strip(
             .inner_margin(4.0)
             .show(ui, |ui| {
                 ui.set_width(58.0);
-                ui.set_min_height(420.0);
+                ui.set_min_height(state.fader_h + FIXED_H - 40.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new(if i == 0 {
@@ -1496,7 +1509,7 @@ fn strip(
                         }
                     }
                     let mut vol = t.volume;
-                    let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, 190.0);
+                    let r = crate::widgets::fader(ui, &mut vol, 1.25, peak, state.fader_h.max(90.0));
                     // the peak hold line over the fader's meter
                     if meter.hold > 0.0 {
                         let fr = r.rect;
@@ -2546,6 +2559,19 @@ mod tests {
         let last = p.mixer.len() - 1;
         p.mixer[last].name = "Used".into();
         assert_eq!(duplicate_insert(&mut p, last), None);
+    }
+
+    #[test]
+    fn a_falling_hold_reaches_zero_so_the_mixer_stops_redrawing() {
+        let mut m = MeterHold::default();
+        m.update(0.5, 0.0);
+        let mut t = 0.0;
+        while m.hold > 0.0 && t < 60.0 {
+            t += 1.0 / 60.0;
+            m.update(0.0, t);
+        }
+        assert_eq!(m.hold, 0.0, "the hold line is gone after {t} s");
+        assert!(t < 10.0);
     }
 
     #[test]

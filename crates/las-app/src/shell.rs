@@ -1789,8 +1789,9 @@ impl App {
             crate::raise::front(ctx, Win::Mixer, Win::Mixer.id());
             win(
                 "Mixer",
-                a.min + vec2(30.0, (a.height() - 470.0).max(10.0)),
-                vec2(a.width() - 60.0, 450.0),
+                // tall enough for whole strips with routing at 1080p
+                a.min + vec2(30.0, (a.height() - 640.0).max(10.0)),
+                vec2(a.width() - 60.0, 620.0f32.min(a.height() - 20.0)),
             )
             .id(Win::Mixer.id())
             .open(&mut open.mixer)
