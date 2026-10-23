@@ -664,7 +664,10 @@ fn a_saved_project_reopens_as_it_was_with_its_loop() {
     h.run(2);
     h.key_with(Key::S, Modifiers::COMMAND);
     assert!(!h.app.project.dirty, "Ctrl+S saved");
-    let saved = serde_json::to_value(h.project()).unwrap();
+    // what is saved: the project without the samples nothing uses
+    let mut sp = h.project().clone();
+    sp.drop_unused_samples();
+    let saved = serde_json::to_value(&sp).unwrap();
     h.menu(&["File", "New Ctrl+N"]);
     assert_eq!(h.app.project.playlist.song_loop, None);
     h.app.open_project(&path);
