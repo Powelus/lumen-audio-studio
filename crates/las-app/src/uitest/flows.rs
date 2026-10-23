@@ -1532,3 +1532,47 @@ fn piano_roll_mod_wheel_lane_draws_erases_and_undoes() {
         "no bend before the first point"
     );
 }
+
+#[test]
+fn the_step_graph_editor_sets_a_steps_release() {
+    let mut h = Harness::demo();
+    h.app.project.channel = 0;
+    h.run(2);
+    h.click("Graph editor");
+    h.click("Release");
+    h.run(2);
+    // the graph sits under the selected channel's steps
+    let graph = h
+        .find_prefix("Release: drag over")
+        .first()
+        .map(|n| n.rect)
+        .expect("the graph row");
+    let sel = (0..rows(&h).len())
+        .filter(|&i| rows(&h)[i].rect.top() < graph.top())
+        .last()
+        .unwrap();
+    let pat = h.app.project.pattern;
+    let ch = h.project().channels[sel].id.clone();
+    let step = |h: &Harness| {
+        h.project().patterns[pat].notes[&ch]
+            .iter()
+            .find(|n| n.step == Some(true))
+            .cloned()
+            .expect("a step that is on")
+    };
+    let n = step(&h);
+    let s = (n.pos / f64::from(las_project::TICKS_PER_STEP)).round() as usize;
+    let x = graph.left() + crate::steps::cell_offset(s) + 10.0;
+    // dragged low: a short release
+    h.drag(
+        eframe::egui::pos2(x, graph.top() + 10.0),
+        eframe::egui::pos2(x, graph.bottom() - 6.0),
+    );
+    let r = step(&h).release.expect("a release is set");
+    assert!(r < 0.2, "{r}");
+    // a right click puts it back to the middle
+    h.right_click_at(eframe::egui::pos2(x, graph.center().y));
+    assert_eq!(step(&h).release.unwrap_or(0.5), 0.5);
+    h.key_with(eframe::egui::Key::Z, eframe::egui::Modifiers::COMMAND);
+    assert!(step(&h).release.unwrap_or(0.5) < 0.2, "undo");
+}

@@ -206,22 +206,30 @@ pub enum GraphParam {
     Velocity,
     Pan,
     Fine,
+    /// Release velocity (how the note lets go, for instruments that use it).
+    Release,
 }
 
 impl GraphParam {
-    pub const ALL: [GraphParam; 3] = [GraphParam::Velocity, GraphParam::Pan, GraphParam::Fine];
+    pub const ALL: [GraphParam; 4] = [
+        GraphParam::Velocity,
+        GraphParam::Pan,
+        GraphParam::Fine,
+        GraphParam::Release,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             GraphParam::Velocity => "Velocity",
             GraphParam::Pan => "Pan",
             GraphParam::Fine => "Fine pitch",
+            GraphParam::Release => "Release",
         }
     }
 
     /// Whether the bars grow from the middle (pan, fine pitch) or the bottom.
     pub fn centred(self) -> bool {
-        self != GraphParam::Velocity
+        matches!(self, GraphParam::Pan | GraphParam::Fine)
     }
 
     /// A note's value as a height from 0 (bottom) to 1 (top).
@@ -230,6 +238,7 @@ impl GraphParam {
             GraphParam::Velocity => n.vel.clamp(0.0, 1.0),
             GraphParam::Pan => (n.pan.clamp(-1.0, 1.0) + 1.0) / 2.0,
             GraphParam::Fine => (n.fine.unwrap_or(0.0).clamp(-100.0, 100.0) + 100.0) / 200.0,
+            GraphParam::Release => n.release.unwrap_or(0.5).clamp(0.0, 1.0),
         }
     }
 
@@ -251,6 +260,11 @@ impl GraphParam {
                 id,
                 cents: h.map_or(0.0, |h| (h * 200.0 - 100.0).round()),
             },
+            GraphParam::Release => Edit::Lane {
+                id,
+                lane: crate::roll::Lane::Release,
+                value: h.unwrap_or(0.5),
+            },
         }
     }
 
@@ -269,6 +283,7 @@ impl GraphParam {
                 }
             }
             GraphParam::Fine => format!("{:+.0} cents", n.fine.unwrap_or(0.0)),
+            GraphParam::Release => format!("Release {:.0}%", n.release.unwrap_or(0.5) * 100.0),
         }
     }
 }
@@ -307,7 +322,7 @@ impl StepState {
 }
 
 /// The left of step `s`'s cell, from the left of the steps.
-fn cell_offset(s: usize) -> f32 {
+pub(crate) fn cell_offset(s: usize) -> f32 {
     s as f32 * (STEP + 3.0) + (s / 4) as f32 * 4.0
 }
 
@@ -667,7 +682,7 @@ fn top_bar(
         let g = ui
             .selectable_label(state.graph, "Graph editor")
             .on_hover_text(
-                "The graph editor: bars under the selected channel's steps for each step's velocity, pan and fine pitch",
+                "The graph editor: bars under the selected channel's steps for each step's velocity, pan, fine pitch and release",
             );
         if g.clicked() {
             state.graph = !state.graph;
@@ -1623,11 +1638,15 @@ mod tests {
             (GraphParam::Velocity, 0.25),
             (GraphParam::Pan, 0.0),
             (GraphParam::Fine, 0.75),
+            (GraphParam::Release, 0.2),
         ] {
             crate::roll::apply(&mut p, 0, &ch, &gp.edit(&id, Some(h)));
         }
         let n = note(&p);
         assert_eq!((n.vel, n.pan, n.fine), (0.25, -1.0, Some(50.0)));
+        assert_eq!(n.release, Some(0.2));
+        assert_eq!(GraphParam::Release.describe(&n), "Release 20%");
+        assert!(!GraphParam::Release.centred());
         assert_eq!(GraphParam::Pan.describe(&n), "100% left");
         assert!((GraphParam::Fine.height(&n) - 0.75).abs() < 1e-9);
         // right click puts each back
@@ -1636,6 +1655,7 @@ mod tests {
         }
         let n = note(&p);
         assert_eq!((n.vel, n.pan, n.fine), (0.78, 0.0, None));
+        assert_eq!(GraphParam::Release.height(&n), 0.5);
         // held to range
         crate::roll::apply(&mut p, 0, &ch, &GraphParam::Velocity.edit(&id, Some(4.0)));
         assert_eq!(note(&p).vel, 1.0);
