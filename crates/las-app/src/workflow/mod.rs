@@ -209,7 +209,7 @@ impl App {
     }
 
     /// Everything the palette can find.
-    fn palette_items(&self) -> Vec<Item> {
+    pub(crate) fn palette_items(&self) -> Vec<Item> {
         let mut items = palette::actions();
         for (i, (name, what)) in templates::BUILT_IN.iter().enumerate() {
             items.push(
@@ -243,6 +243,26 @@ impl App {
                 .hint("new channel"),
             );
         }
+        for i in las_host::available() {
+            let hint = format!("{} {}", i.format.tag(), i.vendor);
+            if i.is_instrument() {
+                items.push(
+                    Item::new(
+                        format!("Add {}", i.name),
+                        "Plugin",
+                        Cmd::AddPlugin(i.id.clone()),
+                    )
+                    .hint(hint.clone()),
+                );
+            }
+            if i.is_effect() {
+                items.push(
+                    Item::new(i.name.clone(), "Plugin", Cmd::AddPluginEffect(i.id.clone()))
+                        .hint(format!("{hint}, on the selected insert")),
+                );
+            }
+        }
+        items.push(Item::new("Plugin manager", "Window", Cmd::PluginManager));
         for d in las_dsp::fx::registry::descriptors() {
             items.push(
                 Item::new(d.name.clone(), "Effect", Cmd::AddEffect(d.id.clone()))
@@ -440,6 +460,19 @@ impl App {
                 let at = self.project.channel;
                 self.open_channel(at);
             }
+            Cmd::AddPlugin(id) if loaded => {
+                if let Some(i) = las_host::find(&id) {
+                    self.add_hosted_channel(&i);
+                    let at = self.project.channel;
+                    self.open_channel(at);
+                }
+            }
+            Cmd::AddPluginEffect(id) if loaded => {
+                if let Some(i) = las_host::find(&id) {
+                    self.add_hosted_effect(&i);
+                }
+            }
+            Cmd::PluginManager => self.plugin_manager.open = true,
             Cmd::AddEffect(id) if loaded => {
                 let insert = self.project.mixer_state.selected;
                 let slot = self
@@ -574,6 +607,14 @@ impl App {
     pub(crate) fn tools_menu(&mut self, ui: &mut Ui) {
         if ui.button("Quick search...      Ctrl+K").clicked() {
             self.wf.palette.show("");
+            ui.close();
+        }
+        if ui
+            .button("Plugin manager...")
+            .on_hover_text("Every plugin found, and the files that failed: turn plugins on or off")
+            .clicked()
+        {
+            self.plugin_manager.open = true;
             ui.close();
         }
         if ui

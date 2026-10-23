@@ -2,6 +2,17 @@
 
 Each version that lands on `main` is published as a GitHub Release. Versions with a `-` (for example `-alpha.1`) are pre-releases.
 
+## 0.2.0-alpha.64
+
+Plugins are found where they are installed, VST2 plugins work, and a plugin manager shows what was found and why a file was skipped.
+
+- Plugins: VST2 plugins (such as Sylenth1) load and play as instruments and effects, with MIDI notes, parameters and automation, their own window, and their full state (chunk) saved in the project, so a preset picked in the plugin's window comes back when the project opens.
+- Plugins: the scan looks in subfolders (vendor and product folders, up to six levels deep) and in the standard VST2, VST3 and CLAP folders of Windows, macOS and Linux, plus the folders you add in Settings. Before, only CLAP and VST3 files one folder deep were found, and the Windows VST folders were not looked in at all.
+- Plugins: each file is checked in a separate helper program with a time limit, so a plugin that crashes or hangs while it is scanned no longer takes the app with it. Results are kept in a cache, so a rescan only opens new or changed files.
+- Plugins: Settings shows the scan's progress ("Scanning 12/40: Sylenth1") and how many plugins were found, and lists each file that could not be used with the reason, for example 32-bit (not supported), made for another system, not a plugin, or a load error.
+- Plugins: the plugin manager (in Settings, or View) lists every plugin and failed file with name, vendor, format, type, path and status. Filter, sort by any column, turn plugins on or off (one by one, or all at once), and rescan everything or one file. Turned off plugins stay hidden from the menus after a rescan; new plugins start on.
+- Plugins: found plugins are in the Add menu and the rack's "+ Add channel" under Plugins, grouped by vendor, in the mixer's effect slot menu, in the browser's Plugins tab and in quick search (Ctrl+K). Each one shows a small VST2, VST3 or CLAP tag. When none are found, the menu says so and has a button to open Settings.
+
 ## 0.2.0-alpha.63
 
 Weave is easier to patch: choices that work every time, one cable per input, copy and paste, and modules that drop into cables.

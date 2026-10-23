@@ -1,0 +1,13 @@
+[package]
+name = "las-testvst2"
+description = "Lumen Audio Studio: a small VST2 plugin to test the host with"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints.rust]
+unsafe_code = "allow"

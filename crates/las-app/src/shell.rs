@@ -2001,6 +2001,8 @@ impl App {
                         ui.close();
                     }
                 }
+                ui.separator();
+                self.plugins_submenu(ui, true);
             });
             self.capture_button(ui);
             ui.label(

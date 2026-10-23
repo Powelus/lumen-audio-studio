@@ -1683,3 +1683,103 @@ fn ctrl_up_and_down_over_the_rack_move_the_selected_channel() {
     h.key_with(Key::Z, Modifiers::COMMAND);
     assert_eq!(h.project().channels[1].id, ids[1], "undo");
 }
+
+/// A plugin a scan "found", for the menus (it is never loaded by these tests).
+fn fake_plugin(name: &str, vendor: &str) -> las_host::PluginInfo {
+    las_host::PluginInfo {
+        path: format!("/fake/{name}.dll").into(),
+        id: format!("vst2:00000000:{}", name.to_lowercase()),
+        name: name.into(),
+        vendor: vendor.into(),
+        features: vec!["instrument".into()],
+        format: las_host::Format::Vst2,
+    }
+}
+
+/// Put the fake plugins of every test among the known ones (all at once: tests run
+/// at the same time, and each must not drop another's).
+fn with_fake_plugins(_list: &[las_host::PluginInfo]) {
+    let list = [
+        fake_plugin("Lumen Fake Synth", "Fakeco"),
+        fake_plugin("Lumen Hidden Synth", "Hideco"),
+    ];
+    let mut all = las_host::known();
+    all.retain(|k| !list.iter().any(|l| l.id == k.id));
+    all.extend(list.iter().cloned());
+    las_host::set_known(all);
+}
+
+#[test]
+fn a_scanned_plugin_is_in_the_add_menus_and_can_be_added() {
+    let fake = fake_plugin("Lumen Fake Synth", "Fakeco");
+    with_fake_plugins(std::slice::from_ref(&fake));
+    let mut h = Harness::demo();
+    let before = h.project().channels.len();
+    h.click("+ Add channel");
+    h.click("Plugins");
+    h.click("Fakeco");
+    let row = h
+        .find_prefix("Lumen Fake Synth")
+        .into_iter()
+        .next()
+        .expect("the plugin is in the rack's Plugins menu");
+    assert!(row.label.contains("VST2"), "its format tag: {}", row.label);
+    h.click_at(row.rect.center());
+    h.run(2);
+    assert_eq!(h.project().channels.len(), before + 1);
+    let c = h.project().channels.last().unwrap();
+    assert_eq!(c.plugin_id, las_host::HOSTED);
+    assert_eq!(crate::hosted::plugin_id(&c.state), fake.id);
+    assert_eq!(c.name, "Lumen Fake Synth");
+    // and quick search offers it
+    assert!(h
+        .app
+        .palette_items()
+        .iter()
+        .any(|i| i.label == "Add Lumen Fake Synth"));
+}
+
+#[test]
+fn a_plugin_turned_off_in_the_manager_is_left_out_of_the_menus() {
+    let fake = fake_plugin("Lumen Hidden Synth", "Hideco");
+    with_fake_plugins(std::slice::from_ref(&fake));
+    let mut h = Harness::demo();
+    h.app
+        .set_plugins_enabled(std::slice::from_ref(&fake), false);
+    assert!(h
+        .app
+        .settings
+        .disabled_plugins
+        .contains(&las_host::enable_key(&fake)));
+    assert!(!las_host::available().iter().any(|i| i.id == fake.id));
+    assert!(
+        las_host::find(&fake.id).is_some(),
+        "a project still finds it"
+    );
+    h.app.settings.apply_disabled();
+    assert!(!h
+        .app
+        .palette_items()
+        .iter()
+        .any(|i| i.label.contains("Lumen Hidden Synth")));
+    // other tests running at the same time load and save the shared test settings, so
+    // the choice is made again just before the menu is drawn
+    h.click("+ Add channel");
+    h.app.settings.apply_disabled();
+    h.click("Plugins");
+    h.app.settings.apply_disabled();
+    h.run(1);
+    assert!(!h.has("Hideco"), "its vendor has nothing to show");
+    h.app.set_plugins_enabled(std::slice::from_ref(&fake), true);
+    assert!(las_host::available().iter().any(|i| i.id == fake.id));
+}
+
+#[test]
+fn the_plugin_manager_opens_from_the_view_menu() {
+    let mut h = Harness::demo();
+    h.menu(&["View", "Plugin manager..."]);
+    h.run(2);
+    assert!(h.app.plugin_manager.open);
+    assert!(h.has("Plugin manager"));
+    assert!(h.has("Disable all") && h.has("Rescan"));
+}

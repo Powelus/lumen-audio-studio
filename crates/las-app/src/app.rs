@@ -135,6 +135,8 @@ pub struct App {
     pub(crate) weave: crate::weave_ui::WeaveEditor,
     /// The hosted plugins' own windows that are open.
     pub(crate) editors: Vec<crate::hosted::OpenEditor>,
+    /// The plugin manager window.
+    pub(crate) plugin_manager: crate::pluginmgr::Manager,
     /// The sample editor, while it is open.
     pub(crate) sample_editor: Option<crate::sampleedit::SampleEditor>,
     /// Command palette, capture, render, reference, tuner, templates, autosave.
@@ -170,6 +172,7 @@ impl App {
         style(&cc.egui_ctx);
         let wf = crate::workflow::Workflow::start();
         let settings = crate::settings::Settings::load();
+        settings.apply_disabled();
         let mut midi = crate::midi::MidiHub::new();
         midi.set_repaint(&cc.egui_ctx);
         let started = if sound {
@@ -234,6 +237,7 @@ impl App {
             analyser: None,
             weave: Default::default(),
             editors: Vec::new(),
+            plugin_manager: Default::default(),
             sample_editor: None,
             wf,
             seen_generation: 0,
@@ -1917,7 +1921,10 @@ impl App {
         if sounding || demo || self.shell.recorder.is_some() {
             return Some(Duration::from_millis(33));
         }
-        if !self.editors.is_empty() || self.project.is_building() {
+        if !self.editors.is_empty()
+            || self.project.is_building()
+            || las_host::scan_progress().is_some()
+        {
             return Some(Duration::from_millis(50));
         }
         // a slow heartbeat: autosave, a MIDI keyboard played while nothing else moves
@@ -2037,6 +2044,8 @@ impl eframe::App for App {
             a.collect_garbage();
         }
         self.serve_editors();
+        crate::hosted::serve_requests(self, ctx);
+        self.plugin_manager_window(ctx);
         if std::mem::take(&mut self.project.want_roll) {
             self.shell.open.show(crate::raise::Win::Roll);
         }

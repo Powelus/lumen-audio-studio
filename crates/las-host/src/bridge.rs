@@ -150,10 +150,10 @@ pub fn serve() -> io::Result<()> {
         match m.u8()? {
             QUIT => return Ok(()),
             LOAD => {
-                let format = if m.u8()? == 1 {
-                    Format::Vst3
-                } else {
-                    Format::Clap
+                let format = match m.u8()? {
+                    1 => Format::Vst3,
+                    2 => Format::Vst2,
+                    _ => Format::Clap,
                 };
                 let info = PluginInfo {
                     path: PathBuf::from(m.str()?),
@@ -329,7 +329,11 @@ impl Remote {
         };
         let mut req = Out::default();
         req.u8(LOAD)
-            .u8(u8::from(info.format == Format::Vst3))
+            .u8(match info.format {
+                Format::Clap => 0,
+                Format::Vst3 => 1,
+                Format::Vst2 => 2,
+            })
             .str(&info.path.to_string_lossy())
             .str(&info.id)
             .f64(sample_rate);

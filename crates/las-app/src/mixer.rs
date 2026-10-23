@@ -1180,16 +1180,31 @@ fn effect_list(ui: &mut Ui) -> Option<(String, bool)> {
             pick = Some((d.id.clone(), false));
         }
     }
-    let external: Vec<_> = las_host::known()
+    ui.label(RichText::new("Plugins").strong().color(p.accent_text));
+    let external: Vec<_> = las_host::available()
         .into_iter()
         .filter(las_host::PluginInfo::is_effect)
         .collect();
-    if !external.is_empty() {
-        ui.label(RichText::new("External").strong().color(p.accent_text));
+    if let Some(s) = crate::hosted::scanning_text() {
+        ui.label(RichText::new(s).weak());
     }
-    for info in external {
-        if ui.button(&info.name).on_hover_text(&info.vendor).clicked() {
-            pick = Some((info.id, true));
+    if external.is_empty() {
+        ui.label("No plugins found. Set plugin folders in Settings");
+        if ui.button("Open Settings").clicked() {
+            crate::hosted::request_settings(ui.ctx());
+            ui.close();
+        }
+    }
+    for (vendor, items) in crate::hosted::by_vendor(external) {
+        ui.label(RichText::new(vendor).size(11.0).color(p.muted));
+        for info in items {
+            if ui
+                .button(crate::hosted::menu_text(&info))
+                .on_hover_text(info.path.display().to_string())
+                .clicked()
+            {
+                pick = Some((info.id, true));
+            }
         }
     }
     pick
