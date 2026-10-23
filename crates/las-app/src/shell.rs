@@ -253,6 +253,11 @@ impl App {
                 return;
             }
         }
+        // over Weave's canvas: a sampler module plays it
+        if let Some(ch) = self.weave_drop_target(at, over) {
+            self.drop_on_weave(&item, ch, at);
+            return;
+        }
         if let Some(ch) = row {
             if self.replace_sample(ch, &item) {
                 return;
@@ -375,6 +380,21 @@ impl App {
         if !is_sampler {
             return false;
         }
+        if matches!(item, Dragged::Preset(..) | Dragged::Effect(_)) {
+            return false;
+        }
+        if let Some((id, name)) = self.add_dropped_sample(item) {
+            self.project
+                .modify(false, |p| set_channel_sample(p, ch, &id, &name));
+        }
+        self.project.channel = ch;
+        true
+    }
+
+    /// The sample a dropped item is, added to the project's samples (one undo step
+    /// begins): its id and name. None for what is not a sound, or a file that cannot
+    /// be read (the notice says why).
+    pub(crate) fn add_dropped_sample(&mut self, item: &Dragged) -> Option<(String, String)> {
         match item {
             Dragged::Factory(id, name) => {
                 let (id, name) = (*id, *name);
@@ -387,8 +407,8 @@ impl App {
                             ..Default::default()
                         });
                     }
-                    set_channel_sample(p, ch, id, name);
                 });
+                Some((id.to_string(), name.to_string()))
             }
             Dragged::File(path) => {
                 let name = item.name();
@@ -396,18 +416,18 @@ impl App {
                     Ok(b) => b,
                     Err(e) => {
                         self.shell.notice = Some(format!("{}: {e}", path.display()));
-                        return true;
+                        return None;
                     }
                 };
                 let (audio, bytes) = match las_engine::library::import_audio(bytes) {
                     Ok(x) => x,
                     Err(e) => {
                         self.shell.notice = Some(format!("{}: {e}", path.display()));
-                        return true;
+                        return None;
                     }
                 };
+                let id = las_project::create::uid("smp_");
                 self.project.modify_with_samples(true, |p, samples| {
-                    let id = las_project::create::uid("smp_");
                     p.samples.push(las_project::SampleRef {
                         id: id.clone(),
                         name: name.clone(),
@@ -422,13 +442,11 @@ impl App {
                             data: bytes,
                         },
                     );
-                    set_channel_sample(p, ch, &id, &name);
                 });
+                Some((id, name))
             }
-            Dragged::Preset(..) | Dragged::Effect(_) => return false,
+            Dragged::Preset(..) | Dragged::Effect(_) => None,
         }
-        self.project.channel = ch;
-        true
     }
 
     /// While something is dragged from the browser, its name follows the pointer.

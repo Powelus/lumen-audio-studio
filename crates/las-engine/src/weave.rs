@@ -5,9 +5,11 @@
 //! [`las_dsp::modular::param_id`].
 
 use crate::external::{Instrument, Note, ParamLines};
+use crate::factory::Audio;
 use las_dsp::engine::Cc;
-use las_dsp::modular::{split_param_id, Controls, Modular, Patch};
+use las_dsp::modular::{split_param_id, Controls, Kind, Modular, Patch, SampleBuf};
 use serde_json::Value;
+use std::sync::Arc;
 
 /// The `pluginId` of a Weave channel.
 pub const WEAVE_ID: &str = "weave";
@@ -21,6 +23,33 @@ pub fn patch_of(state: &Value) -> Patch {
         .unwrap_or_default()
 }
 
+/// The project samples a channel's patch plays (its samplers'), each once, in order.
+pub fn sample_ids(state: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for n in patch_of(state).nodes {
+        if let Some(id) = n.sample.filter(|_| n.kind == Kind::Sampler) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// A decoded sample as a sampler module reads it (mono plays on both sides).
+pub fn sample_buf(a: &Audio) -> Option<SampleBuf> {
+    let l: Arc<[f32]> = Arc::from(a.channels.first()?.clone());
+    let r: Arc<[f32]> = a
+        .channels
+        .get(1)
+        .map_or_else(|| l.clone(), |c| Arc::from(c.clone()));
+    Some(SampleBuf {
+        left: l,
+        right: r,
+        rate: a.sample_rate,
+    })
+}
+
 pub(crate) struct Weave {
     synth: Modular,
     lines: ParamLines,
@@ -28,9 +57,20 @@ pub(crate) struct Weave {
 }
 
 impl Weave {
+    #[cfg(test)]
     pub fn new(state: &Value, sr: f64) -> Self {
+        Self::with_samples(state, sr, &[])
+    }
+
+    /// A Weave whose samplers play `samples`: the audio of [`sample_ids`], in order.
+    pub fn with_samples(state: &Value, sr: f64, samples: &[Option<Arc<Audio>>]) -> Self {
+        let bufs = sample_ids(state)
+            .into_iter()
+            .zip(samples)
+            .filter_map(|(id, a)| Some((id, sample_buf(a.as_deref()?)?)))
+            .collect();
         Self {
-            synth: Modular::new(&patch_of(state), sr),
+            synth: Modular::with_samples(&patch_of(state), sr, bufs),
             lines: ParamLines::default(),
             controls: Controls::default(),
         }
@@ -149,6 +189,54 @@ mod tests {
         );
         // the level is at 0, so it is silent
         assert!(l.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn a_sampler_module_plays_the_channels_sample() {
+        use las_dsp::modular::{Cable, Node};
+        let mut smp = Node::new(2, Kind::Sampler, [0.0; 2]);
+        smp.sample = Some("smp_1".into());
+        let patch = Patch::new(
+            vec![
+                Node::new(1, Kind::Keys, [0.0; 2]),
+                smp,
+                Node::new(3, Kind::Output, [0.0; 2]).with("level", 1.0),
+            ],
+            vec![Cable::new(2, "left", 3, "left", 1.0)],
+            2,
+        );
+        let state = serde_json::json!({ "patch": patch.to_json() });
+        assert_eq!(sample_ids(&state), vec!["smp_1".to_string()]);
+        let audio = Audio {
+            channels: vec![vec![0.5; 4800]],
+            sample_rate: SR,
+        };
+        let mut w = Weave::with_samples(&state, SR, &[Some(Arc::new(audio))]);
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        w.process(
+            0.0,
+            &[Note::On {
+                offset: 0,
+                key: 60,
+                vel: 1.0,
+            }],
+            &mut l,
+            &mut r,
+        );
+        assert!(l[300].abs() > 0.1, "{}", l[300]);
+        // without its audio it is silent
+        let mut w = Weave::new(&state, SR);
+        w.process(
+            0.0,
+            &[Note::On {
+                offset: 0,
+                key: 60,
+                vel: 1.0,
+            }],
+            &mut l,
+            &mut r,
+        );
+        assert!(l.iter().all(|v| *v == 0.0));
     }
 
     #[test]

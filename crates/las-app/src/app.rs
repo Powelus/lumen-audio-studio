@@ -1821,6 +1821,14 @@ impl App {
         }
     }
 
+    /// Whether the pointer is over Weave's canvas, drawn a moment ago.
+    pub(crate) fn over_weave(&self, ctx: &egui::Context) -> bool {
+        let q = ctx.input(|i| i.pointer.hover_pos());
+        self.weave.drop_zone.is_some_and(|(r, _, t)| {
+            t.elapsed().as_secs_f32() < 0.5 && q.is_some_and(|q| r.contains(q))
+        })
+    }
+
     fn keys(&mut self, ctx: &egui::Context) {
         // letters typed into a text box (a name, the preset search) are not notes; a
         // key let go still ends its note
@@ -1836,6 +1844,10 @@ impl App {
             } = e
             {
                 if modifiers.command || modifiers.alt {
+                    continue;
+                }
+                // Shift and a letter over Weave's canvas is one of its shortcuts
+                if modifiers.shift && pressed && self.over_weave(ctx) {
                     continue;
                 }
                 if typing && pressed {

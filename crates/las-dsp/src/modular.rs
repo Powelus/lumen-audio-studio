@@ -60,6 +60,11 @@ pub enum Kind {
     Pan,
     /// What the synth plays: left and right (right follows left when it has no cable).
     Output,
+    /// Plays a sample of the project: from a start to an end, looped or not, at the
+    /// key's pitch or its own.
+    Sampler,
+    /// A dot on a cable: what comes in goes out, to tidy cables.
+    Reroute,
 }
 
 /// A parameter of a kind of module, in its own units.
@@ -154,12 +159,25 @@ impl ParamSpec {
 pub struct InputSpec {
     pub name: &'static str,
     pub unplugged: f32,
+    /// Takes any number of cables (summed); other inputs take one, and a new cable
+    /// plugged into one replaces the old.
+    pub many: bool,
 }
 
 const fn i(name: &'static str) -> InputSpec {
     InputSpec {
         name,
         unplugged: 0.0,
+        many: false,
+    }
+}
+
+/// An input that sums every cable plugged into it.
+const fn sum(name: &'static str) -> InputSpec {
+    InputSpec {
+        name,
+        unplugged: 0.0,
+        many: true,
     }
 }
 
@@ -184,6 +202,10 @@ pub const LADDER_MODES: [&str; 2] = ["24 dB", "12 dB"];
 /// The choices of a shaper's `shape`.
 pub const SHAPES: [&str; 3] = ["tanh", "fold", "clip"];
 /// The choices of a quantizer's `scale`.
+/// What the Math module does with its inputs (a is scaled first, the offset added last).
+pub const MATH_OPS: [&str; 6] = ["add", "subtract", "multiply", "min", "max", "average"];
+/// A symbol for each of [`MATH_OPS`].
+pub const MATH_SYMBOLS: [&str; 6] = ["+", "\u{2212}", "\u{d7}", "min", "max", "avg"];
 pub const SCALES: [&str; 4] = ["chromatic", "major", "minor", "pentatonic"];
 /// The notes of each scale, as a bit per semitone above the root.
 const SCALE_BITS: [u16; 4] = [0xfff, 0xab5, 0x5ad, 0x295];
@@ -197,7 +219,7 @@ static KEYS: Spec = Spec {
 };
 
 static OSC: Spec = Spec {
-    inputs: &[i("pitch"), i("fm"), i("sync"), i("pfm")],
+    inputs: &[sum("pitch"), i("fm"), i("sync"), i("pfm")],
     params: &[
         pstep("wave", 5, 2.0),
         p("tune", -24.0, 24.0, 0.0),
@@ -215,7 +237,7 @@ static OSC: Spec = Spec {
 };
 
 static FM: Spec = Spec {
-    inputs: &[i("pitch"), i("pm")],
+    inputs: &[sum("pitch"), i("pm")],
     params: &[
         plog("ratio", 0.125, 16.0, 1.0),
         p("tune", -24.0, 24.0, 0.0),
@@ -374,6 +396,7 @@ static VCA: Spec = Spec {
         InputSpec {
             name: "cv",
             unplugged: 1.0,
+            many: false,
         },
     ],
     params: &[p("gain", 0.0, 1.0, 1.0)],
@@ -381,7 +404,7 @@ static VCA: Spec = Spec {
 };
 
 static MIX: Spec = Spec {
-    inputs: &[i("a"), i("b"), i("c"), i("d")],
+    inputs: &[sum("a"), sum("b"), sum("c"), sum("d")],
     params: &[
         p("level_a", 0.0, 1.0, 1.0),
         p("level_b", 0.0, 1.0, 1.0),
@@ -393,7 +416,11 @@ static MIX: Spec = Spec {
 
 static MATH: Spec = Spec {
     inputs: &[i("a"), i("b")],
-    params: &[p("scale", -4.0, 4.0, 1.0), p("offset", -1.0, 1.0, 0.0)],
+    params: &[
+        p("scale", -4.0, 4.0, 1.0),
+        p("offset", -1.0, 1.0, 0.0),
+        pstep("op", 6, 0.0),
+    ],
     outputs: &["out"],
 };
 
@@ -415,14 +442,35 @@ static PAN: Spec = Spec {
     outputs: &["left", "right"],
 };
 
+static SAMPLER: Spec = Spec {
+    inputs: &[sum("pitch"), i("gate"), i("pos")],
+    params: &[
+        p("start", 0.0, 1.0, 0.0),
+        p("end", 0.0, 1.0, 1.0),
+        pstep("loop", 2, 0.0),
+        pstep("follow", 2, 1.0),
+        pint("root", 0, 127, 60.0),
+        pstep("trigger", 2, 0.0),
+        pstep("reverse", 2, 0.0),
+        p("gain", 0.0, 2.0, 1.0),
+    ],
+    outputs: &["left", "right"],
+};
+
+static REROUTE: Spec = Spec {
+    inputs: &[i("in")],
+    params: &[],
+    outputs: &["out"],
+};
+
 static OUTPUT: Spec = Spec {
-    inputs: &[i("left"), i("right")],
+    inputs: &[sum("left"), sum("right")],
     params: &[p("level", 0.0, 1.0, 0.8), p("width", 0.0, 2.0, 1.0)],
     outputs: &[],
 };
 
 impl Kind {
-    pub const ALL: [Kind; 24] = [
+    pub const ALL: [Kind; 26] = [
         Kind::Keys,
         Kind::Osc,
         Kind::Fm,
@@ -447,6 +495,8 @@ impl Kind {
         Kind::Compare,
         Kind::Pan,
         Kind::Output,
+        Kind::Sampler,
+        Kind::Reroute,
     ];
 
     pub fn spec(self) -> &'static Spec {
@@ -475,13 +525,15 @@ impl Kind {
             Kind::Compare => &COMPARE,
             Kind::Pan => &PAN,
             Kind::Output => &OUTPUT,
+            Kind::Sampler => &SAMPLER,
+            Kind::Reroute => &REROUTE,
         }
     }
 
     /// Which of [`CATEGORIES`] the kind is in.
     pub fn category(self) -> usize {
         match self {
-            Kind::Keys | Kind::Osc | Kind::Fm | Kind::Noise | Kind::Macro => 0,
+            Kind::Keys | Kind::Osc | Kind::Fm | Kind::Noise | Kind::Macro | Kind::Sampler => 0,
             Kind::Lfo | Kind::Env | Kind::Hold | Kind::Seq | Kind::Slew => 1,
             Kind::Filter | Kind::Ladder => 2,
             Kind::Shaper | Kind::Ring | Kind::Delay | Kind::Chorus | Kind::Reverb => 3,
@@ -498,9 +550,14 @@ impl Kind {
             (Kind::Ladder, "mode") => &LADDER_MODES,
             (Kind::Shaper, "shape") => &SHAPES,
             (Kind::Quant, "scale") => &SCALES,
+            (Kind::Math, "op") => &MATH_OPS,
             (Kind::Osc, "retrig") => &["free", "reset"],
             (Kind::Lfo, "retrig") => &["free", "on note"],
             (Kind::Env, "loop") => &["off", "on"],
+            (Kind::Sampler, "loop") => &["off", "on"],
+            (Kind::Sampler, "follow") => &["fixed", "key"],
+            (Kind::Sampler, "trigger") => &["one-shot", "gate"],
+            (Kind::Sampler, "reverse") => &["forward", "reverse"],
             _ => return None,
         })
     }
@@ -526,6 +583,14 @@ impl Kind {
         self.spec().outputs.iter().position(|o| *o == name)
     }
 
+    /// Whether an input takes more than one cable. A parameter does (each cable
+    /// moves it by its own amount, and they add up); a plain input says so in its spec.
+    pub fn accepts_many(self, input: &str) -> bool {
+        let s = self.spec();
+        s.params.iter().any(|p| p.name == input)
+            || s.inputs.iter().any(|i| i.name == input && i.many)
+    }
+
     pub fn param(self, name: &str) -> Option<&'static ParamSpec> {
         self.spec().params.iter().find(|p| p.name == name)
     }
@@ -542,6 +607,34 @@ pub struct Node {
     /// Where the module sits in the editor.
     #[serde(default)]
     pub pos: [f32; 2],
+    /// The project sample a sampler plays (its id in the project's samples).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<String>,
+}
+
+/// A labelled frame round some modules in the editor (it moves them together).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Frame {
+    pub label: String,
+    pub nodes: Vec<u32>,
+}
+
+/// A sample a sampler module plays: its channels and their rate.
+#[derive(Clone, Debug)]
+pub struct SampleBuf {
+    pub left: std::sync::Arc<[f32]>,
+    pub right: std::sync::Arc<[f32]>,
+    pub rate: f64,
+}
+
+impl SampleBuf {
+    pub fn len(&self) -> usize {
+        self.left.len().min(self.right.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl Node {
@@ -551,6 +644,7 @@ impl Node {
             kind,
             params: BTreeMap::new(),
             pos,
+            sample: None,
         }
     }
 
@@ -622,6 +716,9 @@ pub struct Patch {
     /// The level of the whole patch.
     #[serde(default = "one")]
     pub volume: f64,
+    /// Frames round modules in the editor (they do not change the sound).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<Frame>,
 }
 
 fn voices() -> usize {
@@ -683,11 +780,41 @@ impl Patch {
             legato: false,
             glide: 0.0,
             volume: 1.0,
+            frames: Vec::new(),
         }
     }
 
+    /// A patch read back. A single input with several cables (an older patch) keeps
+    /// only the first; inputs that sum keep them all.
     pub fn from_json(v: &serde_json::Value) -> Result<Self, String> {
-        serde_json::from_value(v.clone()).map_err(|e| e.to_string())
+        let mut p: Self = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+        p.one_cable_per_input();
+        Ok(p)
+    }
+
+    /// Drop every cable but the first into each input that takes one cable.
+    pub fn one_cable_per_input(&mut self) {
+        let mut seen: Vec<(u32, &str)> = Vec::new();
+        let keep: Vec<bool> = self
+            .cables
+            .iter()
+            .map(|c| {
+                let Some(k) = self.node(c.to).map(|n| n.kind) else {
+                    return true;
+                };
+                if !self.is_valid(c) || k.accepts_many(&c.input) {
+                    return true;
+                }
+                let key = (c.to, c.input.as_str());
+                if seen.contains(&key) {
+                    return false;
+                }
+                seen.push(key);
+                true
+            })
+            .collect();
+        let mut keep = keep.into_iter();
+        self.cables.retain(|_| keep.next().unwrap_or(true));
     }
 
     pub fn to_json(&self) -> serde_json::Value {
@@ -742,7 +869,7 @@ impl Patch {
                 .nodes
                 .iter()
                 .zip(&other.nodes)
-                .all(|(a, b)| a.id == b.id && a.kind == b.kind)
+                .all(|(a, b)| a.id == b.id && a.kind == b.kind && a.sample == b.sample)
             && self.cables.iter().zip(&other.cables).all(|(a, b)| {
                 a.from == b.from && a.to == b.to && a.output == b.output && a.input == b.input
             })
@@ -1154,12 +1281,14 @@ pub fn factory() -> Vec<(&'static str, Patch)> {
                     ),
                     m(7, Vca, &[]),
                     m(8, Output, &[("level", 0.6)]),
+                    m(9, Mix, &[("level_a", 0.5), ("level_b", 0.5)]),
                 ],
                 vec![
                     c(1, "pitch", 2, "pitch", 1.0),
                     c(1, "pitch", 3, "pitch", 1.0),
-                    c(2, "out", 5, "in", 0.5),
-                    c(3, "out", 5, "in", 0.5),
+                    c(2, "out", 9, "a", 1.0),
+                    c(3, "out", 9, "b", 1.0),
+                    c(9, "out", 5, "in", 1.0),
                     c(4, "out", 5, "cutoff", 0.1),
                     c(1, "gate", 6, "gate", 1.0),
                     c(5, "out", 7, "in", 1.0),
@@ -1970,6 +2099,8 @@ pub fn factory() -> Vec<(&'static str, Patch)> {
 /// A module ready to run: where its inputs come from and where its outputs go.
 struct Compiled {
     kind: Kind,
+    /// The sample a sampler plays.
+    sample: Option<SampleBuf>,
     /// For each input (plain inputs, then parameters): (output slot, amount).
     sources: Vec<Vec<(usize, f32)>>,
     /// The parameters' own values, from 0 to 1.
@@ -1997,7 +2128,7 @@ struct Graph {
 }
 
 impl Graph {
-    fn compile(patch: &Patch) -> Self {
+    fn compile(patch: &Patch, samples: &[(String, SampleBuf)]) -> Self {
         // the order: a module runs after the ones that feed it; what is left in a loop
         // runs in id order and reads its loop inputs from the sample before
         let n = patch.nodes.len();
@@ -2067,8 +2198,15 @@ impl Graph {
             if node.kind == Kind::Output && output.is_none() {
                 output = Some(nodes.len());
             }
+            let sample = node
+                .sample
+                .as_ref()
+                .filter(|_| node.kind == Kind::Sampler)
+                .and_then(|id| samples.iter().find(|(s, _)| s == id))
+                .map(|(_, b)| b.clone());
             nodes.push(Compiled {
                 kind: node.kind,
+                sample,
                 sources,
                 base,
                 value,
@@ -2363,11 +2501,22 @@ pub struct Modular {
     held: Vec<u8>,
     /// The pitch of the last note, where a new voice glides from.
     last_pitch: Option<f64>,
+    /// The samples the patch's samplers play, by sample id.
+    samples: Vec<(String, SampleBuf)>,
 }
 
 impl Modular {
+    /// A synth playing a patch; a single input with several cables plays only the first.
     pub fn new(patch: &Patch, sr: f64) -> Self {
-        let graph = Graph::compile(patch);
+        Self::with_samples(patch, sr, Vec::new())
+    }
+
+    /// [`Self::new`] with the samples its samplers play (by sample id).
+    pub fn with_samples(patch: &Patch, sr: f64, samples: Vec<(String, SampleBuf)>) -> Self {
+        let mut patch = patch.clone();
+        patch.one_cable_per_input();
+        let patch = &patch;
+        let graph = Graph::compile(patch, &samples);
         let voices = (0..MAX_VOICES)
             .map(|v| Voice::new(&graph, v as u32, sr))
             .collect();
@@ -2381,6 +2530,7 @@ impl Modular {
             controls: Controls::default(),
             held: Vec::with_capacity(128),
             last_pitch: None,
+            samples,
         }
     }
 
@@ -2395,7 +2545,8 @@ impl Modular {
             drop(self.apply_live(Box::new(patch.clone())));
         } else {
             let controls = self.controls;
-            *self = Self::new(patch, self.sr);
+            let samples = std::mem::take(&mut self.samples);
+            *self = Self::with_samples(patch, self.sr, samples);
             self.controls = controls;
         }
     }
@@ -2694,6 +2845,84 @@ fn plugged(c: &Compiled, k: usize) -> bool {
 #[inline]
 fn coef(t: f64, sr: f64) -> f64 {
     (-4.6 / (t * sr).max(1.0)).exp()
+}
+
+/// One sample of a sampler module: (left, right). Its state keeps the place it reads
+/// (`v[0]`, in frames), whether it plays (`v[1]`) and the gate before (`v[2]`).
+fn sampler_step(
+    c: &Compiled,
+    s: &mut NodeState,
+    outs: &[f32],
+    key_pitch: f64,
+    key_gate: bool,
+    trig: bool,
+    sr: f64,
+) -> (f32, f32) {
+    let Some(b) = &c.sample else {
+        return (0.0, 0.0);
+    };
+    let n = b.len();
+    if n < 2 {
+        return (0.0, 0.0);
+    }
+    let start = param(c, outs, 0).clamp(0.0, 1.0);
+    let end = param(c, outs, 1).clamp(0.0, 1.0);
+    let (lo, hi) = (start.min(end), start.max(end));
+    let looped = param(c, outs, 2) > 0.5;
+    let follow = param(c, outs, 3) > 0.5;
+    let root = param(c, outs, 4);
+    let gated = param(c, outs, 5) > 0.5;
+    let reverse = param(c, outs, 6) > 0.5;
+    let gain = param(c, outs, 7) as f32;
+    let last = (n - 1) as f64;
+    let (a, z) = (lo * last, (hi * last).max(lo * last + 1.0));
+    let gate = if plugged(c, 1) {
+        input(c, outs, 1, 0.0) > 0.0
+    } else {
+        key_gate
+    };
+    let rising = (gate && s.v[2] <= 0.0) || (trig && !plugged(c, 1));
+    s.v[2] = if gate { 1.0 } else { 0.0 };
+    s.stage = 1;
+    if rising {
+        s.v[0] = if reverse { z } else { a };
+        s.v[1] = 1.0;
+    } else if gated && !gate {
+        s.v[1] = 0.0;
+    }
+    if s.v[1] <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let pitch = if plugged(c, 0) {
+        f64::from(input(c, outs, 0, 0.0))
+    } else {
+        key_pitch
+    };
+    let semis = if follow {
+        pitch * 12.0 + 60.0 - root
+    } else {
+        0.0
+    };
+    let rate = b.rate / sr * memo(&mut s.memo[0], semis, |x| (x / 12.0).exp2());
+    // the position input moves where it reads by up to the whole length
+    let shift = f64::from(input(c, outs, 2, 0.0)) * (z - a);
+    let at = (s.v[0] + shift).clamp(0.0, last);
+    let i = at.floor() as usize;
+    let f = (at - i as f64) as f32;
+    let j = (i + 1).min(n - 1);
+    let l = b.left[i] + (b.left[j] - b.left[i]) * f;
+    let r = b.right[i] + (b.right[j] - b.right[i]) * f;
+    let step = if reverse { -rate } else { rate };
+    s.v[0] += step;
+    if s.v[0] > z || s.v[0] < a {
+        if looped {
+            let len = z - a;
+            s.v[0] = a + (s.v[0] - a).rem_euclid(len);
+        } else {
+            s.v[1] = 0.0;
+        }
+    }
+    (l * gain, r * gain)
 }
 
 /// One sample of a voice: (left, right).
@@ -3131,7 +3360,24 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
             Kind::Math => {
                 let a = input(c, outs, 0, 0.0);
                 let b = input(c, outs, 1, 0.0);
-                outs[c.out] = a * param(c, outs, 0) as f32 + b + param(c, outs, 1) as f32;
+                let a = a * param(c, outs, 0) as f32;
+                let y = match param(c, outs, 2) as u32 {
+                    0 => a + b,
+                    1 => a - b,
+                    2 => a * b,
+                    3 => a.min(b),
+                    4 => a.max(b),
+                    _ => (a + b) * 0.5,
+                };
+                outs[c.out] = y + param(c, outs, 1) as f32;
+            }
+            Kind::Reroute => {
+                outs[c.out] = input(c, outs, 0, 0.0);
+            }
+            Kind::Sampler => {
+                let (l, r) = sampler_step(c, s, outs, v.pitch, v.gate && !trig, trig, sr);
+                outs[c.out] = l;
+                outs[c.out + 1] = r;
             }
             Kind::Quant => {
                 let x = f64::from(input(c, outs, 0, 0.0));
@@ -3459,6 +3705,181 @@ mod tests {
         let back = m.apply_live(Box::new(other.clone()));
         assert_eq!(*back, other);
         assert_eq!(m.patch(), &base);
+    }
+
+    #[test]
+    fn a_single_input_keeps_one_cable_and_a_summing_input_keeps_all() {
+        let mut p = Patch::default();
+        let lfo = p.free_id();
+        p.nodes.push(Node::new(lfo, Kind::Lfo, [0.0; 2]));
+        // a second cable into the filter's single input, and into the output's summing one
+        p.cables.push(Cable::new(lfo, "out", 4, "in", 1.0));
+        p.cables.push(Cable::new(lfo, "out", 6, "left", 1.0));
+        let back = Patch::from_json(&p.to_json()).unwrap();
+        let into = |q: &Patch, to: u32, input: &str| {
+            q.cables
+                .iter()
+                .filter(|c| c.to == to && c.input == input)
+                .map(|c| c.from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(into(&back, 4, "in"), vec![2]);
+        assert_eq!(into(&back, 6, "left"), vec![5, lfo]);
+        assert!(!Kind::Filter.accepts_many("in"));
+        assert!(Kind::Filter.accepts_many("cutoff"));
+        assert!(Kind::Mix.accepts_many("a"));
+        // every factory patch already keeps to one cable per single input
+        for (name, f) in factory() {
+            let mut g = f.clone();
+            g.one_cable_per_input();
+            assert_eq!(g.cables, f.cables, "{name}");
+        }
+    }
+
+    /// A ramp from 0 to 1 over a second, at 48 kHz, as a sample.
+    fn ramp() -> SampleBuf {
+        let n = 48_000;
+        let v: std::sync::Arc<[f32]> = (0..n).map(|i| i as f32 / n as f32).collect();
+        SampleBuf {
+            left: v.clone(),
+            right: v,
+            rate: 48_000.0,
+        }
+    }
+
+    fn sampler_patch(params: &[(&str, f64)]) -> Patch {
+        let mut n = Node::new(2, Kind::Sampler, [0.0; 2]);
+        n.sample = Some("smp".into());
+        for (k, v) in params {
+            n.params.insert((*k).to_string(), *v);
+        }
+        Patch::new(
+            vec![
+                Node::new(1, Kind::Keys, [0.0; 2]),
+                n,
+                Node::new(3, Kind::Output, [0.0; 2]).with("level", 1.0),
+            ],
+            vec![
+                Cable::new(2, "left", 3, "left", 1.0),
+                Cable::new(2, "right", 3, "right", 1.0),
+            ],
+            1,
+        )
+    }
+
+    fn play_sampler(p: &Patch, key: u8, frames: usize) -> Vec<f32> {
+        let mut m = Modular::with_samples(p, SR, vec![("smp".into(), ramp())]);
+        m.note_on(key, 1.0);
+        let (mut l, mut r) = (vec![0.0; frames], vec![0.0; frames]);
+        m.render(&mut l, &mut r);
+        l
+    }
+
+    #[test]
+    fn a_sampler_plays_its_sample_at_the_key_pitch() {
+        let p = sampler_patch(&[]);
+        // at its root key it reads the sample as it is: a rising ramp
+        let l = play_sampler(&p, 60, 4800);
+        let (a, b) = (l[1000], l[3000]);
+        assert!(b > a && a > 0.0, "{a} {b}");
+        // an octave up it goes twice as fast
+        let up = play_sampler(&p, 72, 4800);
+        assert!(
+            (up[3000] / l[3000] - 2.0).abs() < 0.1,
+            "{} {}",
+            up[3000],
+            l[3000]
+        );
+        // fixed pitch: the key does not matter
+        let fixed = sampler_patch(&[("follow", 0.0)]);
+        let f = play_sampler(&fixed, 72, 4800);
+        assert!((f[3000] - l[3000]).abs() < 1e-3);
+        // reversed, it starts at the end and falls
+        let rev = play_sampler(&sampler_patch(&[("reverse", 1.0)]), 60, 4800);
+        assert!(rev[100] > 0.9 && rev[3000] < rev[100]);
+        // start and gain
+        let late = play_sampler(&sampler_patch(&[("start", 0.5), ("gain", 0.5)]), 60, 4800);
+        assert!((late[10] - 0.25).abs() < 0.02, "{}", late[10]);
+        // no sample: silence, not a crash
+        let mut m = Modular::new(&p, SR);
+        m.note_on(60, 1.0);
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        m.render(&mut l, &mut r);
+        assert!(l.iter().all(|x| *x == 0.0));
+    }
+
+    #[test]
+    fn a_sampler_loops_or_stops_and_a_gate_cuts_it() {
+        // a tenth of the sample, played for half a second
+        let once = play_sampler(&sampler_patch(&[("end", 0.1)]), 60, 24_000);
+        assert!(once[20_000].abs() < 1e-6, "one-shot stops at its end");
+        let looped = play_sampler(&sampler_patch(&[("end", 0.1), ("loop", 1.0)]), 60, 24_000);
+        assert!(looped[20_000] > 0.0, "a loop goes round");
+        // gate mode: silent once the key is let go
+        let p = sampler_patch(&[("trigger", 1.0), ("loop", 1.0)]);
+        let mut m = Modular::with_samples(&p, SR, vec![("smp".into(), ramp())]);
+        m.note_on(60, 1.0);
+        let (mut l, mut r) = (vec![0.0; 2000], vec![0.0; 2000]);
+        m.render(&mut l, &mut r);
+        assert!(l[1500] > 0.0);
+        m.note_off(60);
+        m.render(&mut l, &mut r);
+        assert!(l[1500].abs() < 1e-6);
+        // a reroute passes the signal through
+        let mut q = sampler_patch(&[]);
+        q.nodes.push(Node::new(4, Kind::Reroute, [0.0; 2]));
+        q.cables = vec![
+            Cable::new(2, "left", 4, "in", 1.0),
+            Cable::new(4, "out", 3, "left", 1.0),
+        ];
+        let through = play_sampler(&q, 60, 4800);
+        assert!(through[3000] > 0.0);
+        // the sample id is part of the shape: a new one builds the player again
+        let mut other = p.clone();
+        other.nodes[1].sample = Some("else".into());
+        assert!(!p.same_shape(&other));
+        // and it survives a round trip
+        assert_eq!(Patch::from_json(&p.to_json()).unwrap(), p);
+    }
+
+    #[test]
+    fn the_math_module_does_its_operation() {
+        // a = 0.5, b = 0.2
+        let ops = [0.7, 0.3, 0.1, 0.2, 0.5, 0.35];
+        for (op, want) in ops.into_iter().enumerate() {
+            let p = Patch::new(
+                vec![
+                    Node::new(1, Kind::Macro, [0.0; 2])
+                        .with("knob_1", 0.5)
+                        .with("knob_2", 0.2),
+                    Node::new(2, Kind::Math, [0.0; 2]).with("op", op as f64),
+                    Node::new(3, Kind::Output, [0.0; 2]).with("level", 1.0),
+                ],
+                vec![
+                    Cable::new(1, "out_1", 2, "a", 1.0),
+                    Cable::new(1, "out_2", 2, "b", 1.0),
+                    Cable::new(2, "out", 3, "left", 1.0),
+                ],
+                1,
+            );
+            let mut m = Modular::new(&p, SR);
+            m.note_on(60, 1.0);
+            let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+            m.render(&mut l, &mut r);
+            let first = {
+                let mut q = p.clone();
+                q.nodes[1].params.insert("op".into(), 0.0);
+                let mut m = Modular::new(&q, SR);
+                m.note_on(60, 1.0);
+                let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+                m.render(&mut l, &mut r);
+                l[200]
+            };
+            // the output may scale the level: compare against the add result
+            let got = l[200] / first * 0.7;
+            assert!((got - want as f32).abs() < 1e-3, "op {op}: {got} vs {want}");
+        }
+        assert_eq!(Kind::Math.choices("op").unwrap()[2], "multiply");
     }
 
     #[test]
@@ -4275,6 +4696,8 @@ mod control_audit {
                 ("step_8", 0.8),
             ],
             (Kind::Seq, _) => &[("rate", 50.0)],
+            // a and b are the same wave: a scaled tells min from max
+            (Kind::Math, "op") => &[("scale", 0.5)],
             _ => &[],
         }
     }
@@ -4329,6 +4752,10 @@ mod control_audit {
             // a wide oscillator, so that stereo controls have stereo to work on
             if let Some(n) = base.nodes.iter_mut().find(|n| n.id == 2) {
                 n.params.insert("voices".into(), 3.0);
+            }
+            // a sampler plays nothing without a sample: its own test covers it
+            if k == Kind::Sampler {
+                continue;
             }
             for ps in k.spec().params {
                 let sounds: Vec<Vec<f32>> = tries(ps)
