@@ -475,16 +475,16 @@ fn every_theme_applies_and_is_kept() {
     let mut h = Harness::demo();
     let mut seen = Vec::new();
     for t in crate::theme::themes() {
-        h.app.choose_theme(&t.id);
+        h.app.choose_theme(t.id);
         h.run(3);
         let p = crate::theme::pal();
-        seen.push((t.id.clone(), p.accent, p.panel2));
+        seen.push((t.id, p.accent, p.panel2));
     }
     let mut looks: Vec<_> = seen.iter().map(|s| (s.1, s.2)).collect();
     looks.sort_by_key(|c| (c.0.to_array(), c.1.to_array()));
     looks.dedup();
     assert!(looks.len() > 1, "every theme looks the same: {seen:?}");
-    let last = seen.last().unwrap().0.clone();
+    let last = seen.last().unwrap().0;
     let h = h.restart();
     assert_eq!(h.app.shell.theme, last, "the theme is not kept");
 }
