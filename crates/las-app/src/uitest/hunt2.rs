@@ -240,3 +240,49 @@ fn a_click_on_swing_or_tempo_without_moving_is_not_an_edit() {
     assert_eq!(h.app.project.undo.len(), undo + 1);
     assert!(h.project().bpm > 128.0);
 }
+
+#[test]
+fn instrument_window_knobs_are_heard_live_in_a_playing_song() {
+    // Zenith's face has knobs of its effects rack
+    for id in ["nebula", "lumapad", "sampler", "zenith"] {
+        let mut h = Harness::demo();
+        h.app.shell.open.rack = false;
+        h.app.shell.open.playlist = false;
+        h.app.add_channel(id);
+        let ch = h.project().channels.len() - 1;
+        h.app.open_channel(ch);
+        h.run(30);
+        h.app.project.has_player = true;
+        h.app.project.stale = false;
+        let all = knobs(&h);
+        let (mut live, mut rebuilt) = (Vec::new(), Vec::new());
+        for k in all.iter().take(if id == "zenith" { 60 } else { 14 }) {
+            let before = h.project().channels[ch].state.clone();
+            h.app.live_params.clear();
+            h.app.live_patches.clear();
+            h.press_at(k.rect.center());
+            h.move_to(k.rect.center() - eframe::egui::vec2(0.0, 30.0), 4);
+            let changed = h.project().channels[ch].state != before;
+            let sent = !h.app.live_params.is_empty() || !h.app.live_patches.is_empty();
+            h.release();
+            let name = k.label.lines().next().unwrap_or("").to_string();
+            if changed && sent && !h.app.project.stale {
+                live.push(name);
+            } else if changed {
+                rebuilt.push(name);
+            }
+            h.app.project.stale = false;
+        }
+        eprintln!("{id}: live {live:?}\n{id}: rebuilt {rebuilt:?}");
+        assert!(
+            !live.is_empty(),
+            "{id}: no knob is heard live; rebuilt {rebuilt:?}"
+        );
+        if id == "zenith" {
+            assert!(
+                live.iter().any(|n| n.starts_with("Size")),
+                "{id}: the rack's reverb size"
+            );
+        }
+    }
+}

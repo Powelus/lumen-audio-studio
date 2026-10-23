@@ -120,6 +120,8 @@ pub struct App {
     pub(crate) synth_dirty: bool,
     /// Channels handed a new patch live by the synth panel (kept for the tests).
     pub(crate) live_patches: Vec<usize>,
+    /// Instrument values sent live from an instrument window (kept for the tests).
+    pub(crate) live_params: Vec<(usize, String)>,
     /// Set when the user asked to quit and it is allowed.
     pub(crate) quit: bool,
     /// The app's settings (Options > Settings).
@@ -224,6 +226,7 @@ impl App {
             bound: None,
             synth_dirty: false,
             live_patches: Vec::new(),
+            live_params: Vec::new(),
             quit: false,
             settings,
             folders: Default::default(),

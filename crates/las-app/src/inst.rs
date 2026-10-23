@@ -278,7 +278,17 @@ impl App {
         state["preset"] = json!(preset);
         let same_rack = fx == old_fx || (old_fx.is_null() && items.is_empty());
         let plugin = c.plugin_id.clone();
-        let live = same_rack
+        // a knob of a rack effect: its value goes to the player as an automation
+        // clip's would (another change to the rack builds the player again)
+        let rack_live = same_rack || {
+            let mut before = c.state.clone();
+            if before.is_object() {
+                before["patch"] = state["patch"].clone();
+                before["preset"] = state["preset"].clone();
+            }
+            self.live_state(ch, &before, &state)
+        };
+        let live = rack_live
             && self.project.takes_live_edits()
             && self
                 .audio
@@ -296,6 +306,87 @@ impl App {
             self.project.modify_coalesced_live("synth", update);
         } else {
             self.project.modify_coalesced("synth", update);
+        }
+    }
+
+    /// Hand a playing project's channel the values that changed from `old` to `new` in
+    /// its state, when its instrument takes them all live. Whether it did (then the
+    /// player need not be built again).
+    pub(crate) fn live_state(&mut self, channel: usize, old: &Value, new: &Value) -> bool {
+        if !self.project.takes_live_edits() {
+            return false;
+        }
+        let Some(plugin) = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(channel))
+            .map(|c| c.plugin_id.clone())
+        else {
+            return false;
+        };
+        let (a, b) = (leaves(old), leaves(new));
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut sends = Vec::new();
+        for ((pa, la), (pb, lb)) in a.iter().zip(&b) {
+            if pa != pb {
+                return false;
+            }
+            if la == lb {
+                continue;
+            }
+            let Leaf::Number(v) = lb else {
+                return false;
+            };
+            if !las_engine::instrument::live_param(&plugin, pa) {
+                return false;
+            }
+            // the player takes the value over the parameter's range: one outside it
+            // would be cut short, so that builds the player again
+            let def = las_engine::pluginparams::param_def_in(&plugin, pa, old);
+            let n = def.to_normalized(*v);
+            if (def.from_normalized(n) - v).abs() > 1e-6 * v.abs().max(1.0) {
+                return false;
+            }
+            sends.push((pa.clone(), n));
+        }
+        for (path, n) in sends {
+            self.live_params.push((channel, path.clone()));
+            if let Some(a) = &mut self.audio {
+                a.send(crate::audio::Command::PluginParam {
+                    channel,
+                    path: path.into(),
+                    normalised: n,
+                });
+            }
+        }
+        true
+    }
+
+    /// Give a channel a new state (an edit in its window; `key` makes a drag one undo
+    /// step): heard at once when the instrument takes the changes live.
+    pub(crate) fn edit_state(&mut self, channel: usize, key: &str, state: Value) {
+        let Some(old) = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(channel))
+            .map(|c| c.state.clone())
+        else {
+            return;
+        };
+        let live = self.live_state(channel, &old, &state);
+        let f = move |p: &mut las_project::Project| {
+            if let Some(c) = p.channels.get_mut(channel) {
+                c.state = state;
+            }
+        };
+        if live {
+            self.project.modify_coalesced_live(key, f);
+        } else {
+            self.project.modify_coalesced(key, f);
         }
     }
 
@@ -361,13 +452,11 @@ impl App {
                 });
         });
         if !changes.is_empty() {
-            self.project.modify_coalesced("basic", move |p| {
-                if let Some(c) = p.channels.get_mut(channel) {
-                    for (path, v) in changes {
-                        set_at(&mut c.state, &path, v);
-                    }
-                }
-            });
+            let mut st = state;
+            for (path, v) in changes {
+                set_at(&mut st, &path, v);
+            }
+            self.edit_state(channel, "basic", st);
         }
     }
 }

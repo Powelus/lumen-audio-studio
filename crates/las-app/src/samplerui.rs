@@ -492,19 +492,13 @@ impl App {
             }
         }
         if let Some(st) = new_state {
-            self.project.modify_coalesced("sampler", move |pr| {
-                if let Some(ch) = pr.channels.get_mut(channel) {
-                    ch.state = st;
-                }
-            });
+            self.edit_state(channel, "sampler", st);
         } else if !changes.is_empty() {
-            self.project.modify_coalesced("sampler", move |pr| {
-                if let Some(ch) = pr.channels.get_mut(channel) {
-                    for (k, v) in changes {
-                        set_key(&mut ch.state, k, v);
-                    }
-                }
-            });
+            let mut st = state.clone();
+            for (k, v) in changes {
+                set_key(&mut st, k, v);
+            }
+            self.edit_state(channel, "sampler", st);
         }
     }
 

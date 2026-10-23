@@ -41,11 +41,7 @@ impl App {
     }
 
     pub(crate) fn write_state(&mut self, channel: usize, key: &'static str, state: Value) {
-        self.project.modify_coalesced(key, move |p| {
-            if let Some(c) = p.channels.get_mut(channel) {
-                c.state = state;
-            }
-        });
+        self.edit_state(channel, key, state);
     }
 
     /// LumaPad: sixteen pads in a 4 by 4 grid; click to play, right click for a

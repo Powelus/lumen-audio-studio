@@ -38,6 +38,7 @@ pub enum Garbage {
     Player(Box<Player>),
     WeavePatch(Box<las_dsp::modular::Patch>),
     ChannelPatch(Box<las_engine::instrument::ChannelPatch>),
+    Text(Box<str>),
     Preview(Box<Preview>),
     Reference(Box<RefTrack>),
 }
@@ -131,6 +132,13 @@ pub enum Command {
     WeavePatch {
         channel: usize,
         patch: Box<las_dsp::modular::Patch>,
+    },
+    /// One value of a channel's instrument, changed in its window while the project
+    /// plays (see [`las_engine::instrument::live_param`]).
+    PluginParam {
+        channel: usize,
+        path: Box<str>,
+        normalised: f64,
     },
     /// A synth channel's patch, changed in the synth panel while the project plays.
     ChannelPatch {
@@ -1148,6 +1156,16 @@ impl Renderer {
                     None => patch,
                 };
                 let _ = self.garbage.push(Garbage::WeavePatch(back));
+            }
+            Command::PluginParam {
+                channel,
+                path,
+                normalised,
+            } => {
+                if let Some(p) = &mut self.player {
+                    p.plugin_param(channel, &path, normalised);
+                }
+                let _ = self.garbage.push(Garbage::Text(path));
             }
             Command::ChannelPatch { channel, patch } => {
                 let back = match &mut self.player {

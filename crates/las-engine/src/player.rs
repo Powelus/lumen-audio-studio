@@ -259,6 +259,13 @@ impl Player {
         self.engine.channel_patch(channel, patch)
     }
 
+    /// One value of a channel's instrument, changed in its window while it plays
+    /// (`normalised` from 0 to 1 over the parameter's range).
+    pub fn plugin_param(&mut self, channel: usize, path: &str, normalised: f64) {
+        let t = self.now();
+        self.engine.plugin_param(channel, path, normalised, t);
+    }
+
     /// A performance controller (mod wheel, pitch bend, aftertouch) moved on a channel.
     pub fn controller(&mut self, channel: usize, cc: las_dsp::engine::Cc, value: f64) {
         let t = self.now();

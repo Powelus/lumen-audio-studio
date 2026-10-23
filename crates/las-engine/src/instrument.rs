@@ -107,6 +107,50 @@ impl ChannelPatch {
     }
 }
 
+/// Whether a channel's instrument takes the value at `path` of its state live, while it
+/// plays (through [`Instrument::automate`], as an automation clip would set it): a knob
+/// turned in an instrument window is then heard at once, without building the player
+/// again.
+pub fn live_param(plugin_id: &str, path: &str) -> bool {
+    let parts: Vec<&str> = path.split('.').collect();
+    let index = |i: usize| parts.get(i).is_some_and(|p| p.parse::<usize>().is_ok());
+    if parts.first() == Some(&"fx") {
+        // an effect of the instrument's own rack (not its switch)
+        return index(1) && parts.get(2) == Some(&"state") && parts.len() == 4;
+    }
+    match plugin_id {
+        "facet" | "mist" | "polaris" | "vortex" | "monolith" | "zenith" | "triosc" => {
+            parts.first() == Some(&"patch") && parts.len() > 1
+        }
+        "nebula" => match parts.as_slice() {
+            ["master"] => true,
+            ["layers", _, "level" | "pan"] => index(1),
+            ["layers", _, "patch", _, ..] => index(1),
+            ["macros", m] => matches!(
+                *m,
+                "cutoff" | "res" | "attack" | "release" | "drive" | "width" | "detune"
+            ),
+            _ => false,
+        },
+        "sampler" | las_project::slicer::SLICER_ID => matches!(
+            path,
+            "cutoff"
+                | "res"
+                | "tune"
+                | "fine"
+                | "velToVol"
+                | "attack"
+                | "decay"
+                | "sustain"
+                | "release"
+                | "start"
+                | "end"
+        ),
+        "lumapad" => matches!(parts.as_slice(), ["pads", _, "level" | "pan" | "tune"]) && index(1),
+        _ => false,
+    }
+}
+
 /// One synth voice engine with its place in the instrument (Nebula stacks layers).
 struct Layer {
     engine: SynthEngine,
@@ -126,6 +170,8 @@ struct Layer {
 /// An effect in the instrument's own rack, and where it sits in the state's list.
 struct RackSlot {
     index: usize,
+    /// The effect's id.
+    kind: String,
     fx: FxSlot,
     auto: SlotAuto,
 }
@@ -425,6 +471,7 @@ impl Instrument {
             );
             rack.push(RackSlot {
                 index,
+                kind: id.to_string(),
                 fx: slot,
                 auto,
             });
@@ -856,6 +903,24 @@ impl Instrument {
         first: bool,
         length: usize,
     ) -> bool {
+        self.automate_in(path, normalised, first, length, false)
+    }
+
+    /// Set a value of the instrument now, as a knob of its window has it: `normalised`
+    /// over the range of [`crate::pluginparams::param_def_in`] (an effect of the rack
+    /// has its own range there; automation clips keep the web version's).
+    pub fn set_live(&mut self, path: &str, normalised: f64, time: f64, length: usize) -> bool {
+        self.automate_in(path, &[(time, normalised)], true, length, true)
+    }
+
+    fn automate_in(
+        &mut self,
+        path: &str,
+        normalised: &[(f64, f64)],
+        first: bool,
+        length: usize,
+        rack_own_range: bool,
+    ) -> bool {
         if let Core::Hosted(h) = &mut self.core {
             return path
                 .strip_prefix("p.")
@@ -872,10 +937,17 @@ impl Instrument {
             let Ok(index) = index.parse::<usize>() else {
                 return false;
             };
-            // the rack's effects use the ranges the synth panels use for their names
             let Some(slot) = self.rack.iter_mut().find(|s| s.index == index) else {
                 return false;
             };
+            // automation clips use the ranges the synth panels use for their names (as
+            // the web version does); a knob turned live, the effect's own
+            let own = rack_own_range
+                .then(|| crate::fxauto::effect_param_def(&slot.kind, sub))
+                .flatten();
+            let def = own.unwrap_or(def);
+            let mapped = map_automation(Some(&def), normalised);
+            let points = &mapped[..];
             if sub != "mix" && slot.fx.unit.automate(sub, points, first) {
                 return true;
             }
