@@ -948,7 +948,7 @@ const LANE: f32 = 84.0;
 fn wheel_zoom(ui: &mut Ui, region: Rect, state: &mut RollState) {
     let Some(p) = ui
         .input(|i| i.pointer.hover_pos())
-        .filter(|p| region.contains(*p))
+        .filter(|p| region.contains(*p) && crate::widgets::on_top(ui, *p))
     else {
         return;
     };

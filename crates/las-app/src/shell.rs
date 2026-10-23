@@ -571,6 +571,8 @@ pub struct Shell {
     pub synth_id: Option<egui::Id>,
     /// A message shown in a window until the user closes it.
     pub notice: Option<String>,
+    /// Autosaves to offer at the start (see [`crate::settings::leftover_autosaves`]).
+    pub leftovers: Vec<std::path::PathBuf>,
     pub recent_target: Option<String>,
     placed: bool,
 }
@@ -631,6 +633,7 @@ impl Shell {
             synth_id: None,
             file_hover: None,
             notice: None,
+            leftovers: Vec::new(),
             placed: false,
             synth_footer: 0.0,
             last_screen: None,
@@ -956,7 +959,28 @@ impl App {
             .as_ref()
             .map_or(120.0, |l| l.project.bpm);
         let busy = self.project.is_building();
-        ui.horizontal_centered(|ui| {
+        // the master knob keeps its place at the right
+        let bar = egui::Layout::right_to_left(egui::Align::Center);
+        // as tall as the master knob; a second row adds to that
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 52.0), bar, |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+            ui.spacing_mut().interact_size.y = TOOL_H;
+                if let Some(a) = &self.audio {
+                    let (l, r) = a.meters.peaks();
+                    meter(ui, r, vec2(8.0, 26.0));
+                    meter(ui, l, vec2(8.0, 26.0));
+                }
+                let mut vol = self.volume;
+                if knob(ui, &mut vol, 0.0..=1.0, 0.8, "Master", false, &|v| {
+                    format!("{:.0}%", v * 100.0)
+                }) {
+                    self.volume = vol;
+                    self.send(Command::Volume(vol as f32));
+                }
+            // too narrow a window scrolls the rest sideways (Shift+wheel, or its bar)
+            // rather than running it under the knob or taking rows from the windows
+            let row = egui::Layout::left_to_right(egui::Align::Center);
+            egui::ScrollArea::horizontal().id_salt("toolbar").show(ui, |ui| ui.with_layout(row, |ui| {
             // every control in the toolbar is as tall as the others and sits on the
             // same centre line
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
@@ -1024,13 +1048,14 @@ impl App {
             });
             let r = lcd(ui, &format!("{:.2}", live.unwrap_or(bpm)), "BPM", 86.0);
             if r.drag_started() {
-                self.project.modify(true, |_| {});
+                self.project.armed = true;
             }
             if r.dragged() {
                 let d = -f64::from(r.drag_delta().y) * 0.25;
                 if d != 0.0 {
+                    let begin = std::mem::take(&mut self.project.armed);
                     self.project
-                        .modify(false, |pr| pr.bpm = (pr.bpm + d).clamp(30.0, 300.0));
+                        .modify(begin, |pr| pr.bpm = (pr.bpm + d).clamp(30.0, 300.0));
                 }
             }
             let r = r.on_hover_text(
@@ -1208,21 +1233,7 @@ impl App {
             {
                 self.shell.open.show(crate::raise::Win::Export);
             }
-            // master
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(a) = &self.audio {
-                    let (l, r) = a.meters.peaks();
-                    meter(ui, r, vec2(8.0, 26.0));
-                    meter(ui, l, vec2(8.0, 26.0));
-                }
-                let mut vol = self.volume;
-                if knob(ui, &mut vol, 0.0..=1.0, 0.8, "Master", false, &|v| {
-                    format!("{:.0}%", v * 100.0)
-                }) {
-                    self.volume = vol;
-                    self.send(Command::Volume(vol as f32));
-                }
-            });
+            }));
         });
         let _ = p;
     }
@@ -1665,10 +1676,11 @@ impl App {
 
     /// The floating windows. `area` is the workspace they sit in.
     pub(crate) fn windows(&mut self, ctx: &egui::Context, area: Rect) {
-        // the screen got smaller (a smaller window, a larger interface scale): windows
+        // the room got smaller (a smaller window, a larger interface scale): windows
         // that no longer fit are laid out afresh, at their first places and sizes, so
         // no edge, title or close button is left out of reach
-        let screen = ctx.content_rect();
+        // (the room under the toolbar, which also shrinks when the toolbar wraps)
+        let screen = area;
         let shrank = self.shell.last_screen.is_some_and(|s| {
             screen.width() < s.width() - 1.0 || screen.height() < s.height() - 1.0
         });
@@ -1909,6 +1921,7 @@ impl App {
         self.history_window(ctx);
         self.settings_window(ctx);
         self.notice_window(ctx);
+        self.restore_window(ctx);
         self.drag_label(ctx);
         self.analyser_window(ctx);
         self.rename_dialog(ctx);
@@ -1965,10 +1978,11 @@ impl App {
                     steps::mini_knob(ui, &mut sw, (0.0, 1.0), 0.0, "Swing", pal().accent);
                 ui.label(RichText::new("SWING").size(10.0).color(pal().muted));
                 if start {
-                    self.project.modify(true, |_| {});
+                    self.project.armed = true;
                 }
                 if ch {
-                    self.project.modify(false, |pr| pr.swing = sw);
+                    let begin = std::mem::take(&mut self.project.armed);
+                    self.project.modify(begin, |pr| pr.swing = sw);
                 }
             });
         });

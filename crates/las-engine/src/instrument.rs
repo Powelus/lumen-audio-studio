@@ -11,12 +11,14 @@ use crate::fxauto::{densify, map_automation, SlotAuto};
 use crate::param::Param;
 use crate::pluginparams::plugin_param_def;
 use crate::sampler::{PadBank, Sampler};
-use las_dsp::engine::{prepare_patch, Cc, Event, PatchError};
+use las_dsp::engine::{prepare_patch, Cc, Event, PatchError, PreparedPatch};
 use las_dsp::fm::{fm_engine, Fm, FmEngine};
 use las_dsp::fx::registry::{full_state, parse_params, EffectUnit, FxSlot};
 use las_dsp::mist::{mist_engine, Mist, MistEngine};
 use las_dsp::patch::merge_patch;
-use las_dsp::synth::{default_synth_json, prepare_synth_patch, synth_engine, SynthEngine};
+use las_dsp::synth::{
+    default_synth_json, prepare_synth_patch, synth_engine, PreparedSynthPatch, SynthEngine,
+};
 use las_dsp::wavetable::TableLibrary;
 use serde_json::Value;
 use std::sync::Arc;
@@ -76,6 +78,79 @@ pub fn stereo_pan_a(l: &mut [f32], r: &mut [f32], pans: &[f32]) {
     }
 }
 
+/// A synth channel's patch (Facet, Mist, or one of the wavetable family), parsed off the
+/// audio thread so that a player can take it while it plays: a knob turned in the
+/// synth panel is heard at once.
+pub enum ChannelPatch {
+    Facet(PreparedPatch<Fm>),
+    Mist(PreparedPatch<Mist>),
+    Synth(PreparedSynthPatch),
+}
+
+impl ChannelPatch {
+    /// The patch of a channel's state, for its plugin; `None` for a plugin that has no
+    /// such patch (Nebula's layers, samplers, Weave, ...).
+    pub fn prepare(
+        plugin_id: &str,
+        state: &Value,
+        tables: &mut TableLibrary,
+    ) -> Option<Result<Self, PatchError>> {
+        let patch = state.get("patch").unwrap_or(&Value::Null);
+        Some(match plugin_id {
+            "facet" => prepare_patch::<Fm>(patch).map(Self::Facet),
+            "mist" => prepare_patch::<Mist>(patch).map(Self::Mist),
+            "polaris" | "vortex" | "monolith" | "zenith" | "triosc" => {
+                prepare_synth_patch(tables, patch).map(Self::Synth)
+            }
+            _ => return None,
+        })
+    }
+}
+
+/// Whether a channel's instrument takes the value at `path` of its state live, while it
+/// plays (through [`Instrument::automate`], as an automation clip would set it): a knob
+/// turned in an instrument window is then heard at once, without building the player
+/// again.
+pub fn live_param(plugin_id: &str, path: &str) -> bool {
+    let parts: Vec<&str> = path.split('.').collect();
+    let index = |i: usize| parts.get(i).is_some_and(|p| p.parse::<usize>().is_ok());
+    if parts.first() == Some(&"fx") {
+        // an effect of the instrument's own rack (not its switch)
+        return index(1) && parts.get(2) == Some(&"state") && parts.len() == 4;
+    }
+    match plugin_id {
+        "facet" | "mist" | "polaris" | "vortex" | "monolith" | "zenith" | "triosc" => {
+            parts.first() == Some(&"patch") && parts.len() > 1
+        }
+        "nebula" => match parts.as_slice() {
+            ["master"] => true,
+            ["layers", _, "level" | "pan"] => index(1),
+            ["layers", _, "patch", _, ..] => index(1),
+            ["macros", m] => matches!(
+                *m,
+                "cutoff" | "res" | "attack" | "release" | "drive" | "width" | "detune"
+            ),
+            _ => false,
+        },
+        "sampler" | las_project::slicer::SLICER_ID => matches!(
+            path,
+            "cutoff"
+                | "res"
+                | "tune"
+                | "fine"
+                | "velToVol"
+                | "attack"
+                | "decay"
+                | "sustain"
+                | "release"
+                | "start"
+                | "end"
+        ),
+        "lumapad" => matches!(parts.as_slice(), ["pads", _, "level" | "pan" | "tune"]) && index(1),
+        _ => false,
+    }
+}
+
 /// One synth voice engine with its place in the instrument (Nebula stacks layers).
 struct Layer {
     engine: SynthEngine,
@@ -95,6 +170,8 @@ struct Layer {
 /// An effect in the instrument's own rack, and where it sits in the state's list.
 struct RackSlot {
     index: usize,
+    /// The effect's id.
+    kind: String,
     fx: FxSlot,
     auto: SlotAuto,
 }
@@ -394,6 +471,7 @@ impl Instrument {
             );
             rack.push(RackSlot {
                 index,
+                kind: id.to_string(),
                 fx: slot,
                 auto,
             });
@@ -689,6 +767,24 @@ impl Instrument {
         }
     }
 
+    /// Take a synth channel's patch live: the sound changes at once and the notes
+    /// sounding carry on. Safe on the audio thread (the patches trade places); the one
+    /// that comes back (the old one, or the one given if it does not fit this
+    /// instrument) is to be freed elsewhere.
+    pub fn channel_patch(&mut self, mut patch: Box<ChannelPatch>) -> Box<ChannelPatch> {
+        match (&mut self.core, &mut *patch) {
+            (Core::Facet(e), ChannelPatch::Facet(p)) => e.apply_patch(p),
+            (Core::Mist(e), ChannelPatch::Mist(p)) => e.apply_patch(p),
+            (Core::Layers(layers), ChannelPatch::Synth(p))
+                if self.plugin_id != "nebula" && layers.len() == 1 =>
+            {
+                layers[0].engine.apply_patch(p)
+            }
+            _ => {}
+        }
+        patch
+    }
+
     /// Whether the output is a mono signal (a channel then pans it with the
     /// mono law, which is 3 dB down in the middle).
     pub fn is_mono(&self) -> bool {
@@ -807,6 +903,24 @@ impl Instrument {
         first: bool,
         length: usize,
     ) -> bool {
+        self.automate_in(path, normalised, first, length, false)
+    }
+
+    /// Set a value of the instrument now, as a knob of its window has it: `normalised`
+    /// over the range of [`crate::pluginparams::param_def_in`] (an effect of the rack
+    /// has its own range there; automation clips keep the web version's).
+    pub fn set_live(&mut self, path: &str, normalised: f64, time: f64, length: usize) -> bool {
+        self.automate_in(path, &[(time, normalised)], true, length, true)
+    }
+
+    fn automate_in(
+        &mut self,
+        path: &str,
+        normalised: &[(f64, f64)],
+        first: bool,
+        length: usize,
+        rack_own_range: bool,
+    ) -> bool {
         if let Core::Hosted(h) = &mut self.core {
             return path
                 .strip_prefix("p.")
@@ -823,10 +937,17 @@ impl Instrument {
             let Ok(index) = index.parse::<usize>() else {
                 return false;
             };
-            // the rack's effects use the ranges the synth panels use for their names
             let Some(slot) = self.rack.iter_mut().find(|s| s.index == index) else {
                 return false;
             };
+            // automation clips use the ranges the synth panels use for their names (as
+            // the web version does); a knob turned live, the effect's own
+            let own = rack_own_range
+                .then(|| crate::fxauto::effect_param_def(&slot.kind, sub))
+                .flatten();
+            let def = own.unwrap_or(def);
+            let mapped = map_automation(Some(&def), normalised);
+            let points = &mapped[..];
             if sub != "mix" && slot.fx.unit.automate(sub, points, first) {
                 return true;
             }

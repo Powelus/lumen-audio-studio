@@ -181,3 +181,39 @@ pub fn plugin_param_def(plugin_id: &str, path: &str) -> ParamDef {
     }
     synth_param(path)
 }
+
+/// [`plugin_param_def`] for a channel whose state is `state`: an effect of the
+/// instrument's own rack (`fx.<i>.state.<param>`) has the range of that effect's
+/// parameter, so a clip or a knob covers what the effect does.
+pub fn param_def_in(plugin_id: &str, path: &str, state: &Value) -> ParamDef {
+    let rack = path.strip_prefix("fx.").and_then(|r| {
+        let (i, sub) = r.split_once(".state.")?;
+        let kind = state
+            .get("fx")?
+            .get(i.parse::<usize>().ok()?)?
+            .get("type")?
+            .as_str()?;
+        crate::fxauto::effect_param_def(kind, sub)
+    });
+    rack.unwrap_or_else(|| plugin_param_def(plugin_id, path))
+}
+
+#[cfg(test)]
+mod rack_tests {
+    use super::*;
+
+    #[test]
+    fn a_rack_effect_has_its_own_range() {
+        let st = json!({ "fx": [{ "type": "las-reverb", "state": { "decay": 2.2 } }] });
+        let d = param_def_in("zenith", "fx.0.state.decay", &st);
+        let n = d.to_normalized(2.2);
+        assert!((d.from_normalized(n) - 2.2).abs() < 1e-6, "{d:?}");
+        assert!(crate::instrument::live_param("zenith", "fx.0.state.size"));
+        assert!(!crate::instrument::live_param("zenith", "fx.0.on"));
+        assert!(crate::instrument::live_param(
+            "nebula",
+            "layers.1.patch.filters.0.cutoff"
+        ));
+        assert!(!crate::instrument::live_param("weave", "patch.x"));
+    }
+}

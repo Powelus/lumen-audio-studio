@@ -832,6 +832,11 @@ fn windows_shrink_to_fit_when_the_interface_is_made_bigger() {
     h.app.settings.ui_scale = 150;
     h.run(10);
     let screen = h.ctx.content_rect();
+    eprintln!(
+        "PLAY {:?} EXPORT {:?}",
+        h.get("Play (Space)").rect,
+        h.get("Export").rect
+    );
     for n in h
         .nodes
         .iter()

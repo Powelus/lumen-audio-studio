@@ -37,6 +37,8 @@ pub enum Garbage {
     Params(Box<Params>),
     Player(Box<Player>),
     WeavePatch(Box<las_dsp::modular::Patch>),
+    ChannelPatch(Box<las_engine::instrument::ChannelPatch>),
+    Text(Box<str>),
     Preview(Box<Preview>),
     Reference(Box<RefTrack>),
 }
@@ -130,6 +132,18 @@ pub enum Command {
     WeavePatch {
         channel: usize,
         patch: Box<las_dsp::modular::Patch>,
+    },
+    /// One value of a channel's instrument, changed in its window while the project
+    /// plays (see [`las_engine::instrument::live_param`]).
+    PluginParam {
+        channel: usize,
+        path: Box<str>,
+        normalised: f64,
+    },
+    /// A synth channel's patch, changed in the synth panel while the project plays.
+    ChannelPatch {
+        channel: usize,
+        patch: Box<las_engine::instrument::ChannelPatch>,
     },
     /// A controller (mod wheel, pitch bend, aftertouch) moved on one of the project's
     /// channels.
@@ -501,7 +515,8 @@ pub fn pick_input(name: &str, driver: &str) -> Option<cpal::Device> {
 
 pub struct Audio {
     /// The output stream, kept on the audio-control thread.
-    _stream: StreamHandle,
+    /// None for the tests' output, which they pull from themselves.
+    _stream: Option<StreamHandle>,
     commands: Producer<Command>,
     garbage: Consumer<Garbage>,
     pub meters: Arc<Meters>,
@@ -525,6 +540,33 @@ pub struct Audio {
 pub type MidiSender = Producer<Command>;
 
 impl Audio {
+    /// An output with no device, for the tests: they pull its sound from the
+    /// renderer that comes with it (stereo, 48 kHz).
+    #[cfg(test)]
+    pub(crate) fn headless() -> (Self, Renderer) {
+        let (ui_tx, ui_rx) = RingBuffer::<Command>::new(512);
+        let (_midi_tx, midi_rx) = RingBuffer::<Command>::new(512);
+        let (garbage_tx, garbage_rx) = RingBuffer::<Garbage>::new(64);
+        let (_tuner_tx, tuner_rx) = RingBuffer::<f32>::new(16);
+        let meters = Arc::new(Meters::default());
+        let r = Renderer::new(48_000.0, 2, ui_rx, midi_rx, garbage_tx, meters.clone());
+        let a = Self {
+            _stream: None,
+            commands: ui_tx,
+            garbage: garbage_rx,
+            meters,
+            sample_rate: 48_000,
+            device: "test".into(),
+            driver: "test".into(),
+            auto: false,
+            buffer: None,
+            note: None,
+            tuner: tuner_rx,
+            tables: TableLibrary::new(),
+        };
+        (a, r)
+    }
+
     /// Open the default output device. Returns the audio handle and the queue
     /// for MIDI input.
     #[allow(dead_code)]
@@ -719,7 +761,7 @@ impl Audio {
                 .map_err(|e| format!("cannot start the output: {e}"))?;
             Ok((
                 Self {
-                    _stream: StreamHandle::keep(stream),
+                    _stream: Some(StreamHandle::keep(stream)),
                     commands: ui_tx,
                     garbage: garbage_rx,
                     meters,
@@ -750,6 +792,26 @@ impl Audio {
     pub fn send(&mut self, c: Command) {
         // a full queue means the audio thread is stalled; dropping is safest
         let _ = self.commands.push(c);
+    }
+
+    /// Hand a playing project's synth channel its new patch (parsed here). Whether the
+    /// channel's instrument has such a patch.
+    pub fn channel_patch(
+        &mut self,
+        channel: usize,
+        plugin_id: &str,
+        state: &serde_json::Value,
+    ) -> bool {
+        match las_engine::instrument::ChannelPatch::prepare(plugin_id, state, &mut self.tables) {
+            Some(Ok(p)) => {
+                self.send(Command::ChannelPatch {
+                    channel,
+                    patch: Box::new(p),
+                });
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Parse a patch here and hand it over ready to use.
@@ -850,7 +912,7 @@ impl Engines {
     }
 }
 
-struct Renderer {
+pub(crate) struct Renderer {
     engine: Engines,
     sr: f64,
     channels: usize,
@@ -1095,6 +1157,23 @@ impl Renderer {
                 };
                 let _ = self.garbage.push(Garbage::WeavePatch(back));
             }
+            Command::PluginParam {
+                channel,
+                path,
+                normalised,
+            } => {
+                if let Some(p) = &mut self.player {
+                    p.plugin_param(channel, &path, normalised);
+                }
+                let _ = self.garbage.push(Garbage::Text(path));
+            }
+            Command::ChannelPatch { channel, patch } => {
+                let back = match &mut self.player {
+                    Some(p) => p.channel_patch(channel, patch),
+                    None => patch,
+                };
+                let _ = self.garbage.push(Garbage::ChannelPatch(back));
+            }
             Command::PlayerController { channel, cc, value } => {
                 if let Some(p) = &mut self.player {
                     p.controller(channel, cc, value);
@@ -1158,7 +1237,7 @@ impl Renderer {
     /// Fill the device's buffer. A panic while rendering does not take the audio
     /// thread (or the app) down: this buffer is silent, the project's player is let
     /// go of (the app sees the fault and builds a new one) and the next buffer plays.
-    fn fill<T>(&mut self, out: &mut [T])
+    pub(crate) fn fill<T>(&mut self, out: &mut [T])
     where
         T: Sample + FromSample<f32>,
     {

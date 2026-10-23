@@ -492,6 +492,26 @@ impl Engine {
         }
     }
 
+    pub(crate) fn channel_patch(
+        &mut self,
+        channel: usize,
+        patch: Box<crate::instrument::ChannelPatch>,
+    ) -> Box<crate::instrument::ChannelPatch> {
+        match self.channels.get_mut(channel) {
+            Some(ch) => ch.inst.channel_patch(patch),
+            None => patch,
+        }
+    }
+
+    /// Set one value of a channel's instrument now (see
+    /// [`crate::instrument::live_param`]), `normalised` as an automation clip has it.
+    pub(crate) fn plugin_param(&mut self, channel: usize, path: &str, normalised: f64, time: f64) {
+        let length = self.mixer.length();
+        if let Some(ch) = self.channels.get_mut(channel) {
+            ch.inst.set_live(path, normalised, time, length);
+        }
+    }
+
     pub(crate) fn note_off(&mut self, channel: usize, key: f64, time: f64) {
         if let Some(ch) = self.channels.get_mut(channel) {
             ch.inst.note_off(key, time);

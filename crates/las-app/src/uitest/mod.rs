@@ -5,6 +5,7 @@
 
 mod flows;
 mod glyphs;
+mod hunt2;
 mod weave;
 
 use crate::app::App;
@@ -43,6 +44,11 @@ pub struct Harness {
     pub pointer: Pos2,
     /// Things the frames sent to the clipboard.
     pub copied: Vec<String>,
+    /// The output's renderer, when the app has a (device-less) output: each frame
+    /// pulls a frame's worth of sound from it.
+    sound: Option<crate::audio::Renderer>,
+    /// The loudest sample of the last frame's sound.
+    pub heard: f32,
 }
 
 impl Harness {
@@ -86,9 +92,33 @@ impl Harness {
             size: egui::vec2(w, height),
             pointer: pos2(-10.0, -10.0),
             copied: Vec::new(),
+            sound: None,
+            heard: 0.0,
         };
         h.run(3);
         h
+    }
+
+    /// Give the app an output with no device; its sound is pulled frame by frame.
+    pub fn with_audio(mut self) -> Self {
+        let (a, r) = crate::audio::Audio::headless();
+        self.app.audio = Some(a);
+        self.sound = Some(r);
+        self.run(2);
+        self
+    }
+
+    /// Run frames until no player is being built (it is built on another thread).
+    pub fn settle(&mut self) {
+        for _ in 0..600 {
+            self.run(1);
+            if !self.app.project.is_building() && !self.app.project.stale {
+                self.run(2);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the player was never built");
     }
 
     /// The app with the demo song open.
@@ -127,6 +157,11 @@ impl Harness {
             eframe::App::ui(app, ui, frame);
         });
         out.textures_delta.clear();
+        if let Some(r) = &mut self.sound {
+            let mut buf = vec![0f32; 1600 * 2];
+            r.fill(&mut buf);
+            self.heard = buf.iter().fold(0.0, |m, x| m.max(x.abs()));
+        }
         for c in &out.platform_output.commands {
             if let egui::OutputCommand::CopyText(t) = c {
                 self.copied.push(t.clone());
