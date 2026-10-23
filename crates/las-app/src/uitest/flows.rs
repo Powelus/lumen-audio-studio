@@ -1307,7 +1307,7 @@ fn opens_a_dialog(label: &str) -> bool {
 
 /// Click every button of the window titled `title` once, checking the app never
 /// panics and the project stays valid.
-fn mash(h: &mut Harness, title: &str) -> usize {
+pub(super) fn mash(h: &mut Harness, title: &str) -> usize {
     let Some(win) = h
         .find_all(title)
         .into_iter()

@@ -1369,7 +1369,17 @@ fn strip(
                         if resp.clicked() {
                             state.selected = i;
                         }
-                        if resp.double_clicked() {
+                        // (a click on the pill re-lays the strip, so egui's own
+                        // double-click can be missed: two clicks in 0.4 s are one)
+                        let mut double = resp.double_clicked();
+                        if resp.clicked() {
+                            let key = egui::Id::unique("mixer-pill-click").with(i);
+                            let now = ui.input(|x| x.time);
+                            let last: Option<f64> = ui.data(|d| d.get_temp(key));
+                            double |= last.is_some_and(|t| now - t < 0.4);
+                            ui.data_mut(|d| d.insert_temp(key, now));
+                        }
+                        if double {
                             state.renaming = Some((i, t.name.clone()));
                         }
                         resp.on_hover_text(
@@ -1914,7 +1924,8 @@ fn route_button(ui: &mut Ui, project: &Project, sel: usize, i: usize, edits: &mu
     } else {
         format!("{from_name} cannot play into {to_name} (it would make a loop).")
     };
-    if resp.on_hover_text(tip).clicked() && can {
+    let resp = resp.on_hover_text(tip);
+    if resp.clicked() && can {
         edits.push(MixEdit::Begin);
         if let Some(index) = send {
             edits.push(MixEdit::RemoveSend { insert: sel, index });
