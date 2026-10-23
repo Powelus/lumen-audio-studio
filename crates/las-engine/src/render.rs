@@ -871,6 +871,12 @@ impl Engine {
                             .collect()
                     })
                     .unwrap_or_default()
+            } else if c.plugin_id == crate::weave::WEAVE_ID {
+                // the samples a Weave patch's samplers play, in the order it names them
+                crate::weave::sample_ids(&c.state)
+                    .iter()
+                    .map(|id| library.get(id))
+                    .collect()
             } else {
                 Vec::new()
             };

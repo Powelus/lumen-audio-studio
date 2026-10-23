@@ -432,7 +432,7 @@ impl Instrument {
                 Core::Layers(layers)
             }
             crate::weave::WEAVE_ID => Core::Hosted(Box::new(Hosted::new(
-                Box::new(crate::weave::Weave::new(state, sr)),
+                Box::new(crate::weave::Weave::with_samples(state, sr, &pad_samples)),
                 sr,
             ))),
             "sampler" | las_project::slicer::SLICER_ID => {

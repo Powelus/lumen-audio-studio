@@ -46,6 +46,10 @@ const MIN_ZOOM: f32 = 0.3;
 const MAX_ZOOM: f32 = 2.0;
 /// The width of the step arrows at each end of a choice, at zoom 1.
 const ARROW_W: f32 = 14.0;
+/// The height of a sampler's waveform, at zoom 1.
+const WAVE_H: f32 = 40.0;
+/// The height of a frame's label strip, at zoom 1.
+const FRAME_H: f32 = 20.0;
 /// How near (in points) a moved module must come to a cable to go into it.
 const INSERT_DIST: f32 = 14.0;
 
@@ -138,6 +142,26 @@ pub struct WeaveEditor {
     /// A press came while a popup or menu was open: the canvas does not take it, so
     /// the click that closes a menu does nothing else.
     swallow: bool,
+    /// The module heard alone, and the cables the output had before.
+    viewer: Option<(u32, Vec<Cable>)>,
+    /// A right button drag with a modifier: a knife or a lazy connection.
+    rgest: Option<RGesture>,
+    /// Each sample's waveform (min and max by column), by sample id.
+    peaks: std::collections::HashMap<String, Vec<(f32, f32)>>,
+    /// Where the canvas was last drawn, for the channel, and when: things let go over
+    /// it go to this patch.
+    pub(crate) drop_zone: Option<(Rect, usize, std::time::Instant)>,
+    /// A frame being dragged by its label.
+    frame_drag: Option<usize>,
+}
+
+/// What a right button drag with a modifier does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RGesture {
+    /// Shift: cut the cables the line crosses, from here.
+    Knife(Pos2),
+    /// Ctrl or Alt: connect this module to the one let go on.
+    Lazy(u32, Pos2),
 }
 
 #[cfg(test)]
@@ -185,6 +209,17 @@ impl WeaveEditor {
     /// The control being dragged now: (module, parameter).
     pub fn turning(&self) -> Option<(u32, usize)> {
         self.knob.as_ref().map(|k| (k.node, k.param))
+    }
+
+    /// The middle of frame `i`'s label strip.
+    pub fn frame_label_at(&self, p: &Patch, i: usize) -> Pos2 {
+        let r = frame_rect(p, &p.frames[i], self.origin, self.z()).expect("a frame");
+        pos2(r.center().x, r.min.y + FRAME_H * 0.5 * self.z())
+    }
+
+    /// The module heard alone.
+    pub fn viewing(&self) -> Option<u32> {
+        self.viewer.as_ref().map(|v| v.0)
     }
 
     /// The modules picked.
@@ -281,6 +316,8 @@ pub fn kind_name(k: Kind) -> &'static str {
         Kind::Compare => "Comparator",
         Kind::Pan => "Pan",
         Kind::Output => "Output",
+        Kind::Sampler => "Sampler",
+        Kind::Reroute => "Reroute",
     }
 }
 
@@ -352,12 +389,20 @@ pub fn port_tip(k: Kind, name: &str, output: bool) -> String {
             "a control signal, to move parameters or other inputs"
         }
         (true, _) => "the signal this module makes",
+        (false, "gate") if k == Kind::Sampler => {
+            "starts the sample as this goes up (unplugged: the key's gate)"
+        }
+        (false, "pitch") if k == Kind::Sampler => {
+            "pitch in, 1 an octave (unplugged: the key played)"
+        }
         (false, "pitch") => "pitch in, 1 an octave (from Keys, a sequencer or a quantizer)",
         (false, "fm") => "frequency modulation: a signal that bends the pitch",
         (false, "pfm") => "phase modulation: a signal that pushes the wave's phase",
         (false, "pm") => "phase modulation from another operator",
         (false, "sync") => "hard sync: the wave starts again as this goes up",
         (false, "gate") => "the envelope starts when this goes up and lets go when it falls",
+        (false, "pos") => "moves where the sample is read from, by up to its whole length",
+        (false, "in") if k == Kind::Reroute => "passes straight to out",
         (false, "trig") => "takes a new sample each time this goes up",
         (false, "clock") => "steps the sequence each time this goes up",
         (false, "reset") => "back to the first step when this goes up",
@@ -381,7 +426,13 @@ pub fn port_tip(k: Kind, name: &str, output: bool) -> String {
 
 /// The size of a module at zoom 1.
 fn node_size(k: Kind) -> Vec2 {
-    vec2(NODE_W, TITLE_H + k.rows() as f32 * ROW_H + 6.0)
+    let w = if k == Kind::Reroute { 90.0 } else { NODE_W };
+    let extra = if k == Kind::Sampler {
+        WAVE_H + 4.0
+    } else {
+        0.0
+    };
+    vec2(w, TITLE_H + k.rows() as f32 * ROW_H + 6.0 + extra)
 }
 
 fn node_rect(n: &Node, origin: Pos2, z: f32) -> Rect {
@@ -397,7 +448,7 @@ fn row_rect(r: &Rect, row: usize, z: f32) -> Rect {
     let y = row_y(r, row, z);
     Rect::from_min_size(
         pos2(r.min.x + 10.0 * z, y - 8.0 * z),
-        vec2(NODE_W - 20.0, 16.0) * z,
+        vec2(r.width() - 20.0 * z, 16.0 * z),
     )
 }
 
@@ -490,15 +541,13 @@ pub fn paste_nodes(p: &mut Patch, clip: &Patch, at: [f32; 2]) -> Vec<u32> {
     let min = clip.nodes.iter().fold([f32::MAX; 2], |m, n| {
         [m[0].min(n.pos[0]), m[1].min(n.pos[1])]
     });
-    let mut next = p.free_id();
     let mut map = Vec::new();
-    for n in &clip.nodes {
+    for (next, n) in (p.free_id()..).zip(clip.nodes.iter()) {
         let mut c = n.clone();
         map.push((n.id, next));
         c.id = next;
         c.pos = [at[0] + n.pos[0] - min[0], at[1] + n.pos[1] - min[1]];
         p.nodes.push(c);
-        next += 1;
     }
     let new = |old: u32| map.iter().find(|(o, _)| *o == old).map(|(_, n)| *n);
     for c in &clip.cables {
@@ -587,6 +636,268 @@ pub fn dissolve(p: &mut Patch, id: u32) {
         }
     }
 }
+
+/// Connect two modules by their best matching ports (Node Wrangler's lazy connect):
+/// `a`'s first output into `b`'s first plain input that is free (or sums), else its
+/// first plain input (the old cable is replaced).
+pub fn lazy_connect(p: &mut Patch, a: u32, b: u32) -> bool {
+    if a == b {
+        return false;
+    }
+    let (Some(na), Some(nb)) = (p.node(a), p.node(b)) else {
+        return false;
+    };
+    let (sa, sb) = (na.kind.spec(), nb.kind.spec());
+    let Some(out) = sa.outputs.first().copied() else {
+        return false;
+    };
+    let kb = nb.kind;
+    let free = sb.inputs.iter().find(|i| {
+        kb.accepts_many(i.name) || !p.cables.iter().any(|c| c.to == b && c.input == i.name)
+    });
+    let Some(input) = free.or(sb.inputs.first()).map(|i| i.name) else {
+        return false;
+    };
+    connect(p, a, out, b, input)
+}
+
+/// Whether segments `a`-`b` and `c`-`d` cross.
+fn crosses(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> bool {
+    let cross = |o: Pos2, p: Pos2, q: Pos2| (p - o).x * (q - o).y - (p - o).y * (q - o).x;
+    let (d1, d2) = (cross(c, d, a), cross(c, d, b));
+    let (d3, d4) = (cross(a, b, c), cross(a, b, d));
+    // touching counts (a knife through a curve's own point)
+    d1 * d2 <= 0.0 && d3 * d4 <= 0.0 && (d1 != d2 || d3 != d4)
+}
+
+/// The points of a cable's curve, for hit tests.
+fn cable_points(a: Pos2, b: Pos2, z: f32) -> Vec<Pos2> {
+    let [p0, p1, p2, p3] = bezier(a, b, z);
+    (0..=32)
+        .map(|i| {
+            let t = i as f32 / 32.0;
+            let u = 1.0 - t;
+            (p0.to_vec2() * (u * u * u)
+                + p1.to_vec2() * (3.0 * u * u * t)
+                + p2.to_vec2() * (3.0 * u * t * t)
+                + p3.to_vec2() * (t * t * t))
+                .to_pos2()
+        })
+        .collect()
+}
+
+/// Cut every cable the knife line from `a` to `b` crosses (screen points); how many.
+pub fn cut_cables(p: &mut Patch, origin: Pos2, z: f32, a: Pos2, b: Pos2) -> usize {
+    let before = p.cables.len();
+    let cut: Vec<CableKey> = p
+        .cables
+        .iter()
+        .filter(|c| {
+            let (Some(na), Some(nb)) = (p.node(c.from), p.node(c.to)) else {
+                return false;
+            };
+            let (Some(o), Some(i)) = (
+                na.kind.output_index(&c.output),
+                nb.kind.input_index(&c.input),
+            ) else {
+                return false;
+            };
+            let pts = cable_points(out_pos(na, origin, o, z), in_pos(nb, origin, i, z), z);
+            pts.windows(2).any(|w| crosses(w[0], w[1], a, b))
+        })
+        .map(cable_key)
+        .collect();
+    p.cables.retain(|c| !cut.contains(&cable_key(c)));
+    before - p.cables.len()
+}
+
+/// Swap what two modules feed (Node Wrangler's Alt+S): the cables out of `a` come
+/// from `b` and the other way round, output by output where both have it.
+pub fn swap_outputs(p: &mut Patch, a: u32, b: u32) -> bool {
+    let (Some(ka), Some(kb)) = (p.node(a).map(|n| n.kind), p.node(b).map(|n| n.kind)) else {
+        return false;
+    };
+    if a == b {
+        return false;
+    }
+    let (oa, ob) = (ka.spec().outputs, kb.spec().outputs);
+    let mut changed = false;
+    for c in &mut p.cables {
+        let (from, other, mine, theirs) = if c.from == a {
+            (a, b, oa, ob)
+        } else if c.from == b {
+            (b, a, ob, oa)
+        } else {
+            continue;
+        };
+        let _ = from;
+        if let Some(o) = mine.iter().position(|x| *x == c.output) {
+            if let Some(t) = theirs.get(o) {
+                c.from = other;
+                c.output = (*t).to_string();
+                changed = true;
+            }
+        }
+    }
+    // a module fed by itself after the swap is not kept
+    p.cables.retain(|c| c.from != c.to);
+    changed
+}
+
+/// Line the modules `ids` up: in a row (same top) when they spread more across than
+/// down, else in a column (same left).
+pub fn align_nodes(p: &mut Patch, ids: &[u32]) -> bool {
+    let pos: Vec<[f32; 2]> = p
+        .nodes
+        .iter()
+        .filter(|n| ids.contains(&n.id))
+        .map(|n| n.pos)
+        .collect();
+    if pos.len() < 2 {
+        return false;
+    }
+    let span = |k: usize| {
+        let (lo, hi) = pos.iter().fold((f32::MAX, f32::MIN), |(lo, hi), q| {
+            (lo.min(q[k]), hi.max(q[k]))
+        });
+        (lo, hi - lo)
+    };
+    let ((x0, w), (y0, h)) = (span(0), span(1));
+    for n in p.nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
+        if w >= h {
+            n.pos[1] = y0;
+        } else {
+            n.pos[0] = x0;
+        }
+    }
+    true
+}
+
+/// Put a reroute dot into a cable with its dot at `at` (canvas units); its id.
+pub fn add_reroute(p: &mut Patch, key: &CableKey, at: Pos2) -> Option<u32> {
+    // the dot of a reroute's input is at the left of its first row after the output
+    let off = vec2(0.0, TITLE_H + ROW_H * 1.5);
+    let id = add_node(p, Kind::Reroute, [at.x - off.x, at.y - off.y]);
+    if insert_into_cable(p, id, key) {
+        Some(id)
+    } else {
+        remove_node(p, id);
+        None
+    }
+}
+
+/// Put the modules `ids` in a new frame (out of any frame they were in).
+pub fn frame_nodes(p: &mut Patch, ids: &[u32], label: &str) -> bool {
+    let ids: Vec<u32> = ids
+        .iter()
+        .copied()
+        .filter(|id| p.node(*id).is_some())
+        .collect();
+    if ids.is_empty() {
+        return false;
+    }
+    for f in &mut p.frames {
+        f.nodes.retain(|n| !ids.contains(n));
+    }
+    p.frames.retain(|f| !f.nodes.is_empty());
+    p.frames.push(las_dsp::modular::Frame {
+        label: label.to_string(),
+        nodes: ids,
+    });
+    true
+}
+
+/// Where a frame is drawn: round its modules, with room for its label above.
+fn frame_rect(p: &Patch, f: &las_dsp::modular::Frame, origin: Pos2, z: f32) -> Option<Rect> {
+    let r = p
+        .nodes
+        .iter()
+        .filter(|n| f.nodes.contains(&n.id))
+        .map(|n| node_rect(n, origin, z))
+        .reduce(|a, b| a.union(b))?;
+    Some(Rect::from_min_max(
+        r.min - vec2(10.0, 10.0 + FRAME_H) * z,
+        r.max + vec2(10.0, 10.0) * z,
+    ))
+}
+
+/// Hear one module alone (Node Wrangler's viewer): its outputs go straight to the
+/// output's two sides in place of what was there, which is given back to put back.
+pub fn view_node(p: &mut Patch, id: u32) -> Option<Vec<Cable>> {
+    let out = p.nodes.iter().find(|n| n.kind == Kind::Output)?.id;
+    let outs = p.node(id)?.kind.spec().outputs;
+    let first = *outs.first()?;
+    if id == out {
+        return None;
+    }
+    let old: Vec<Cable> = p.cables.iter().filter(|c| c.to == out).cloned().collect();
+    p.cables.retain(|c| c.to != out);
+    p.cables.push(Cable::new(id, first, out, "left", 1.0));
+    p.cables.push(Cable::new(
+        id,
+        outs.get(1).copied().unwrap_or(first),
+        out,
+        "right",
+        1.0,
+    ));
+    Some(old)
+}
+
+/// Take the viewer out again: the output gets back the cables it had.
+pub fn unview(p: &mut Patch, old: Vec<Cable>) {
+    let Some(out) = p
+        .nodes
+        .iter()
+        .find(|n| n.kind == Kind::Output)
+        .map(|n| n.id)
+    else {
+        return;
+    };
+    p.cables.retain(|c| c.to != out);
+    let back: Vec<Cable> = old
+        .into_iter()
+        .filter(|c| p.node(c.from).is_some())
+        .collect();
+    p.cables.extend(back);
+}
+
+/// A sample let go at `at` (canvas units): the sampler `hit` (when it is one) takes it,
+/// else a new sampler there plays it into the output. The sampler's id.
+pub fn place_sample(p: &mut Patch, sample: &str, at: Pos2, hit: Option<u32>) -> u32 {
+    if let Some(id) = hit.filter(|id| p.node(*id).is_some_and(|n| n.kind == Kind::Sampler)) {
+        if let Some(n) = p.nodes.iter_mut().find(|n| n.id == id) {
+            n.sample = Some(sample.to_string());
+        }
+        return id;
+    }
+    let id = add_node(p, Kind::Sampler, [at.x, at.y]);
+    if let Some(n) = p.nodes.iter_mut().find(|n| n.id == id) {
+        n.sample = Some(sample.to_string());
+    }
+    if let Some(out) = p
+        .nodes
+        .iter()
+        .find(|n| n.kind == Kind::Output)
+        .map(|n| n.id)
+    {
+        connect(p, id, "left", out, "left");
+        connect(p, id, "right", out, "right");
+    }
+    id
+}
+
+/// Every Weave shortcut, for the help and the tooltips.
+pub const SHORTCUTS: &str = "Click a module: pick it. Shift or Ctrl click: pick more. Drag the empty canvas: pick in a box.\n\
+Ctrl+C / Ctrl+V: copy, paste at the pointer. Ctrl+D: duplicate. Delete: remove. Ctrl+A: pick all.\n\
+Drag a module onto a cable: put it in. Alt+drag a module: pull it out of its chain.\n\
+Ctrl+Shift+click a module: hear it alone (again to stop).\n\
+Ctrl+right drag (or Alt+right drag) from one module to another: connect them.\n\
+Shift+right drag across cables: cut them.\n\
+Ctrl+J: put the picked modules in a frame (drag its label to move them).\n\
+Alt+S: swap what two picked modules feed. Shift+A: line up the picked modules.\n\
+Shift+click a cable's dot: add a reroute dot. Double click it: pull the cable out.\n\
+Wheel: scroll, or turn the control under the pointer. Ctrl+wheel: zoom. Middle or right drag: scroll.\n\
+Drop a sample (from the browser, your files or the playlist's picker) on the canvas: a sampler plays it.";
 
 /// The zoom and scroll that frame every module in a view of this size.
 fn fit_view(p: &Patch, view: Vec2) -> (f32, Vec2) {
@@ -805,6 +1116,62 @@ impl App {
         }
     }
 
+    /// The Weave channel whose canvas is under a drop at `at`, drawn a moment ago.
+    pub(crate) fn weave_drop_target(
+        &self,
+        at: Option<Pos2>,
+        over: crate::shell::Over,
+    ) -> Option<usize> {
+        let (r, ch, t) = self.weave.drop_zone?;
+        (over == crate::shell::Over::Other
+            && t.elapsed().as_secs_f32() < 1.0
+            && at.is_some_and(|q| r.contains(q)))
+        .then_some(ch)
+    }
+
+    /// A sound let go on Weave's canvas: a sampler under it takes it, or a new sampler
+    /// there plays it into the output. One undo step.
+    pub(crate) fn drop_on_weave(
+        &mut self,
+        item: &crate::shell::Dragged,
+        channel: usize,
+        at: Option<Pos2>,
+    ) {
+        let Some((id, _)) = self.add_dropped_sample(item) else {
+            return;
+        };
+        let Some(state) = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(channel))
+            .map(|c| c.state.clone())
+        else {
+            return;
+        };
+        let mut patch = patch_of(&state);
+        let (origin, z) = (self.weave.origin, self.weave.z());
+        let q = at.unwrap_or(origin + self.weave.view * 0.5);
+        let hit = patch
+            .nodes
+            .iter()
+            .rev()
+            .find(|n| node_rect(n, origin, z).contains(q))
+            .map(|n| n.id);
+        let world = ((q - origin) / z).to_pos2();
+        let node = place_sample(&mut patch, &id, world, hit);
+        self.weave.picked = vec![node];
+        let value = patch.to_json();
+        self.project.modify(false, |p| {
+            if let Some(c) = p.channels.get_mut(channel) {
+                if !c.state.is_object() {
+                    c.state = json!({});
+                }
+                c.state["patch"] = value;
+            }
+        });
+    }
+
     /// Tell the player about new values of a Weave patch, so they are heard at once.
     pub(crate) fn send_weave_live(&mut self, channel: usize, patch: &Patch) {
         #[cfg(test)]
@@ -829,6 +1196,49 @@ impl App {
         };
         let mut patch = patch_of(&state);
         let before = patch.clone();
+        // the project's samples (to pick one for a sampler) and the waveforms of the
+        // ones the samplers play
+        let sample_list: Vec<(String, String)> = self
+            .project
+            .loaded
+            .as_ref()
+            .map(|l| {
+                l.project
+                    .samples
+                    .iter()
+                    .map(|s| (s.id.clone(), s.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // the audio clip channels' samples, for a clip dragged from the playlist's picker
+        let clip_samples: Vec<(String, Option<String>)> = self
+            .project
+            .loaded
+            .as_ref()
+            .map(|l| {
+                l.project
+                    .channels
+                    .iter()
+                    .map(|c| (c.id.clone(), c.sample_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for n in &patch.nodes {
+            if let Some(id) = n
+                .sample
+                .as_ref()
+                .filter(|id| !self.weave.peaks.contains_key(*id))
+            {
+                let audio = las_engine::factory::render_factory(id, 44_100.0).or_else(|| {
+                    let l = self.project.loaded.as_ref()?;
+                    las_engine::library::decode_wav(&l.samples.get(id)?.data)
+                });
+                let peaks = audio
+                    .map(|a| crate::samplerui::peaks(&a, 80))
+                    .unwrap_or_default();
+                self.weave.peaks.insert(id.clone(), peaks);
+            }
+        }
         let ed = &mut self.weave;
         let p = pal();
         let skin = crate::skin::current();
@@ -902,6 +1312,8 @@ impl App {
             {
                 ed.fit = true;
             }
+            ui.label(RichText::new(" ? ").strong())
+                .on_hover_text(SHORTCUTS);
             ui.separator();
             ui.add_enabled_ui(!patch.mono, |ui| {
                 ui.label("Voices");
@@ -969,6 +1381,7 @@ impl App {
         let (canvas, bg) =
             ui.allocate_exact_size(ui.available_size(), sense(Sense::click_and_drag()));
         ed.view = canvas.size();
+        ed.drop_zone = Some((canvas, channel, std::time::Instant::now()));
         if ed.fit {
             (ed.zoom, ed.pan) = fit_view(&patch, canvas.size());
             ed.fit = false;
@@ -1048,7 +1461,11 @@ impl App {
         }
         // the background: the main button picks modules in a box, the middle or right
         // button scrolls
-        let busy = ed.dragging.is_some() || ed.knob.is_some() || ed.moving.is_some();
+        let busy = ed.dragging.is_some()
+            || ed.knob.is_some()
+            || ed.moving.is_some()
+            || ed.rgest.is_some()
+            || ed.frame_drag.is_some();
         if (bg.dragged_by(PointerButton::Middle) || bg.dragged_by(PointerButton::Secondary))
             && !busy
         {
@@ -1109,6 +1526,10 @@ impl App {
         let menu_at = ed.menu_at;
         let mut select_all = false;
         let mut fit = false;
+        let mut frame_now = false;
+        let mut swap_now = false;
+        let mut align_now = false;
+        let picked_two = ed.picked.len() == 2;
         bg.context_menu(|ui| {
             ui.menu_button("Add module here", |ui| {
                 if let Some(k) = add_menu(ui, &mut ed.search) {
@@ -1153,6 +1574,41 @@ impl App {
                 delete = true;
                 ui.close();
             }
+            if ui
+                .add_enabled(
+                    has_picked,
+                    egui::Button::new("Frame").shortcut_text("Ctrl+J"),
+                )
+                .on_hover_text(
+                    "Put the picked modules in a labelled frame that moves them together",
+                )
+                .clicked()
+            {
+                frame_now = true;
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    has_picked,
+                    egui::Button::new("Align").shortcut_text("Shift+A"),
+                )
+                .on_hover_text("Line the picked modules up in a row or a column")
+                .clicked()
+            {
+                align_now = true;
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    picked_two,
+                    egui::Button::new("Swap outputs").shortcut_text("Alt+S"),
+                )
+                .on_hover_text("The two picked modules swap what they feed")
+                .clicked()
+            {
+                swap_now = true;
+                ui.close();
+            }
             ui.separator();
             if ui
                 .add(egui::Button::new("Select all").shortcut_text("Ctrl+A"))
@@ -1165,10 +1621,24 @@ impl App {
                 fit = true;
                 ui.close();
             }
+            ui.menu_button("Shortcuts", |ui| {
+                ui.label(SHORTCUTS);
+            });
         });
         // the keys, while the pointer is over the canvas and nothing is being typed
         let typing = ui.ctx().egui_wants_keyboard_input();
         if over_canvas && !typing {
+            let (j, swap, align) = ui.input(|i| {
+                let cmd = i.modifiers.command;
+                (
+                    cmd && i.key_pressed(egui::Key::J),
+                    i.modifiers.alt && i.key_pressed(egui::Key::S),
+                    i.modifiers.shift && !cmd && i.key_pressed(egui::Key::A),
+                )
+            });
+            frame_now |= j;
+            swap_now |= swap;
+            align_now |= align;
             let (c, v, d, a, del, esc) = ui.input(|i| {
                 let k = |key| i.key_pressed(key);
                 let ev = |f: fn(&egui::Event) -> bool| i.events.iter().any(f);
@@ -1205,6 +1675,16 @@ impl App {
         if select_all {
             ed.picked = patch.nodes.iter().map(|n| n.id).collect();
         }
+        if frame_now && frame_nodes(&mut patch, &ed.picked, "Frame") {
+            discrete = true;
+        }
+        if align_now && align_nodes(&mut patch, &ed.picked) {
+            discrete = true;
+        }
+        if swap_now && ed.picked.len() == 2 && swap_outputs(&mut patch, ed.picked[0], ed.picked[1])
+        {
+            discrete = true;
+        }
         if fit {
             ed.fit = true;
         }
@@ -1234,6 +1714,169 @@ impl App {
             discrete = true;
         }
 
+        // Node Wrangler's right drags: Shift cuts cables, Ctrl or Alt connects modules
+        let (sec_pressed, sec_released) = ui.input(|i| {
+            (
+                i.pointer.button_pressed(PointerButton::Secondary),
+                i.pointer.button_released(PointerButton::Secondary),
+            )
+        });
+        let node_at = |p: &Patch, q: Pos2| {
+            p.nodes
+                .iter()
+                .rev()
+                .find(|n| node_rect(n, origin, z).contains(q))
+                .map(|n| n.id)
+        };
+        if sec_pressed && over_canvas && !swallow {
+            if let Some(q) = pointer {
+                if fine {
+                    ed.rgest = Some(RGesture::Knife(q));
+                } else if ctrl || alt {
+                    ed.rgest = node_at(&patch, q).map(|id| RGesture::Lazy(id, q));
+                }
+            }
+        }
+        if let (Some(g), Some(q)) = (ed.rgest, pointer) {
+            let (from, col) = match g {
+                RGesture::Knife(a) => (a, Color32::from_rgb(230, 80, 80)),
+                RGesture::Lazy(_, a) => (a, p.accent_strong),
+            };
+            painter.line_segment([from, q], Stroke::new(2.0, col));
+            if sec_released {
+                match g {
+                    RGesture::Knife(a) => {
+                        if cut_cables(&mut patch, origin, z, a, q) > 0 {
+                            ed.selected = None;
+                            discrete = true;
+                        }
+                    }
+                    RGesture::Lazy(a, _) => {
+                        if let Some(b) = node_at(&patch, q) {
+                            if lazy_connect(&mut patch, a, b) {
+                                discrete = true;
+                            }
+                        }
+                    }
+                }
+                ed.rgest = None;
+                // the right button let go after a drag opens no menu
+                egui::Popup::close_all(ui.ctx());
+            }
+            ui.ctx().request_repaint();
+        }
+
+        // frames under everything: a strip with the label, dragged to move its modules
+        let mut frame_move: Option<(usize, Vec2)> = None;
+        let mut frame_remove: Option<usize> = None;
+        let mut frame_rename: Option<(usize, String)> = None;
+        for (fi, f) in patch.frames.iter().enumerate() {
+            let Some(r) = frame_rect(&patch, f, origin, z) else {
+                continue;
+            };
+            painter.rect_filled(r, 8.0 * z, p.accent_strong.gamma_multiply(0.07));
+            painter.rect_stroke(
+                r,
+                8.0 * z,
+                Stroke::new(1.0, p.accent_strong.gamma_multiply(0.5)),
+                egui::StrokeKind::Inside,
+            );
+            let strip = Rect::from_min_size(r.min, vec2(r.width(), FRAME_H * z));
+            if z >= 0.45 {
+                painter.text(
+                    strip.left_center() + vec2(8.0 * z, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    if f.label.is_empty() {
+                        "Frame"
+                    } else {
+                        &f.label
+                    },
+                    egui::FontId::proportional(12.0 * z),
+                    p.text,
+                );
+            }
+            let fr = ui.interact(
+                strip,
+                ui.scope_id().with(("frame", fi)),
+                sense(Sense::click_and_drag()),
+            );
+            if fr.drag_started_by(PointerButton::Primary) {
+                ed.frame_drag = Some(fi);
+            }
+            if fr.dragged_by(PointerButton::Primary) && ed.frame_drag == Some(fi) {
+                frame_move = Some((fi, fr.drag_delta() / z));
+            }
+            if fr.drag_stopped() {
+                ed.frame_drag = None;
+            }
+            let mut label = f.label.clone();
+            fr.on_hover_text(
+                "A frame: drag its label to move its modules, right click to rename or remove it",
+            )
+            .context_menu(|ui| {
+                ui.label("Label");
+                if ui.text_edit_singleline(&mut label).changed() {
+                    frame_rename = Some((fi, label.clone()));
+                }
+                if ui.button("Remove frame").clicked() {
+                    frame_remove = Some(fi);
+                    ui.close();
+                }
+            });
+        }
+        if let Some((fi, d)) = frame_move {
+            let ids = patch.frames[fi].nodes.clone();
+            for n in patch.nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
+                n.pos[0] += d.x;
+                n.pos[1] += d.y;
+            }
+        }
+        if !down {
+            ed.frame_drag = None;
+        }
+        if let Some((fi, l)) = frame_rename {
+            patch.frames[fi].label = l;
+        }
+        if let Some(fi) = frame_remove {
+            patch.frames.remove(fi);
+            discrete = true;
+        }
+
+        // a sample from the playlist's picker (an audio clip's) let go on the canvas
+        let pick_released = ui.input(|i| i.pointer.any_released())
+            && pointer.is_some_and(|q| canvas.contains(q))
+            && egui::DragAndDrop::has_payload_of_type::<crate::playlist::PickDrag>(ui.ctx());
+        let mut dropped_sample: Option<String> = None;
+        if pick_released {
+            if let Some(d) = egui::DragAndDrop::take_payload::<crate::playlist::PickDrag>(ui.ctx())
+            {
+                if let crate::playlist::Source::Audio(ch_id) = &d.source {
+                    dropped_sample = clip_samples
+                        .iter()
+                        .find(|(c, _)| c == ch_id)
+                        .and_then(|(_, s)| s.clone());
+                }
+            }
+        }
+        let dragging_sound =
+            egui::DragAndDrop::has_payload_of_type::<crate::playlist::PickDrag>(ui.ctx())
+                || egui::DragAndDrop::has_payload_of_type::<crate::shell::Dragged>(ui.ctx())
+                || ui.input(|i| !i.raw.hovered_files.is_empty());
+        if dragging_sound && pointer.is_some_and(|q| canvas.contains(q)) {
+            painter.rect_stroke(
+                canvas.shrink(2.0),
+                4.0,
+                Stroke::new(2.0, p.accent_strong),
+                egui::StrokeKind::Inside,
+            );
+            ui.ctx().request_repaint();
+        }
+        if let (Some(id), Some(q)) = (dropped_sample, pointer) {
+            let hit = node_at(&patch, q);
+            ed.picked = vec![place_sample(&mut patch, &id, world(q), hit)];
+            discrete = true;
+        }
+
         let font = |size: f32| egui::FontId::proportional(size * z);
         let text_col = skin.map_or(p.text, |s| s.text);
         // text this small is not drawn
@@ -1249,6 +1892,7 @@ impl App {
 
         // cables under the modules
         let mut picked = None;
+        let mut reroute: Option<(CableKey, Pos2)> = None;
         let mut pull = None;
         let mut amount: Option<(usize, f64)> = None;
         for (ci, c) in patch.cables.iter().enumerate() {
@@ -1291,12 +1935,14 @@ impl App {
             painter.circle_filled(m, if r.hovered() { 6.0 } else { 4.0 }, col);
             if r.double_clicked() {
                 pull = Some(ci);
+            } else if r.clicked() && fine {
+                reroute = Some((key.clone(), world(m)));
             } else if r.clicked() {
                 picked = Some(key.clone());
             }
             let mut amt = c.amount;
             r.on_hover_text(format!(
-                "{} {} ➡ {} {} ({:.2})\nClick to select (Delete pulls it out), double click to pull out, right click for more",
+                "{} {} ➡ {} {} ({:.2})\nClick to select (Delete pulls it out), double click to pull out, Shift click for a reroute dot, right click for more",
                 kind_name(a.kind),
                 c.output,
                 kind_name(b.kind),
@@ -1310,11 +1956,21 @@ impl App {
                 {
                     amount = Some((ci, amt));
                 }
+                if ui.button("Add reroute").on_hover_text("A dot on the cable, to lead it round (Shift click)").clicked() {
+                    reroute = Some((key.clone(), world(m)));
+                    ui.close();
+                }
                 if ui.button("Pull out cable").clicked() {
                     pull = Some(ci);
                     ui.close();
                 }
             });
+        }
+        if let Some((k, at)) = reroute {
+            if let Some(id) = add_reroute(&mut patch, &k, at) {
+                ed.pick_only(id);
+                discrete = true;
+            }
         }
         if let Some(k) = picked {
             ed.selected = Some(k);
@@ -1394,6 +2050,9 @@ impl App {
         let mut dup_one: Option<u32> = None;
         let mut copy_one: Option<u32> = None;
         let mut dissolve_one: Option<u32> = None;
+        let mut view_one: Option<u32> = None;
+        let mut set_sample: Option<(u32, String)> = None;
+        let viewing = ed.viewer.as_ref().map(|v| v.0);
         let mut unplug: Option<(u32, usize)> = None;
         let mut automate: Option<(u32, String, f64)> = None;
         let mut drop_on: Option<(u32, usize)> = None;
@@ -1422,9 +2081,19 @@ impl App {
                 ),
                 egui::StrokeKind::Inside,
             );
-            let title = Rect::from_min_size(rect.min, vec2(NODE_W, TITLE_H) * z);
+            let title = Rect::from_min_size(rect.min, vec2(rect.width(), TITLE_H * z));
             painter.rect_filled(title, 6.0 * z, kc.gamma_multiply(0.35));
             let heading = title_text(n);
+            let kind = n.kind;
+            if viewing == Some(id) {
+                painter.text(
+                    rect.center_top() - vec2(0.0, 2.0 * z),
+                    egui::Align2::CENTER_BOTTOM,
+                    "HEARD ALONE",
+                    egui::FontId::proportional(10.0 * z.max(0.6)),
+                    p.accent_strong,
+                );
+            }
             if words {
                 // the mode at the right of the title: a wave drawn, or a short mark
                 let mut right = title.max.x - 8.0 * z;
@@ -1503,6 +2172,27 @@ impl App {
                     ui.close();
                 }
                 if ui
+                    .add(egui::Button::new(if viewing == Some(id) { "Stop hearing alone" } else { "Hear alone" }).shortcut_text("Ctrl+Shift+click"))
+                    .on_hover_text("Its output goes straight to the output, in place of what is there, until you do it again")
+                    .clicked()
+                {
+                    view_one = Some(id);
+                    ui.close();
+                }
+                if kind == Kind::Sampler {
+                    ui.menu_button("Sample", |ui| {
+                        if sample_list.is_empty() {
+                            ui.label("The project has no samples yet: drop one on the canvas");
+                        }
+                        for (sid, sname) in &sample_list {
+                            if ui.button(sname).clicked() {
+                                set_sample = Some((id, sid.clone()));
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                if ui
                     .add(egui::Button::new(if many { "Remove modules" } else { "Remove module" }).shortcut_text("Del"))
                     .clicked()
                 {
@@ -1511,6 +2201,86 @@ impl App {
                 }
             });
 
+            // a sampler's waveform, with its start and end; a click picks its sample
+            if kind == Kind::Sampler {
+                let top = rect.min.y + (TITLE_H + kind.rows() as f32 * ROW_H + 2.0) * z;
+                let wr = Rect::from_min_max(
+                    pos2(rect.min.x + 10.0 * z, top),
+                    pos2(rect.max.x - 10.0 * z, top + WAVE_H * z),
+                );
+                painter.rect_filled(wr, 3.0 * z, skin.map_or(p.well_deep, |s| s.track));
+                let peaks = n.sample.as_ref().and_then(|s| ed.peaks.get(s));
+                match peaks.filter(|pk| !pk.is_empty()) {
+                    Some(pk) => {
+                        let w = wr.width() / pk.len() as f32;
+                        for (ci, (lo, hi)) in pk.iter().enumerate() {
+                            let x = wr.min.x + (ci as f32 + 0.5) * w;
+                            let cy = wr.center().y;
+                            let h = wr.height() * 0.5;
+                            painter.line_segment(
+                                [
+                                    pos2(x, cy - hi.clamp(-1.0, 1.0) * h),
+                                    pos2(x, cy - lo.clamp(-1.0, 1.0) * h - 0.5),
+                                ],
+                                Stroke::new(w.max(1.0), kc.gamma_multiply(0.8)),
+                            );
+                        }
+                        for (pn, col) in [("start", p.accent_strong), ("end", p.accent_strong)] {
+                            let x = wr.min.x + wr.width() * n.param(pn) as f32;
+                            painter.line_segment(
+                                [pos2(x, wr.min.y), pos2(x, wr.max.y)],
+                                Stroke::new(1.5, col),
+                            );
+                        }
+                    }
+                    None if words => {
+                        painter.text(
+                            wr.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Drop a sample here, or click",
+                            font(10.5),
+                            skin.map_or(p.text2, |s| s.dim),
+                        );
+                    }
+                    None => {}
+                }
+                let sname = n
+                    .sample
+                    .as_ref()
+                    .and_then(|s| sample_list.iter().find(|(i, _)| i == s))
+                    .map(|(_, nm)| nm.clone());
+                if let (Some(nm), true) = (&sname, words) {
+                    painter.text(
+                        wr.left_top() + vec2(3.0 * z, 1.0 * z),
+                        egui::Align2::LEFT_TOP,
+                        nm,
+                        font(9.5),
+                        text_col,
+                    );
+                }
+                let wresp =
+                    ui.interact(wr, ui.scope_id().with(("wave", id)), sense(Sense::click()));
+                egui::Popup::menu(&wresp)
+                    .id(wresp.id.with("samples"))
+                    .show(|ui| {
+                        if sample_list.is_empty() {
+                            ui.label("The project has no samples yet: drop one here");
+                        }
+                        for (sid, nm) in &sample_list {
+                            if ui
+                                .selectable_label(n.sample.as_deref() == Some(sid), nm)
+                                .clicked()
+                            {
+                                set_sample = Some((id, sid.clone()));
+                                ui.close();
+                            }
+                        }
+                    });
+                wresp.on_hover_text(format!(
+                    "{}\nClick to pick a sample of the project, or drop one from the browser, your files or the playlist",
+                    sname.as_deref().unwrap_or("No sample yet")
+                ));
+            }
             let label = skin.map_or(p.text2, |s| s.dim);
             // outputs: label and a dot on the right; drag from the dot
             for (o, oname) in spec.outputs.iter().enumerate() {
@@ -1807,7 +2577,9 @@ impl App {
             }
         }
         // a click on a module picks it (Shift or Ctrl add it to the picked ones)
-        if let Some(id) = clicked_node {
+        if let Some(id) = clicked_node.filter(|_| ctrl && fine) {
+            view_one = Some(id);
+        } else if let Some(id) = clicked_node {
             if add_key {
                 ed.pick_toggle(id);
             } else {
@@ -1866,6 +2638,23 @@ impl App {
         if let Some(id) = dup_one {
             let ids = group(ed, id);
             ed.picked = duplicate_nodes(&mut patch, &ids);
+            discrete = true;
+        }
+        if let Some(id) = view_one {
+            match ed.viewer.take() {
+                // the same module again: back as it was
+                Some((v, old)) if v == id => unview(&mut patch, old),
+                other => {
+                    if let Some((_, old)) = other {
+                        unview(&mut patch, old);
+                    }
+                    ed.viewer = view_node(&mut patch, id).map(|old| (id, old));
+                }
+            }
+            discrete = true;
+        }
+        if let Some((id, smp)) = set_sample {
+            place_sample(&mut patch, &smp, Pos2::ZERO, Some(id));
             discrete = true;
         }
         if let Some(id) = dissolve_one {
@@ -2175,6 +2964,34 @@ mod tests {
                 assert!(port_tip(k, input_name(k, i), false).contains("cable"));
             }
         }
+    }
+
+    #[test]
+    fn a_knife_cuts_the_cables_it_crosses() {
+        let mut p = Patch::default();
+        let ci = p
+            .cables
+            .iter()
+            .position(|c| c.from == 2 && c.to == 4)
+            .unwrap();
+        let c = &p.cables[ci];
+        let (a, b) = (p.node(c.from).unwrap(), p.node(c.to).unwrap());
+        let pa = out_pos(a, Pos2::ZERO, 0, 1.0);
+        let pb = in_pos(b, Pos2::ZERO, b.kind.input_index(&c.input).unwrap(), 1.0);
+        let m = mid(pa, pb, 1.0);
+        let n = p.cables.len();
+        assert_eq!(
+            cut_cables(
+                &mut p,
+                Pos2::ZERO,
+                1.0,
+                m - vec2(0.0, 30.0),
+                m + vec2(0.0, 30.0)
+            ),
+            1,
+            "{pa:?} {pb:?} {m:?}"
+        );
+        assert_eq!(p.cables.len(), n - 1);
     }
 
     #[test]
