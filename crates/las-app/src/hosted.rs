@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Hosted (CLAP, VST3) plugins in the app: the lists in the browser, adding them as
-//! channels and effects, a window of generic controls for their parameters, and the
-//! plugin's own window. What is turned in a plugin's window comes back
-//! as parameter changes, so its parameters are what a project keeps of it.
+//! Hosted (CLAP, VST3, VST2) plugins in the app: the lists in the browser and the
+//! menus, adding them as channels and effects, a window of generic controls for their
+//! parameters, and the plugin's own window. What is turned in a plugin's window comes
+//! back as parameter changes, so its parameters are what a project keeps of it; a VST2
+//! plugin's whole state (its chunk: a preset chosen in its window) is kept as well.
 
 use crate::app::App;
 use crate::theme::pal;
 use eframe::egui::{self, RichText, Ui};
 use las_host::{find, params_of, plugin_state, Editor, PluginInfo, HOSTED};
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
+
+/// How often an open VST2 window's whole state is read for the project.
+const STATE_EVERY: Duration = Duration::from_secs(2);
 
 /// The plugin id a channel or slot state names.
 pub fn plugin_id(state: &Value) -> &str {
@@ -117,6 +122,9 @@ pub enum Owner {
 pub struct OpenEditor {
     pub owner: Owner,
     pub editor: Editor,
+    /// The whole state last put in the project, and when it was last read.
+    kept: Option<Vec<u8>>,
+    read: Instant,
 }
 
 /// The values a state holds for every parameter of its plugin.
@@ -133,10 +141,124 @@ fn has_window(state: &Value) -> bool {
 }
 
 fn format_name(f: las_host::Format) -> &'static str {
-    match f {
-        las_host::Format::Clap => "CLAP",
-        las_host::Format::Vst3 => "VST3",
+    f.tag()
+}
+
+/// What a menu row of a plugin says: its name, and its format as a small tag.
+pub fn menu_text(info: &PluginInfo) -> egui::text::LayoutJob {
+    let p = pal();
+    let mut job = egui::text::LayoutJob::default();
+    let font = egui::TextStyle::Button.resolve(&egui::Style::default());
+    job.append(
+        &info.name,
+        0.0,
+        egui::TextFormat::simple(font.clone(), p.text),
+    );
+    job.append(
+        info.format.tag(),
+        8.0,
+        egui::TextFormat::simple(egui::FontId::proportional(font.size * 0.75), p.muted),
+    );
+    job
+}
+
+/// The plugins of a kind, grouped by vendor (vendors and names in order).
+pub fn by_vendor(list: Vec<PluginInfo>) -> Vec<(String, Vec<PluginInfo>)> {
+    let mut groups: Vec<(String, Vec<PluginInfo>)> = Vec::new();
+    let mut list = list;
+    list.sort_by(|a, b| {
+        (
+            a.vendor.to_lowercase(),
+            a.name.to_lowercase(),
+            a.format.tag(),
+        )
+            .cmp(&(
+                b.vendor.to_lowercase(),
+                b.name.to_lowercase(),
+                b.format.tag(),
+            ))
+    });
+    for i in list {
+        let vendor = if i.vendor.trim().is_empty() {
+            "Other".to_string()
+        } else {
+            i.vendor.trim().to_string()
+        };
+        match groups.last_mut() {
+            Some((v, items)) if *v == vendor => items.push(i),
+            _ => groups.push((vendor, vec![i])),
+        }
     }
+    groups
+}
+
+/// The id egui keeps a "open Settings" request under, for menus with no app at hand.
+fn settings_request() -> egui::Id {
+    egui::Id::NULL.with("las-open-plugin-settings")
+}
+
+/// Ask for the Settings window (it opens on the next frame).
+pub fn request_settings(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(settings_request(), true));
+}
+
+/// Carry out what the menus asked for.
+pub fn serve_requests(app: &mut App, ctx: &egui::Context) {
+    if ctx.data_mut(|d| d.remove_temp::<bool>(settings_request()).unwrap_or(false)) {
+        app.shell.open.settings = true;
+    }
+}
+
+/// What the plugin menus say while a scan runs, or when nothing was found.
+pub fn scanning_text() -> Option<String> {
+    las_host::scan_progress().map(|p| {
+        if p.total == 0 {
+            "Looking for plugins...".to_string()
+        } else {
+            format!("Scanning {}/{}: {}", p.done + 1, p.total, p.current)
+        }
+    })
+}
+
+/// The plugins found of one kind, as a menu grouped by vendor; the one picked. When
+/// none were found it says so, with a button to Settings.
+pub fn plugin_list_menu(ui: &mut Ui, instruments: bool) -> Option<PluginInfo> {
+    let list: Vec<PluginInfo> = las_host::available()
+        .into_iter()
+        .filter(|i| {
+            if instruments {
+                i.is_instrument()
+            } else {
+                i.is_effect()
+            }
+        })
+        .collect();
+    if let Some(s) = scanning_text() {
+        ui.label(RichText::new(s).weak());
+    }
+    if list.is_empty() {
+        ui.label("No plugins found. Set plugin folders in Settings");
+        if ui.button("Open Settings").clicked() {
+            request_settings(ui.ctx());
+            ui.close();
+        }
+        return None;
+    }
+    let mut pick = None;
+    for (vendor, items) in by_vendor(list) {
+        ui.menu_button(vendor, |ui| {
+            for i in items {
+                let r = ui
+                    .button(menu_text(&i))
+                    .on_hover_text(i.path.display().to_string());
+                if r.clicked() {
+                    pick = Some(i);
+                    ui.close();
+                }
+            }
+        });
+    }
+    pick
 }
 
 impl App {
@@ -148,8 +270,14 @@ impl App {
         let Some(info) = find(plugin_id(state)) else {
             return;
         };
-        match Editor::open(&info, &values(state), title) {
-            Ok(editor) => self.editors.push(OpenEditor { owner, editor }),
+        let whole = las_host::saved_state(state);
+        match Editor::open_with_state(&info, whole.as_deref(), &values(state), title) {
+            Ok(editor) => self.editors.push(OpenEditor {
+                owner,
+                editor,
+                kept: whole,
+                read: Instant::now(),
+            }),
             Err(e) => self.error = Some(format!("{}: {e}", info.name)),
         }
     }
@@ -203,16 +331,35 @@ impl App {
         let mut edits = Vec::new();
         for e in &mut self.editors {
             let changes = e.editor.idle();
-            if !changes.is_empty() {
-                edits.push((e.owner.clone(), changes));
+            // the whole state, now and then and when the window closes: a preset
+            // picked in the window changes more than the parameters it reports
+            let mut whole = None;
+            if e.read.elapsed() >= STATE_EVERY || e.editor.closed() {
+                e.read = Instant::now();
+                if let Some((bytes, values)) = e.editor.state() {
+                    if e.kept.as_ref() != Some(&bytes) {
+                        e.kept = Some(bytes.clone());
+                        whole = Some((bytes, values));
+                    }
+                }
+            }
+            if !changes.is_empty() || whole.is_some() {
+                edits.push((e.owner.clone(), changes, whole));
             }
         }
-        for (owner, changes) in edits {
+        for (owner, changes, whole) in edits {
+            let put = move |state: &mut Value| {
+                if let Some((bytes, values)) = &whole {
+                    las_host::set_saved_state(state, bytes);
+                    apply(state, values);
+                }
+                apply(state, &changes);
+            };
             self.project
                 .modify_coalesced("hosted-window", move |p| match &owner {
                     Owner::Channel(id) => {
                         if let Some(c) = p.channels.iter_mut().find(|c| &c.id == id) {
-                            apply(&mut c.state, &changes);
+                            put(&mut c.state);
                         }
                     }
                     Owner::Slot(insert, id) => {
@@ -221,7 +368,7 @@ impl App {
                             .get_mut(*insert)
                             .and_then(|t| t.slots.iter_mut().flatten().find(|s| &s.id == id))
                         {
-                            apply(&mut s.state, &changes);
+                            put(&mut s.state);
                         }
                     }
                 });
@@ -390,7 +537,7 @@ impl App {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("EXTERNAL (CLAP, VST3)")
+                RichText::new("PLUGINS (VST2, VST3, CLAP)")
                     .size(11.0)
                     .strong()
                     .color(p.muted),
@@ -403,41 +550,94 @@ impl App {
                 self.rescan_plugins();
             }
         });
-        let list = las_host::known();
+        if let Some(s) = scanning_text() {
+            ui.label(RichText::new(s).weak().size(11.0));
+        }
+        let list = las_host::available();
         if list.is_empty() {
             ui.label(
-                RichText::new(
-                    "None found. Plugins are looked for in the usual CLAP and VST3 folders, and in CLAP_PATH and VST3_PATH.",
-                )
-                .weak()
-                .size(11.0),
+                RichText::new("No plugins found. Set plugin folders in Settings")
+                    .weak()
+                    .size(11.0),
             );
+            if ui.small_button("Open Settings").clicked() {
+                self.shell.open.settings = true;
+            }
         }
-        for info in list {
-            ui.horizontal(|ui| {
-                let kind = match (info.is_instrument(), info.is_effect()) {
-                    (true, true) => "instrument and effect",
-                    (true, false) => "instrument",
-                    (false, true) => "effect",
-                    _ => "plugin",
-                };
-                if info.is_instrument()
-                    && ui
-                        .button(&info.name)
-                        .on_hover_text("Add as a channel")
+        for (vendor, items) in by_vendor(list) {
+            ui.label(RichText::new(vendor).size(10.5).color(p.accent_text));
+            for info in items {
+                ui.horizontal(|ui| {
+                    let kind = match (info.is_instrument(), info.is_effect()) {
+                        (true, true) => "instrument and effect",
+                        (true, false) => "instrument",
+                        (false, true) => "effect",
+                        _ => "plugin",
+                    };
+                    if info.is_instrument() {
+                        if ui
+                            .button(menu_text(&info))
+                            .on_hover_text("Add as a channel")
+                            .clicked()
+                            && self.project.loaded.is_some()
+                        {
+                            self.add_hosted_channel(&info);
+                        }
+                    } else if ui
+                        .button(menu_text(&info))
+                        .on_hover_text("Put on the selected mixer insert")
                         .clicked()
-                {
-                    self.add_hosted_channel(&info);
-                } else if !info.is_instrument() {
-                    ui.label(&info.name);
-                }
-                ui.label(
-                    RichText::new(format!("{} - {kind}", info.vendor))
-                        .size(11.0)
-                        .color(p.muted),
-                );
-            });
+                        && self.project.loaded.is_some()
+                    {
+                        self.add_hosted_effect(&info);
+                    }
+                    ui.label(RichText::new(kind).size(11.0).color(p.muted));
+                });
+            }
         }
+    }
+
+    /// The "Plugins" submenu of the Add menus: the instruments found, by vendor; the
+    /// one picked is added as a channel.
+    pub(crate) fn plugins_submenu(&mut self, ui: &mut Ui, enabled: bool) {
+        let picked = ui
+            .add_enabled_ui(enabled, |ui| {
+                ui.menu_button("Plugins", |ui| plugin_list_menu(ui, true))
+                    .inner
+                    .flatten()
+            })
+            .inner;
+        if let Some(info) = picked {
+            self.add_hosted_channel(&info);
+            let at = self.project.channel;
+            self.open_channel(at);
+        }
+    }
+
+    /// Put a hosted effect on the selected mixer insert, in its first free slot.
+    pub(crate) fn add_hosted_effect(&mut self, info: &PluginInfo) {
+        let insert = self.project.mixer_state.selected;
+        let slot = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.mixer.get(insert))
+            .map_or(0, |t| {
+                t.slots
+                    .iter()
+                    .position(Option::is_none)
+                    .unwrap_or(t.slots.len())
+            });
+        self.project.edit_mixer(&[
+            crate::mixer::MixEdit::Begin,
+            crate::mixer::MixEdit::AddHosted {
+                insert,
+                slot,
+                plugin: info.id.clone(),
+            },
+            crate::mixer::MixEdit::OpenEffect { insert, slot },
+        ]);
+        self.shell.open.show(crate::raise::Win::Mixer);
     }
 }
 

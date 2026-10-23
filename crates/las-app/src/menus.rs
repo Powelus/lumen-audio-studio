@@ -673,6 +673,8 @@ impl App {
                     ui.close();
                 }
             }
+            ui.separator();
+            self.plugins_submenu(ui, loaded);
         });
         ui.menu_button("Patterns", |ui| {
             if ui

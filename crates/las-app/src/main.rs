@@ -24,6 +24,7 @@ mod mixer;
 mod nebulawin;
 mod noterec;
 mod playlist;
+mod pluginmgr;
 mod presets;
 mod project;
 mod rack;
@@ -81,9 +82,11 @@ fn main() -> eframe::Result {
     // plugins are looked for in the background; the browser lists what is found
     las_host::install();
     {
-        let dirs = settings::Settings::load().plugin_dirs();
+        let s = settings::Settings::load();
+        s.apply_disabled();
+        let dirs = s.plugin_dirs();
         std::thread::spawn(move || {
-            las_host::rescan(&dirs);
+            las_host::rescan_cached(&dirs, settings::plugin_cache().as_deref());
         });
     }
     // `--size 1920x1080` opens the window at that size (in screen pixels) instead of

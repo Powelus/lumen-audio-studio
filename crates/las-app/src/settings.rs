@@ -19,10 +19,14 @@ pub const RECENT: usize = 10;
 pub struct Settings {
     /// Folders of samples, shown in the browser's Samples tab.
     pub sample_folders: Vec<PathBuf>,
-    /// Folders to look for CLAP and VST3 plugins in, besides the standard ones.
+    /// Folders to look for VST2, VST3 and CLAP plugins in, besides the standard ones.
     pub plugin_folders: Vec<PathBuf>,
-    /// Whether the standard plugin folders (and CLAP_PATH, VST3_PATH) are scanned too.
+    /// Whether the standard plugin folders (and CLAP_PATH, VST3_PATH, VST_PATH) are
+    /// scanned too.
     pub standard_plugin_folders: bool,
+    /// Plugins turned off in the plugin manager, by file and id
+    /// (`las_host::enable_key`): the menus leave them out. New ones are on.
+    pub disabled_plugins: Vec<String>,
     /// Minutes between autosaves of a project with changes; 0 for none.
     pub autosave_minutes: u32,
     /// Projects opened or saved lately, the latest first.
@@ -50,6 +54,7 @@ impl Default for Settings {
             sample_folders: Vec::new(),
             plugin_folders: Vec::new(),
             standard_plugin_folders: true,
+            disabled_plugins: Vec::new(),
             autosave_minutes: 5,
             recent: Vec::new(),
             windows: Vec::new(),
@@ -100,6 +105,11 @@ impl Settings {
             }
         }
         dirs
+    }
+
+    /// Tell the plugin host which plugins are turned off.
+    pub fn apply_disabled(&self) {
+        las_host::set_disabled(self.disabled_plugins.clone());
     }
 
     /// Put a project at the top of the recent list.
@@ -293,6 +303,11 @@ pub fn leftover_autosaves() -> Vec<PathBuf> {
     all.into_iter().map(|(_, p)| p).collect()
 }
 
+/// The file what plugin scans learnt is kept in.
+pub fn plugin_cache() -> Option<PathBuf> {
+    Some(crate::presets::config_dir()?.join("plugin-cache.json"))
+}
+
 /// The folder autosaves go to.
 pub fn autosave_dir() -> Option<PathBuf> {
     Some(crate::presets::config_dir()?.join("autosave"))
@@ -315,11 +330,17 @@ impl App {
         }
     }
 
-    /// Rescan the plugin folders, in the background.
+    /// Rescan the plugin folders, in the background (files that did not change are
+    /// answered from the cache).
     pub(crate) fn rescan_plugins(&self) {
+        self.rescan_plugin_file(None);
+    }
+
+    /// Rescan, asking `file` again even if it did not change.
+    pub(crate) fn rescan_plugin_file(&self, file: Option<PathBuf>) {
         let dirs = self.settings.plugin_dirs();
         std::thread::spawn(move || {
-            las_host::rescan(&dirs);
+            las_host::rescan_forgetting(&dirs, plugin_cache().as_deref(), file.as_deref());
         });
     }
 
@@ -473,6 +494,7 @@ impl App {
         let mut open = self.shell.open.settings;
         let mut changed = false;
         let mut rescan = false;
+        let mut manager = false;
         if open && self.devices.is_none() {
             self.devices = Some(Devices::read(&self.settings.audio.driver));
         }
@@ -505,14 +527,25 @@ impl App {
                     changed |= ui
                         .checkbox(
                             &mut s.standard_plugin_folders,
-                            "Also scan the standard CLAP and VST3 folders",
+                            "Also scan the standard VST2, VST3 and CLAP folders",
                         )
                         .changed();
+                    ui.collapsing("The standard folders", |ui| {
+                        for d in las_host::all_search_paths() {
+                            ui.label(RichText::new(d.display().to_string()).size(11.0).weak());
+                        }
+                    });
                     changed |=
                         folder_list(ui, "plugins", &mut s.plugin_folders, "Add plugin folder");
-                    if ui.button("Rescan plugins now").clicked() {
-                        rescan = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Rescan plugins now").clicked() {
+                            rescan = true;
+                        }
+                        if ui.button("Plugin manager...").clicked() {
+                            manager = true;
+                        }
+                    });
+                    crate::pluginmgr::scan_summary(ui);
                     ui.add_space(10.0);
                     ui.heading("Display");
                     ui.horizontal(|ui| {
@@ -553,6 +586,9 @@ impl App {
                 });
             });
         self.shell.open.settings = open;
+        if manager {
+            self.plugin_manager.open = true;
+        }
         changed |= io.changed;
         if io.refresh {
             self.devices = Some(Devices::read(&self.settings.audio.driver));

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Plugin hosting: finds CLAP plugins on disk, loads them and runs them as an
-//! instrument (notes in, audio out) or as an effect (audio in, audio out).
+//! Plugin hosting: finds CLAP, VST3 and VST2 plugins on disk (see [`scan`]), loads
+//! them and runs them as an instrument (notes in, audio out) or as an effect (audio
+//! in, audio out).
 //!
 //! A [`Clap`] owns one running plugin. Build it off the audio thread with [`Clap::load`]
 //! (loading, activating and reading the parameters are slow and not realtime safe), then
 //! call [`Clap::process`] from the audio thread. The plugin's own code is outside this
 //! program's control: a plugin can crash the process, and its callbacks can arrive from
-//! other threads. [`scan`] therefore only reads descriptors and never starts a plugin.
+//! other threads. A scan therefore asks each library what it is in a process of its
+//! own when it can (see [`scan`]).
 
 use clack_extensions::audio_ports::PluginAudioPorts;
 use clack_extensions::params::{ParamInfoBuffer, PluginParams};
@@ -16,6 +18,8 @@ use clack_host::prelude::*;
 use clack_host::process::ProcessStatus;
 pub mod bridge;
 pub mod clap_editor;
+pub mod scan;
+pub mod vst2;
 pub mod vst3;
 
 use std::ffi::CString;
@@ -26,6 +30,14 @@ use std::path::{Path, PathBuf};
 pub enum Format {
     Clap,
     Vst3,
+    Vst2,
+}
+
+impl Format {
+    /// The short name shown next to a plugin: "CLAP", "VST3", "VST2".
+    pub fn tag(self) -> &'static str {
+        scan::format_tag(self)
+    }
 }
 
 /// What a scan learns about a plugin without starting it.
@@ -58,97 +70,29 @@ impl PluginInfo {
     }
 }
 
-/// The folders VST3 plugins are looked for in: `VST3_PATH`, then the standard places.
-pub fn vst3_search_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(v) = std::env::var_os("VST3_PATH") {
-        paths.extend(std::env::split_paths(&v));
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    if cfg!(target_os = "linux") {
-        paths.extend(home.iter().map(|h| h.join(".vst3")));
-        paths.push("/usr/lib/vst3".into());
-        paths.push("/usr/local/lib/vst3".into());
-    } else if cfg!(target_os = "macos") {
-        paths.extend(home.iter().map(|h| h.join("Library/Audio/Plug-Ins/VST3")));
-        paths.push("/Library/Audio/Plug-Ins/VST3".into());
-    } else if cfg!(windows) {
-        if let Some(p) = std::env::var_os("COMMONPROGRAMFILES") {
-            paths.push(PathBuf::from(p).join("VST3"));
-        }
-        if let Some(p) = std::env::var_os("LOCALAPPDATA") {
-            paths.push(PathBuf::from(p).join("Programs/Common/VST3"));
-        }
-    }
-    paths
-}
-
-/// Every place plugins of any kind are looked for.
+/// Every standard place plugins of any kind are looked for on this system (and
+/// `CLAP_PATH`, `VST3_PATH`, `VST_PATH`).
 pub fn all_search_paths() -> Vec<PathBuf> {
-    let mut p = search_paths();
-    p.extend(vst3_search_paths());
-    p
+    scan::system_paths()
 }
 
-/// The folders CLAP plugins are looked for in: `CLAP_PATH`, then the standard places of
-/// the system.
-pub fn search_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(v) = std::env::var_os("CLAP_PATH") {
-        paths.extend(std::env::split_paths(&v));
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    if cfg!(target_os = "linux") {
-        paths.extend(home.iter().map(|h| h.join(".clap")));
-        paths.push("/usr/lib/clap".into());
-        paths.push("/usr/local/lib/clap".into());
-    } else if cfg!(target_os = "macos") {
-        paths.extend(home.iter().map(|h| h.join("Library/Audio/Plug-Ins/CLAP")));
-        paths.push("/Library/Audio/Plug-Ins/CLAP".into());
-    } else if cfg!(windows) {
-        if let Some(p) = std::env::var_os("COMMONPROGRAMFILES") {
-            paths.push(PathBuf::from(p).join("CLAP"));
-        }
-        if let Some(p) = std::env::var_os("LOCALAPPDATA") {
-            paths.push(PathBuf::from(p).join("Programs/Common/CLAP"));
-        }
-    }
-    paths
-}
-
-/// Every plugin in the `.clap` libraries in `dirs` (and one level of folders below them).
-/// Libraries that fail to load are skipped.
+/// Every plugin in the plugin files under `dirs` (see [`scan::collect`]), each file
+/// asked in its own process when it can be. Files that are not usable are skipped;
+/// [`rescan_cached`] also says why.
 pub fn scan(dirs: &[PathBuf]) -> Vec<PluginInfo> {
-    let mut files = Vec::new();
-    for d in dirs {
-        collect(d, 0, &mut files);
-    }
-    files.sort();
-    files.dedup();
-    files.iter().flat_map(|f| describe_any(f)).collect()
+    scan::scan_with(
+        dirs,
+        scan::Os::current(),
+        &mut scan::Cache::default(),
+        &scan::describe_isolated,
+        &mut |_| {},
+    )
+    .plugins
 }
 
-fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in read.flatten() {
-        let p = e.path();
-        if p.extension().is_some_and(|x| x == "clap" || x == "vst3") {
-            out.push(p);
-        } else if depth < 1 && p.is_dir() {
-            collect(&p, depth + 1, out);
-        }
-    }
-}
-
-/// The plugins in one library of either kind (by its extension).
+/// The plugins in one library of any kind, asked in this process.
 pub fn describe_any(path: &Path) -> Vec<PluginInfo> {
-    if path.extension().is_some_and(|x| x == "vst3") {
-        vst3::describe(path)
-    } else {
-        describe(path)
-    }
+    scan::describe_local(path).unwrap_or_default()
 }
 
 /// The plugins in one CLAP library.
@@ -519,6 +463,7 @@ impl Drop for Clap {
 pub enum Plugin {
     Clap(Clap),
     Vst3(vst3::Vst3),
+    Vst2(vst2::Vst2),
     /// A plugin in its own process (see [`bridge`]).
     Remote(bridge::Remote),
 }
@@ -538,6 +483,7 @@ impl Plugin {
         match info.format {
             Format::Clap => Clap::load(info, sample_rate).map(Self::Clap),
             Format::Vst3 => vst3::Vst3::load(info, sample_rate).map(Self::Vst3),
+            Format::Vst2 => vst2::Vst2::load(info, sample_rate).map(Self::Vst2),
         }
     }
 
@@ -545,6 +491,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.info(),
             Self::Vst3(p) => p.info(),
+            Self::Vst2(p) => p.info(),
             Self::Remote(p) => p.info(),
         }
     }
@@ -554,6 +501,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.params(),
             Self::Vst3(p) => p.params(),
+            Self::Vst2(p) => p.params(),
             Self::Remote(p) => p.params(),
         }
     }
@@ -562,6 +510,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.param_value(id),
             Self::Vst3(p) => p.param_value(id),
+            Self::Vst2(p) => p.param_value(id),
             Self::Remote(p) => p.param_value(id),
         }
     }
@@ -570,6 +519,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.set_param(id, value),
             Self::Vst3(p) => p.set_param(id, value),
+            Self::Vst2(p) => p.set_param(id, value),
             Self::Remote(p) => p.set_param(id, value),
         }
     }
@@ -578,6 +528,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.save_state(),
             Self::Vst3(p) => p.save_state(),
+            Self::Vst2(p) => p.save_state(),
             Self::Remote(p) => p.save_state(),
         }
     }
@@ -586,6 +537,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.load_state(bytes),
             Self::Vst3(p) => p.load_state(bytes),
+            Self::Vst2(p) => p.load_state(bytes),
             Self::Remote(p) => p.load_state(bytes),
         }
     }
@@ -594,6 +546,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.takes_audio(),
             Self::Vst3(p) => p.takes_audio(),
+            Self::Vst2(p) => p.takes_audio(),
             Self::Remote(p) => p.takes_audio(),
         }
     }
@@ -608,6 +561,7 @@ impl Plugin {
         match self {
             Self::Clap(p) => p.process(input, notes, out_l, out_r),
             Self::Vst3(p) => p.process(input, notes, out_l, out_r),
+            Self::Vst2(p) => p.process(input, notes, out_l, out_r),
             Self::Remote(p) => p.process(input, notes, out_l, out_r),
         }
     }
@@ -624,11 +578,97 @@ use std::sync::{Arc, RwLock};
 
 static KNOWN: RwLock<Vec<PluginInfo>> = RwLock::new(Vec::new());
 
+static PROGRESS: RwLock<Option<scan::Progress>> = RwLock::new(None);
+static REPORT: RwLock<Option<scan::Report>> = RwLock::new(None);
+/// One scan at a time (the one at start and one asked for in Settings).
+static SCANNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Look for plugins in `dirs` and remember what is found.
 pub fn rescan(dirs: &[PathBuf]) -> Vec<PluginInfo> {
-    let found = scan(dirs);
-    *KNOWN.write().unwrap_or_else(|e| e.into_inner()) = found.clone();
-    found
+    rescan_cached(dirs, None).plugins
+}
+
+/// Look for plugins in `dirs`, with the answers kept in the cache file `cache` (when
+/// given) for the files that have not changed, and remember what is found.
+/// [`scan_progress`] says where the scan is meanwhile, and [`last_report`] what it
+/// found, failures included.
+pub fn rescan_cached(dirs: &[PathBuf], cache: Option<&Path>) -> scan::Report {
+    rescan_forgetting(dirs, cache, None)
+}
+
+/// [`rescan_cached`], asking the file `forget` again whatever the cache says.
+pub fn rescan_forgetting(
+    dirs: &[PathBuf],
+    cache: Option<&Path>,
+    forget: Option<&Path>,
+) -> scan::Report {
+    let _one = SCANNING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut kept = cache.map(scan::Cache::load).unwrap_or_default();
+    if let Some(f) = forget {
+        kept.entries.retain(|e| e.path != f);
+    }
+    let set = |p: Option<scan::Progress>| *PROGRESS.write().unwrap_or_else(|e| e.into_inner()) = p;
+    set(Some(scan::Progress {
+        done: 0,
+        total: 0,
+        current: String::new(),
+    }));
+    let report = scan::scan_with(
+        dirs,
+        scan::Os::current(),
+        &mut kept,
+        &scan::describe_isolated,
+        &mut |p| set(Some(p.clone())),
+    );
+    if let Some(f) = cache {
+        kept.save(f);
+    }
+    *KNOWN.write().unwrap_or_else(|e| e.into_inner()) = report.plugins.clone();
+    *REPORT.write().unwrap_or_else(|e| e.into_inner()) = Some(report.clone());
+    set(None);
+    report
+}
+
+/// Where the scan running now is, if one is.
+pub fn scan_progress() -> Option<scan::Progress> {
+    PROGRESS.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// What the last scan found, once one has finished.
+pub fn last_report() -> Option<scan::Report> {
+    REPORT.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+static DISABLED: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// The key a plugin is enabled or disabled by: its file and its id.
+pub fn enable_key(info: &PluginInfo) -> String {
+    format!("{}|{}", info.path.display(), info.id)
+}
+
+/// The plugins the user turned off (by [`enable_key`]): left out of [`available`].
+pub fn set_disabled(keys: Vec<String>) {
+    *DISABLED.write().unwrap_or_else(|e| e.into_inner()) = keys;
+}
+
+pub fn is_enabled(info: &PluginInfo) -> bool {
+    let key = enable_key(info);
+    !DISABLED
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&key)
+}
+
+/// The plugins found that the user has not turned off: what the menus offer. (A
+/// project that uses a turned off plugin still plays it: see [`find`].)
+pub fn available() -> Vec<PluginInfo> {
+    known().into_iter().filter(is_enabled).collect()
+}
+
+/// Remember `list` as the plugins there are (for tests, and hosts that scan
+/// themselves).
+pub fn set_known(list: Vec<PluginInfo>) {
+    *KNOWN.write().unwrap_or_else(|e| e.into_inner()) = list;
 }
 
 /// The plugins the last [`rescan`] found.
@@ -656,10 +696,64 @@ pub fn install() {
     set_plugin_host(Some(Arc::new(Hosting)));
 }
 
-/// The plugin a state names, loaded and set to the parameters the state holds.
+/// The whole state a project keeps for a plugin (a VST2 chunk), when it keeps one.
+pub fn saved_state(state: &Value) -> Option<Vec<u8>> {
+    decode_base64(state.get("chunk")?.as_str()?)
+}
+
+/// Keep a plugin's whole state in its project state.
+pub fn set_saved_state(state: &mut Value, bytes: &[u8]) {
+    if !state.is_object() {
+        *state = json!({});
+    }
+    state["chunk"] = json!(encode_base64(bytes));
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Bytes as base64 text (for a project file).
+pub fn encode_base64(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Base64 text back as bytes; `None` when it is not base64.
+pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim_end_matches('=');
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0);
+    for ch in text.bytes() {
+        let v = B64.iter().position(|&b| b == ch)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+/// The plugin a state names, loaded and set to the state and parameters it holds.
 fn open(state: &Value, sr: f64) -> Option<Plugin> {
     let info = find(state.get("id")?.as_str()?)?;
     let mut clap = Plugin::load(&info, sr).ok()?;
+    if let Some(bytes) = saved_state(state) {
+        let _ = clap.load_state(&bytes);
+    }
     if let Some(ps) = state.get("params").and_then(Value::as_object) {
         for (k, v) in ps {
             if let (Ok(id), Some(v)) = (k.parse::<u32>(), v.as_f64()) {
@@ -808,18 +902,43 @@ pub fn params_of(id: &str) -> Arc<Vec<Param>> {
     list
 }
 
+/// A plugin's whole state and the value of each of its parameters.
+pub type WholeState = (Vec<u8>, Vec<(u32, f64)>);
+
 /// A hosted plugin's own window, open on the app's thread.
 pub enum Editor {
     Clap(clap_editor::ClapEditor),
     Vst3(vst3::Vst3Editor),
+    Vst2(vst2::Vst2Editor),
 }
 
 impl Editor {
     /// Open the window of the plugin `info`, showing `params` (the project's values).
     pub fn open(info: &PluginInfo, params: &[(u32, f64)], title: &str) -> Result<Self, String> {
+        Self::open_with_state(info, None, params, title)
+    }
+
+    /// [`Editor::open`], first set to a whole state the project keeps (see
+    /// [`Editor::state`]).
+    pub fn open_with_state(
+        info: &PluginInfo,
+        state: Option<&[u8]>,
+        params: &[(u32, f64)],
+        title: &str,
+    ) -> Result<Self, String> {
         match info.format {
             Format::Vst3 => vst3::Vst3Editor::open(info, params, title).map(Self::Vst3),
             Format::Clap => clap_editor::ClapEditor::open(info, params, title).map(Self::Clap),
+            Format::Vst2 => vst2::Vst2Editor::open(info, state, params, title).map(Self::Vst2),
+        }
+    }
+
+    /// The window's whole state and every parameter's value, for plugins whose state
+    /// is more than their parameters (VST2: a preset chosen in the window).
+    pub fn state(&mut self) -> Option<WholeState> {
+        match self {
+            Self::Vst2(e) => Some(e.state()),
+            _ => None,
         }
     }
 
@@ -828,6 +947,7 @@ impl Editor {
         match self {
             Self::Clap(e) => e.idle(),
             Self::Vst3(e) => e.idle(),
+            Self::Vst2(e) => e.idle(),
         }
     }
 
@@ -836,6 +956,7 @@ impl Editor {
         match self {
             Self::Clap(e) => e.set_param(id, value),
             Self::Vst3(e) => e.set_param(id, value),
+            Self::Vst2(e) => e.set_param(id, value),
         }
     }
 
@@ -844,6 +965,7 @@ impl Editor {
         match self {
             Self::Clap(e) => e.closed(),
             Self::Vst3(e) => e.closed(),
+            Self::Vst2(e) => e.closed(),
         }
     }
 }

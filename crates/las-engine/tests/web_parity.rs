@@ -15,7 +15,7 @@ fn fixture(name: &str) -> Vec<u8> {
 
 fn floats(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
+        .chunks(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

@@ -11,7 +11,7 @@ fn input() -> (Vec<f32>, Vec<f32>) {
     let path = format!("{}/tests/fixtures/fx_input.f32", env!("CARGO_MANIFEST_DIR"));
     let bytes = std::fs::read(path).expect("fx_input.f32");
     let all: Vec<f32> = bytes
-        .chunks_exact(4)
+        .chunks(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let n = all.len() / 4;

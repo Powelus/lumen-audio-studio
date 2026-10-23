@@ -39,6 +39,10 @@ pub enum Cmd {
     Sample(String, String),
     Recent(String),
     Theme(String),
+    /// A hosted plugin by id: as a new channel, or on the selected insert.
+    AddPlugin(String),
+    AddPluginEffect(String),
+    PluginManager,
 }
 
 /// One entry: what it says, what kind it is (shown on the right), what it does.

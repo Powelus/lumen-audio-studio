@@ -11,6 +11,11 @@ pub fn testplug() -> PathBuf {
     PATH.get_or_init(build_testplug).clone()
 }
 
+/// Where the built library of a test plugin crate is.
+pub fn library_path(krate: &str) -> PathBuf {
+    library(krate).1
+}
+
 /// The built library of a test plugin crate, built if the workspace build has not.
 fn library(krate: &str) -> (PathBuf, PathBuf) {
     let exe = std::env::current_exe().unwrap();
@@ -56,6 +61,31 @@ pub fn testvst3() -> PathBuf {
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         std::fs::copy(&lib, &to).unwrap();
         bundle
+    })
+    .clone()
+}
+
+/// The test VST2 plugin, installed in a vendor folder the way a host finds it: a
+/// library on Windows and Linux, a `.vst` bundle on macOS. The folder to scan is two
+/// levels up.
+pub fn testvst2() -> PathBuf {
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let (dir, lib) = library("las-testvst2");
+        let folder = dir
+            .join(format!("vst2-test-{}", std::process::id()))
+            .join("Lumen")
+            .join("Test");
+        let (plugin, to) = if cfg!(target_os = "macos") {
+            let b = folder.join("las-test2.vst");
+            (b.clone(), b.join("Contents/MacOS/las-test2"))
+        } else {
+            let f = folder.join(format!("las-test2{}", std::env::consts::DLL_SUFFIX));
+            (f.clone(), f)
+        };
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(&lib, &to).unwrap();
+        plugin
     })
     .clone()
 }
