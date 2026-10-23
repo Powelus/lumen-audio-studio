@@ -515,7 +515,18 @@ impl ProjectState {
                 serde_json::json!({ "start": a, "end": b, "on": self.playlist.loop_on }),
             );
         }
-        let bytes = encode(&project, &l.samples, true).map_err(|e| e.to_string())?;
+        // samples nothing uses any more are left out of the file (the session keeps
+        // them, so undo still has them)
+        let gone = project.unused_samples();
+        project.drop_unused_samples();
+        let bytes = if gone.is_empty() {
+            encode(&project, &l.samples, true)
+        } else {
+            let mut kept = (*l.samples).clone();
+            kept.retain(|k, _| !gone.contains(k));
+            encode(&project, &kept, true)
+        }
+        .map_err(|e| e.to_string())?;
         let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, bytes).map_err(|e| format!("{tmp}: {e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))?;
@@ -787,13 +798,27 @@ impl App {
                         ui.selectable_value(snap, v, snap_name(v));
                     }
                 });
-            if ui.button("Quantize").clicked() {
-                let snap = self.project.roll.snap;
-                let pattern = self.project.pattern;
+            if ui
+                .button("Quantize")
+                .on_hover_text("Snap the selected notes (or all) to the grid. Ctrl+U")
+                .clicked()
+            {
+                let roll = &self.project.roll;
+                let q = Edit::Quantize {
+                    snap: roll.snap,
+                    ids: roll.selected.iter().cloned().collect(),
+                    strength: roll.q_strength,
+                };
                 let ch = self.project.channel;
-                self.project
-                    .edit_channel(ch, &[Edit::Begin, Edit::Quantize { snap }]);
-                let _ = pattern;
+                self.project.edit_channel(ch, &[Edit::Begin, q]);
+            }
+            let mut pct = self.project.roll.q_strength * 100.0;
+            if ui
+                .add(egui::DragValue::new(&mut pct).range(10.0..=100.0).suffix("%").speed(1.0))
+                .on_hover_text("Quantize strength: how far notes move towards the grid")
+                .changed()
+            {
+                self.project.roll.q_strength = pct / 100.0;
             }
             ui.menu_button("Tools", |ui| {
                 let ids: Vec<String> = self.project.roll.selected.iter().cloned().collect();

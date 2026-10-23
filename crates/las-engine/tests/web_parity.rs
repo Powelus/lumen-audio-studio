@@ -29,6 +29,11 @@ struct Diff {
 }
 
 fn compare(name: &str) -> Diff {
+    compare_upto(name, f64::INFINITY)
+}
+
+/// As [`compare`], over the first `secs` seconds only.
+fn compare_upto(name: &str, secs: f64) -> Diff {
     let bundle = decode(&fixture(&format!("{name}.las"))).expect("a project");
     let opts = RenderOptions {
         sample_rate: 24000.0,
@@ -42,7 +47,8 @@ fn compare(name: &str) -> Diff {
     let mut peak = 0f64;
     let mut max_err = 0f64;
     let (mut e2, mut s2) = (0f64, 0f64);
-    for i in 0..frames.min(got.left.len()) {
+    let upto = (secs * 24000.0).min(frames as f64) as usize;
+    for i in 0..upto.min(got.left.len()) {
         for (g, w) in [(got.left[i], wl[i]), (got.right[i], wr[i])] {
             let (g, w) = (f64::from(g), f64::from(w));
             peak = peak.max(w.abs());
@@ -73,9 +79,8 @@ const EXACT: [&str; 6] = [
 /// With effects the web version builds from Web Audio's own nodes (equaliser,
 /// overdrive, chorus, phaser, auto filter, maximizer, convolution reverb): the
 /// error is more than 85 dB below the signal.
-const NATIVE: [&str; 16] = [
+const NATIVE: [&str; 15] = [
     "clips",
-    "automation",
     "tempo",
     "sampler",
     "mixer",
@@ -119,6 +124,16 @@ fn web_audio_effects_match_closely() {
             -d.rel_db
         );
     }
+}
+
+/// The automation project moves a channel's pitch from 2 s on: here notes that already
+/// sound follow it (the web version only tuned new notes), so the two agree until then.
+#[test]
+fn automation_matches_until_the_channel_pitch_moves() {
+    let d = compare_upto("automation", 2.0);
+    assert!(d.peak > 0.01);
+    assert!(d.rel_db < -85.0, "error only {:.1} dB below", -d.rel_db);
+    assert_eq!(compare("automation").frames.0, d.frames.1, "length");
 }
 
 /// Effect and instrument parameters changed by automation clips: ramps in the worklet effects,

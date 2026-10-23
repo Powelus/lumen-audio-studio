@@ -202,7 +202,15 @@ pub struct Instrument {
     /// Nebula's master level.
     master: f64,
     gate: Gate,
+    /// The channel's pitch offset (semitones) and its automation: notes that sound
+    /// follow it (see [`Instrument::bends_live`]).
+    tune_base: f64,
+    tune_line: crate::param::Timeline,
+    tune_origin: usize,
 }
+
+/// Frames between the points where a moving channel pitch is passed on.
+const TUNE_CHUNK: usize = 64;
 
 /// Silence under this (-120 dB) counts as nothing.
 pub const QUIET: f32 = 1e-6;
@@ -487,6 +495,9 @@ impl Instrument {
             plugin_id: plugin_id.to_string(),
             master: num(state.get("master"), 0.8),
             gate: Gate::new(sr),
+            tune_base: 0.0,
+            tune_line: crate::param::Timeline::default(),
+            tune_origin: 0,
         })
     }
 
@@ -747,7 +758,7 @@ impl Instrument {
     /// aftertouch, from live MIDI.
     pub fn controller(&mut self, cc: Cc, value: f64, time: f64) {
         match &mut self.core {
-            Core::Hosted(h) => h.controller(cc, value),
+            Core::Hosted(h) => h.controller(cc, value, time),
             Core::Layers(_) | Core::Facet(_) | Core::Mist(_) => {
                 self.queue_all(&[Event::Cc { time, cc, value }], false)
             }
@@ -783,6 +794,64 @@ impl Instrument {
             _ => {}
         }
         patch
+    }
+
+    /// Whether notes already sounding follow the channel's pitch as it moves (the
+    /// synths and the sampler); otherwise only new notes take it.
+    pub fn bends_live(&self) -> bool {
+        matches!(
+            self.core,
+            Core::Layers(_) | Core::Facet(_) | Core::Mist(_) | Core::Sampler(_)
+        )
+    }
+
+    /// The channel's pitch offset with no automation, semitones.
+    pub fn set_tune_base(&mut self, semis: f64) {
+        self.tune_base = semis;
+    }
+
+    /// Channel pitch automation (engine time, semitones), as for a parameter timeline.
+    pub fn automate_tune(&mut self, points: &[(f64, f64)], first: bool) {
+        self.tune_line.set(points, first);
+    }
+
+    /// Forget the pitch automation before `time`.
+    pub fn prune_tune(&mut self, time: f64) {
+        self.tune_line.prune(time);
+    }
+
+    /// The frames in `[f0, f0 + n)` where a moving channel pitch is passed on: on a
+    /// fixed grid, so that playing live and rendering agree whatever the block size.
+    fn tune_points(&self, f0: usize, n: usize) -> std::iter::StepBy<std::ops::Range<usize>> {
+        let o = self.tune_origin % TUNE_CHUNK;
+        let first = (f0 + TUNE_CHUNK - o).div_ceil(TUNE_CHUNK) * TUNE_CHUNK + o - TUNE_CHUNK;
+        (first..f0 + n).step_by(TUNE_CHUNK)
+    }
+
+    /// Where a run starts (engine time): the grid the channel pitch moves on starts
+    /// there, so a song plays live as it renders.
+    pub fn set_tune_origin(&mut self, time: f64) {
+        self.tune_origin = (time * self.sr).round().max(0.0) as usize;
+    }
+
+    /// Pass the channel pitch over `n` frames from `t0` on to the synths.
+    fn follow_tune(&mut self, t0: f64, n: usize) {
+        if self.tune_line.is_empty() {
+            return;
+        }
+        let sr = self.sr;
+        let f0 = (t0 * sr).round() as usize;
+        for f in self.tune_points(f0, n) {
+            let t = f as f64 / sr;
+            let semis = self.tune_line.get(t, self.tune_base);
+            let ev = [Event::Tune { time: t, semis }];
+            match &mut self.core {
+                Core::Layers(ls) => ls.iter_mut().for_each(|l| l.engine.queue(&ev)),
+                Core::Facet(e) => e.queue(&ev),
+                Core::Mist(e) => e.queue(&ev),
+                _ => return,
+            }
+        }
     }
 
     /// Whether the output is a mono signal (a channel then pans it with the
@@ -825,6 +894,14 @@ impl Instrument {
         l.fill(0.0);
         r.fill(0.0);
         if self.gate.sleeps(t0 + n as f64 / self.sr) {
+            // keep up with the channel pitch, so the next note is not bent twice
+            self.follow_tune(t0, n);
+            let f0 = (t0 * self.sr).round() as usize;
+            if let (Some(f), Core::Sampler(s)) =
+                (self.tune_points(f0, n).next_back(), &mut self.core)
+            {
+                s.retune(self.tune_line.get(f as f64 / self.sr, self.tune_base), f);
+            }
             return;
         }
         self.render_awake(t0, l, r);
@@ -842,6 +919,30 @@ impl Instrument {
     }
 
     fn render_awake(&mut self, t0: f64, l: &mut [f32], r: &mut [f32]) {
+        let n = l.len();
+        self.follow_tune(t0, n);
+        let f0 = (t0 * self.sr).round() as usize;
+        let points = self.tune_points(f0, n);
+        if let (Core::Sampler(s), false) = (&mut self.core, self.tune_line.is_empty()) {
+            // the sampler retunes its voices between short stretches
+            let mut k = 0;
+            for f in points.chain(std::iter::once(f0 + n)) {
+                let e = f - f0;
+                if e > k {
+                    s.render(f0 + k, &mut l[k..e], &mut r[k..e]);
+                    k = e;
+                }
+                if f < f0 + n {
+                    s.retune(self.tune_line.get(f as f64 / self.sr, self.tune_base), f);
+                }
+            }
+        } else {
+            self.render_core(t0, l, r);
+        }
+        self.run_rack(t0, l, r);
+    }
+
+    fn render_core(&mut self, t0: f64, l: &mut [f32], r: &mut [f32]) {
         let n = l.len();
         match &mut self.core {
             Core::Layers(layers) => {
@@ -882,6 +983,10 @@ impl Instrument {
             Core::Hosted(h) => h.render(t0, l, r),
             Core::Silent => {}
         }
+    }
+
+    fn run_rack(&mut self, t0: f64, l: &mut [f32], r: &mut [f32]) {
+        let n = l.len();
         let frame = (t0 * self.sr).round() as usize;
         for slot in &mut self.rack {
             slot.auto.begin_block(frame, &mut slot.fx.unit);

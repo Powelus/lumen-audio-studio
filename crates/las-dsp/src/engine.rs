@@ -104,6 +104,12 @@ pub enum Event {
         cc: Cc,
         value: f64,
     },
+    /// The channel's pitch offset (semitones) moved: notes already sounding follow
+    /// by the change. New notes bring their own offset in `fine`.
+    Tune {
+        time: f64,
+        semis: f64,
+    },
 }
 
 impl Event {
@@ -113,7 +119,8 @@ impl Event {
             | Event::Off { time, .. }
             | Event::OffScaled { time, .. }
             | Event::AllOff { time }
-            | Event::Cc { time, .. } => time,
+            | Event::Cc { time, .. }
+            | Event::Tune { time, .. } => time,
         }
     }
 }
@@ -537,6 +544,8 @@ pub struct VoiceEngine<S: Sound> {
     mw: f64,
     pb: f64,
     at: f64,
+    /// The channel pitch offset last heard (see [`Event::Tune`]).
+    tune: Option<f64>,
     bpm: f64,
     anchor_time: f64,
     anchor_beat: f64,
@@ -569,6 +578,7 @@ impl<S: Sound> VoiceEngine<S> {
             mw: 0.0,
             pb: 0.0,
             at: 0.0,
+            tune: None,
             bpm: 120.0,
             anchor_time: 0.0,
             anchor_beat: 0.0,
@@ -1023,6 +1033,17 @@ impl<S: Sound> VoiceEngine<S> {
                         Cc::At => self.at = value,
                         Cc::Pb => self.pb = value,
                     },
+                    Event::Tune { semis, .. } => {
+                        let delta = semis - self.tune.unwrap_or(semis);
+                        self.tune = Some(semis);
+                        if delta != 0.0 {
+                            for v in &mut self.voices {
+                                if v.base.active {
+                                    v.base.fine += delta * 100.0;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             self.apply_ramps(t0 + pos as f64 / sr);

@@ -2093,6 +2093,7 @@ impl eframe::App for App {
             .inner;
         self.windows(&ctx, area);
         self.learn_banner(&ctx);
+        self.cleanup_dialog(&ctx);
     }
 }
 

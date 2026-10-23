@@ -127,8 +127,111 @@ pub struct Pattern {
     pub length: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variation: Option<Variation>,
+    /// Performance controllers drawn in the piano roll (mod wheel, pitch bend,
+    /// aftertouch), by channel id.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub controllers: std::collections::BTreeMap<Id, Controllers>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// One controller value at a point of a pattern; it holds until the next one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CtlPoint {
+    /// Ticks from the pattern start.
+    pub pos: f64,
+    /// 0 to 1 (pitch bend: -1 to 1).
+    pub v: f64,
+}
+
+/// The performance controllers of one channel in a pattern, each kept in time order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Controllers {
+    /// Modulation wheel (MIDI CC 1), 0 to 1.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mod_wheel: Vec<CtlPoint>,
+    /// Pitch bend, -1 to 1.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pitch_bend: Vec<CtlPoint>,
+    /// Channel aftertouch (pressure), 0 to 1.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aftertouch: Vec<CtlPoint>,
+}
+
+/// Which performance controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CtlKind {
+    ModWheel,
+    PitchBend,
+    Aftertouch,
+}
+
+impl CtlKind {
+    pub const ALL: [CtlKind; 3] = [CtlKind::ModWheel, CtlKind::PitchBend, CtlKind::Aftertouch];
+
+    /// The value with the controller at rest.
+    pub fn rest(self) -> f64 {
+        0.0
+    }
+
+    /// Whether values run from -1 to 1 (otherwise 0 to 1).
+    pub fn bipolar(self) -> bool {
+        self == CtlKind::PitchBend
+    }
+}
+
+impl Controllers {
+    pub fn is_empty(&self) -> bool {
+        self.mod_wheel.is_empty() && self.pitch_bend.is_empty() && self.aftertouch.is_empty()
+    }
+
+    pub fn lane(&self, kind: CtlKind) -> &Vec<CtlPoint> {
+        match kind {
+            CtlKind::ModWheel => &self.mod_wheel,
+            CtlKind::PitchBend => &self.pitch_bend,
+            CtlKind::Aftertouch => &self.aftertouch,
+        }
+    }
+
+    pub fn lane_mut(&mut self, kind: CtlKind) -> &mut Vec<CtlPoint> {
+        match kind {
+            CtlKind::ModWheel => &mut self.mod_wheel,
+            CtlKind::PitchBend => &mut self.pitch_bend,
+            CtlKind::Aftertouch => &mut self.aftertouch,
+        }
+    }
+
+    /// Put a value at `pos`, replacing one within half a tick, keeping time order.
+    pub fn set(&mut self, kind: CtlKind, pos: f64, v: f64) {
+        let lane = self.lane_mut(kind);
+        let lo = if kind.bipolar() { -1.0 } else { 0.0 };
+        let v = v.clamp(lo, 1.0);
+        let pos = pos.max(0.0);
+        if let Some(p) = lane.iter_mut().find(|p| (p.pos - pos).abs() < 0.5) {
+            p.v = v;
+            return;
+        }
+        let i = lane.partition_point(|p| p.pos < pos);
+        lane.insert(i, CtlPoint { pos, v });
+    }
+
+    /// The value in force at `pos` (the controller at rest before the first point).
+    pub fn value_at(&self, kind: CtlKind, pos: f64) -> f64 {
+        let lane = self.lane(kind);
+        let i = lane.partition_point(|p| p.pos <= pos);
+        if i == 0 {
+            kind.rest()
+        } else {
+            lane[i - 1].v
+        }
+    }
+
+    /// Remove the points in `[a, b)`.
+    pub fn clear_range(&mut self, kind: CtlKind, a: f64, b: f64) {
+        self.lane_mut(kind).retain(|p| p.pos < a || p.pos >= b);
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -651,5 +754,75 @@ impl Project {
 
     pub fn pattern(&self, id: &str) -> Option<&Pattern> {
         self.patterns.iter().find(|p| p.id == id)
+    }
+}
+
+/// Whether some string in `v` names sample `id` (as is, or as a `user:` wavetable).
+fn names_sample(v: &Value, id: &str) -> bool {
+    match v {
+        Value::String(s) => s == id || s.strip_prefix("user:") == Some(id),
+        Value::Array(a) => a.iter().any(|x| names_sample(x, id)),
+        Value::Object(o) => o.values().any(|x| names_sample(x, id)),
+        _ => false,
+    }
+}
+
+impl Project {
+    /// The project's samples (not factory ones) that nothing uses any more: no channel,
+    /// sampler or slicer, audio clip, pad or wavetable names them.
+    pub fn unused_samples(&self) -> Vec<Id> {
+        let Ok(mut v) = serde_json::to_value(self) else {
+            return Vec::new();
+        };
+        if let Some(o) = v.as_object_mut() {
+            o.remove("samples");
+        }
+        self.samples
+            .iter()
+            .filter(|s| s.factory != Some(true) && !names_sample(&v, &s.id))
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    /// Forget the samples nothing uses; how many went.
+    pub fn drop_unused_samples(&mut self) -> usize {
+        let gone = self.unused_samples();
+        self.samples.retain(|s| !gone.contains(&s.id));
+        gone.len()
+    }
+}
+
+#[cfg(test)]
+mod unused_tests {
+    use super::*;
+
+    #[test]
+    fn samples_used_anywhere_are_kept_and_the_rest_go() {
+        let mut p = crate::create::empty_project("x");
+        for id in ["smp_ch", "smp_clip", "smp_pad", "smp_wt", "smp_none"] {
+            p.samples.push(SampleRef {
+                id: id.into(),
+                name: id.into(),
+                ..Default::default()
+            });
+        }
+        p.samples.push(SampleRef {
+            id: "smp_factory".into(),
+            factory: Some(true),
+            ..Default::default()
+        });
+        let c = crate::create::add_channel(&mut p, "sampler");
+        p.channels[c].sample_id = Some("smp_ch".into());
+        p.channels[c].state =
+            serde_json::json!({"pads": [{"sampleId": "smp_pad"}], "t": "user:smp_wt"});
+        p.playlist.clips.push(Clip {
+            kind: ClipKind::Audio,
+            ref_id: "smp_clip".into(),
+            ..Default::default()
+        });
+        assert_eq!(p.unused_samples(), vec!["smp_none".to_string()]);
+        assert_eq!(p.drop_unused_samples(), 1);
+        assert_eq!(p.samples.len(), 5);
+        assert_eq!(p.drop_unused_samples(), 0);
     }
 }
