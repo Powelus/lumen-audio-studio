@@ -248,6 +248,17 @@ impl Player {
         self.engine.weave_patch(channel, patch)
     }
 
+    /// A synth channel's new patch (see [`crate::instrument::ChannelPatch`]), taken
+    /// while it plays. Safe on the audio thread; the patch that comes back is to be
+    /// freed elsewhere.
+    pub fn channel_patch(
+        &mut self,
+        channel: usize,
+        patch: Box<crate::instrument::ChannelPatch>,
+    ) -> Box<crate::instrument::ChannelPatch> {
+        self.engine.channel_patch(channel, patch)
+    }
+
     /// A performance controller (mod wheel, pitch bend, aftertouch) moved on a channel.
     pub fn controller(&mut self, channel: usize, cc: las_dsp::engine::Cc, value: f64) {
         let t = self.now();

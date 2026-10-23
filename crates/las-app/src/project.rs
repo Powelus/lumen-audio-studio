@@ -91,7 +91,7 @@ pub struct ProjectState {
     /// The kind and time of the last coalesced edit.
     last_edit: Option<(String, std::time::Instant)>,
     /// The player no longer matches the project and is rebuilt when things are quiet.
-    stale: bool,
+    pub(crate) stale: bool,
     /// Count in (beats, tempo) before the player that is being built starts.
     pub count_in: Option<(u32, f64)>,
     /// The audio thread's panics seen so far (see [`crate::audio::Meters::faults`]).
@@ -415,6 +415,19 @@ impl ProjectState {
     /// Change the project, starting an undo step only when this is a different kind of
     /// change from the last one or more than a moment after it: a knob drag is one step.
     pub fn modify_coalesced(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
+        let fresh = self.coalesce(key);
+        self.modify(fresh, f);
+    }
+
+    /// [`Self::modify_coalesced`] for an edit the player has already been told about
+    /// (see [`Self::modify_live`]).
+    pub fn modify_coalesced_live(&mut self, key: &str, f: impl FnOnce(&mut Project)) {
+        let fresh = self.coalesce(key);
+        self.modify_live(fresh, f);
+    }
+
+    /// Whether an edit of kind `key` starts a new undo step.
+    fn coalesce(&mut self, key: &str) -> bool {
         let now = std::time::Instant::now();
         let fresh = match &self.last_edit {
             Some((k, t)) => {
@@ -423,7 +436,7 @@ impl ProjectState {
             None => true,
         };
         self.last_edit = Some((key.to_string(), now));
-        self.modify(fresh, f);
+        fresh
     }
 
     /// The steps undo and redo can reach, each described by what it changed: the

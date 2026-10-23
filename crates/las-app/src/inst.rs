@@ -256,17 +256,47 @@ impl App {
             .get(self.presets[k])
             .map(|e| e.name.clone())
             .unwrap_or_default();
-        self.project.modify_coalesced("synth", move |p| {
+        let Some(c) = self
+            .project
+            .loaded
+            .as_ref()
+            .and_then(|l| l.project.channels.get(ch))
+        else {
+            return;
+        };
+        let old_fx = c.state.get("fx").cloned().unwrap_or(Value::Null);
+        let fx = fx_to_json(&items, &old_fx);
+        // a playing project hears a knob of the patch at once: the player takes the
+        // new patch. A change to the rack (or no player) builds the player again.
+        let mut state = if c.state.is_object() {
+            c.state.clone()
+        } else {
+            json!({})
+        };
+        state["patch"] = patch;
+        state["fx"] = fx.clone();
+        state["preset"] = json!(preset);
+        let same_rack = fx == old_fx || (old_fx.is_null() && items.is_empty());
+        let plugin = c.plugin_id.clone();
+        let live = same_rack
+            && self.project.takes_live_edits()
+            && self
+                .audio
+                .as_mut()
+                .is_none_or(|a| a.channel_patch(ch, &plugin, &state));
+        if live {
+            self.live_patches.push(ch);
+        }
+        let update = move |p: &mut las_project::Project| {
             if let Some(c) = p.channels.get_mut(ch) {
-                if !c.state.is_object() {
-                    c.state = json!({});
-                }
-                let old_fx = c.state.get("fx").cloned().unwrap_or(Value::Null);
-                c.state["patch"] = patch;
-                c.state["fx"] = fx_to_json(&items, &old_fx);
-                c.state["preset"] = json!(preset);
+                c.state = state;
             }
-        });
+        };
+        if live {
+            self.project.modify_coalesced_live("synth", update);
+        } else {
+            self.project.modify_coalesced("synth", update);
+        }
     }
 
     /// The window of a channel whose instrument has no panel yet.

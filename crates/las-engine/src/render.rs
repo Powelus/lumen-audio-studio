@@ -492,6 +492,17 @@ impl Engine {
         }
     }
 
+    pub(crate) fn channel_patch(
+        &mut self,
+        channel: usize,
+        patch: Box<crate::instrument::ChannelPatch>,
+    ) -> Box<crate::instrument::ChannelPatch> {
+        match self.channels.get_mut(channel) {
+            Some(ch) => ch.inst.channel_patch(patch),
+            None => patch,
+        }
+    }
+
     pub(crate) fn note_off(&mut self, channel: usize, key: f64, time: f64) {
         if let Some(ch) = self.channels.get_mut(channel) {
             ch.inst.note_off(key, time);

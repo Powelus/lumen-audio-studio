@@ -11,12 +11,14 @@ use crate::fxauto::{densify, map_automation, SlotAuto};
 use crate::param::Param;
 use crate::pluginparams::plugin_param_def;
 use crate::sampler::{PadBank, Sampler};
-use las_dsp::engine::{prepare_patch, Cc, Event, PatchError};
+use las_dsp::engine::{prepare_patch, Cc, Event, PatchError, PreparedPatch};
 use las_dsp::fm::{fm_engine, Fm, FmEngine};
 use las_dsp::fx::registry::{full_state, parse_params, EffectUnit, FxSlot};
 use las_dsp::mist::{mist_engine, Mist, MistEngine};
 use las_dsp::patch::merge_patch;
-use las_dsp::synth::{default_synth_json, prepare_synth_patch, synth_engine, SynthEngine};
+use las_dsp::synth::{
+    default_synth_json, prepare_synth_patch, synth_engine, PreparedSynthPatch, SynthEngine,
+};
 use las_dsp::wavetable::TableLibrary;
 use serde_json::Value;
 use std::sync::Arc;
@@ -73,6 +75,35 @@ pub fn stereo_pan_a(l: &mut [f32], r: &mut [f32], pans: &[f32]) {
             l[i] = a * gl;
             r[i] = b + a * gr;
         }
+    }
+}
+
+/// A synth channel's patch (Facet, Mist, or one of the wavetable family), parsed off the
+/// audio thread so that a player can take it while it plays: a knob turned in the
+/// synth panel is heard at once.
+pub enum ChannelPatch {
+    Facet(PreparedPatch<Fm>),
+    Mist(PreparedPatch<Mist>),
+    Synth(PreparedSynthPatch),
+}
+
+impl ChannelPatch {
+    /// The patch of a channel's state, for its plugin; `None` for a plugin that has no
+    /// such patch (Nebula's layers, samplers, Weave, ...).
+    pub fn prepare(
+        plugin_id: &str,
+        state: &Value,
+        tables: &mut TableLibrary,
+    ) -> Option<Result<Self, PatchError>> {
+        let patch = state.get("patch").unwrap_or(&Value::Null);
+        Some(match plugin_id {
+            "facet" => prepare_patch::<Fm>(patch).map(Self::Facet),
+            "mist" => prepare_patch::<Mist>(patch).map(Self::Mist),
+            "polaris" | "vortex" | "monolith" | "zenith" | "triosc" => {
+                prepare_synth_patch(tables, patch).map(Self::Synth)
+            }
+            _ => return None,
+        })
     }
 }
 
@@ -687,6 +718,24 @@ impl Instrument {
             Core::Hosted(h) => h.weave_patch(patch),
             _ => patch,
         }
+    }
+
+    /// Take a synth channel's patch live: the sound changes at once and the notes
+    /// sounding carry on. Safe on the audio thread (the patches trade places); the one
+    /// that comes back (the old one, or the one given if it does not fit this
+    /// instrument) is to be freed elsewhere.
+    pub fn channel_patch(&mut self, mut patch: Box<ChannelPatch>) -> Box<ChannelPatch> {
+        match (&mut self.core, &mut *patch) {
+            (Core::Facet(e), ChannelPatch::Facet(p)) => e.apply_patch(p),
+            (Core::Mist(e), ChannelPatch::Mist(p)) => e.apply_patch(p),
+            (Core::Layers(layers), ChannelPatch::Synth(p))
+                if self.plugin_id != "nebula" && layers.len() == 1 =>
+            {
+                layers[0].engine.apply_patch(p)
+            }
+            _ => {}
+        }
+        patch
     }
 
     /// Whether the output is a mono signal (a channel then pans it with the

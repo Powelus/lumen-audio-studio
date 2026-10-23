@@ -956,9 +956,10 @@ impl App {
             .as_ref()
             .map_or(120.0, |l| l.project.bpm);
         let busy = self.project.is_building();
-        // the master knob keeps its place at the right; the rest wraps onto a second
-        // row when the window is too narrow for one, instead of running under it
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // the master knob keeps its place at the right
+        let bar = egui::Layout::right_to_left(egui::Align::Center);
+        // as tall as the master knob; a second row adds to that
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 52.0), bar, |ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
             ui.spacing_mut().interact_size.y = TOOL_H;
                 if let Some(a) = &self.audio {
@@ -973,9 +974,10 @@ impl App {
                     self.volume = vol;
                     self.send(Command::Volume(vol as f32));
                 }
-            let row = egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true);
-            ui.with_layout(row, |ui| {
-                ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+            // too narrow a window scrolls the rest sideways (Shift+wheel, or its bar)
+            // rather than running it under the knob or taking rows from the windows
+            let row = egui::Layout::left_to_right(egui::Align::Center);
+            egui::ScrollArea::horizontal().id_salt("toolbar").show(ui, |ui| ui.with_layout(row, |ui| {
             // every control in the toolbar is as tall as the others and sits on the
             // same centre line
             ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
@@ -1227,7 +1229,7 @@ impl App {
             {
                 self.shell.open.show(crate::raise::Win::Export);
             }
-            });
+            }));
         });
         let _ = p;
     }
@@ -1670,10 +1672,11 @@ impl App {
 
     /// The floating windows. `area` is the workspace they sit in.
     pub(crate) fn windows(&mut self, ctx: &egui::Context, area: Rect) {
-        // the screen got smaller (a smaller window, a larger interface scale): windows
+        // the room got smaller (a smaller window, a larger interface scale): windows
         // that no longer fit are laid out afresh, at their first places and sizes, so
         // no edge, title or close button is left out of reach
-        let screen = ctx.content_rect();
+        // (the room under the toolbar, which also shrinks when the toolbar wraps)
+        let screen = area;
         let shrank = self.shell.last_screen.is_some_and(|s| {
             screen.width() < s.width() - 1.0 || screen.height() < s.height() - 1.0
         });

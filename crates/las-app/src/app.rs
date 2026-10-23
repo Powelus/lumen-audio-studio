@@ -118,6 +118,8 @@ pub struct App {
     pub(crate) bound: Option<crate::inst::Bound>,
     /// The synth panels changed something that belongs in the bound channel.
     pub(crate) synth_dirty: bool,
+    /// Channels handed a new patch live by the synth panel (kept for the tests).
+    pub(crate) live_patches: Vec<usize>,
     /// Set when the user asked to quit and it is allowed.
     pub(crate) quit: bool,
     /// The app's settings (Options > Settings).
@@ -221,6 +223,7 @@ impl App {
             shell: crate::shell::Shell::new(),
             bound: None,
             synth_dirty: false,
+            live_patches: Vec::new(),
             quit: false,
             settings,
             folders: Default::default(),
@@ -599,7 +602,13 @@ impl App {
     }
 
     pub(crate) fn set(&mut self, path: &str, v: Value) {
-        if let Some(t) = self.patches[index(self.inst)].pointer_mut(path) {
+        let k = index(self.inst);
+        // a preset stores only what differs from the defaults: a knob for a value it
+        // leaves out gets the defaults filled in first, or turning it would do nothing
+        if self.patches[k].pointer(path).is_none() {
+            self.patches[k] = las_dsp::patch::merge_patch(&self.defaults[k], &self.patches[k]);
+        }
+        if let Some(t) = self.patches[k].pointer_mut(path) {
             *t = v;
         }
     }

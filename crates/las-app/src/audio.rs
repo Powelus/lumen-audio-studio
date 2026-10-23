@@ -37,6 +37,7 @@ pub enum Garbage {
     Params(Box<Params>),
     Player(Box<Player>),
     WeavePatch(Box<las_dsp::modular::Patch>),
+    ChannelPatch(Box<las_engine::instrument::ChannelPatch>),
     Preview(Box<Preview>),
     Reference(Box<RefTrack>),
 }
@@ -130,6 +131,11 @@ pub enum Command {
     WeavePatch {
         channel: usize,
         patch: Box<las_dsp::modular::Patch>,
+    },
+    /// A synth channel's patch, changed in the synth panel while the project plays.
+    ChannelPatch {
+        channel: usize,
+        patch: Box<las_engine::instrument::ChannelPatch>,
     },
     /// A controller (mod wheel, pitch bend, aftertouch) moved on one of the project's
     /// channels.
@@ -752,6 +758,26 @@ impl Audio {
         let _ = self.commands.push(c);
     }
 
+    /// Hand a playing project's synth channel its new patch (parsed here). Whether the
+    /// channel's instrument has such a patch.
+    pub fn channel_patch(
+        &mut self,
+        channel: usize,
+        plugin_id: &str,
+        state: &serde_json::Value,
+    ) -> bool {
+        match las_engine::instrument::ChannelPatch::prepare(plugin_id, state, &mut self.tables) {
+            Some(Ok(p)) => {
+                self.send(Command::ChannelPatch {
+                    channel,
+                    patch: Box::new(p),
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Parse a patch here and hand it over ready to use.
     pub fn set_patch(&mut self, inst: Instrument, json: &serde_json::Value) -> Result<(), String> {
         let p = match inst {
@@ -1094,6 +1120,13 @@ impl Renderer {
                     None => patch,
                 };
                 let _ = self.garbage.push(Garbage::WeavePatch(back));
+            }
+            Command::ChannelPatch { channel, patch } => {
+                let back = match &mut self.player {
+                    Some(p) => p.channel_patch(channel, patch),
+                    None => patch,
+                };
+                let _ = self.garbage.push(Garbage::ChannelPatch(back));
             }
             Command::PlayerController { channel, cc, value } => {
                 if let Some(p) = &mut self.player {
