@@ -306,7 +306,7 @@ pub fn piano(ui: &mut Ui, first: u8, last: u8, held: &[u8]) -> Option<u8> {
     }
     let pointer = ui
         .input(|i| i.pointer.interact_pos())
-        .filter(|p| rect.contains(*p));
+        .filter(|p| rect.contains(*p) && on_top(ui, *p));
     let mut hit = None;
     if let Some(p) = pointer {
         hit = blacks.iter().find(|(_, r)| r.contains(p)).map(|(k, _)| *k);
@@ -487,4 +487,10 @@ pub fn fader(ui: &mut Ui, value: &mut f64, max: f64, peak: f32, height: f32) -> 
         "{:.1} dB\nDrag, Shift for fine, double-click for 0 dB",
         gain_db(*value)
     ))
+}
+
+/// Whether `p` is on this ui's own window, with no other window over it there: a
+/// window under another one takes no wheel, zoom or press meant for the one on top.
+pub fn on_top(ui: &egui::Ui, p: egui::Pos2) -> bool {
+    ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id())
 }

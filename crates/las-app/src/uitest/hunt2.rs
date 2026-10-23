@@ -286,3 +286,51 @@ fn instrument_window_knobs_are_heard_live_in_a_playing_song() {
         }
     }
 }
+
+#[test]
+fn the_wheel_over_the_top_window_does_not_reach_the_one_under_it() {
+    use eframe::egui::{accesskit::Role, Modifiers};
+    let mut h = Harness::demo();
+    h.app.shell.open.playlist = true;
+    h.app.shell.open.roll = true;
+    h.run(10);
+    let win = |h: &Harness, name: &str| {
+        h.nodes
+            .iter()
+            .find(|n| n.role == Role::Window && n.label.starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} window"))
+            .rect
+    };
+    let (roll, pl) = (win(&h, "Piano Roll"), win(&h, "Playlist"));
+    let both = roll.intersect(pl);
+    assert!(
+        both.width() > 100.0 && both.height() > 100.0,
+        "{roll:?} {pl:?}"
+    );
+    let at = both.center();
+    let (rz, pz) = (h.app.project.roll.zoom, h.app.project.playlist.zoom);
+    h.set_modifiers(Modifiers::COMMAND);
+    h.wheel_at(at, 120.0);
+    h.set_modifiers(Modifiers::NONE);
+    assert_ne!(
+        h.app.project.roll.zoom, rz,
+        "Ctrl+wheel does not zoom the roll on top"
+    );
+    assert_eq!(
+        h.app.project.playlist.zoom, pz,
+        "the playlist under it zoomed too"
+    );
+    // Alt+wheel zooms the roll's keys, not the playlist's tracks
+    let (rr, pr) = (h.app.project.roll.row, h.app.project.playlist.row);
+    h.set_modifiers(Modifiers::ALT);
+    h.wheel_at(at, 120.0);
+    h.set_modifiers(Modifiers::NONE);
+    assert_ne!(
+        h.app.project.roll.row, rr,
+        "Alt+wheel does not zoom the roll's keys"
+    );
+    assert_eq!(
+        h.app.project.playlist.row, pr,
+        "the playlist's tracks changed"
+    );
+}

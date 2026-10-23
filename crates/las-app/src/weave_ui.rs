@@ -520,7 +520,8 @@ impl App {
         painter.rect_filled(canvas, 4.0, skin.map_or(p.roll_bg, |s| s.screen));
         let dot = skin.map_or(p.grid, |s| s.edge);
         let pointer = ui.input(|i| i.pointer.hover_pos());
-        let over_canvas = pointer.is_some_and(|q| canvas.contains(q));
+        let over_canvas =
+            pointer.is_some_and(|q| canvas.contains(q) && crate::widgets::on_top(ui, q));
 
         // the parameter under the pointer (the wheel turns it rather than scrolling)
         let hovered_param = pointer.filter(|_| over_canvas).and_then(|q| {
