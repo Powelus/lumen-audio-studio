@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Band-limited, mip-mapped wavetables, ported from
 //! `src/audio/dsp/wavetables.ts`.
 //!

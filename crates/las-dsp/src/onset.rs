@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Beat (transient) detection and tempo detection for loops, as the slicer and the
 //! sample editor use them.
 //!

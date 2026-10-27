@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Every factory preset loads into its engine and makes sound.
 
 use las_dsp::engine::{Event, Playable};

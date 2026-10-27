@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! In-place iterative radix-2 complex FFT, ported from `src/audio/dsp/fft.ts`.
 
 use std::f64::consts::PI;

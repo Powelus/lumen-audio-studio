@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The loudness meter reads the same numbers as the TypeScript one. The golden
 //! values were made by running `src/audio/dsp/loudness.ts` of the web version on
 //! the effects test signal (`tests/fixtures/fx_input.f32`): a plain meter run on

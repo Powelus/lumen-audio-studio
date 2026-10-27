@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The factory presets of the web version, one bank per instrument.
 //!
 //! The banks are JSON files exported from the web version by

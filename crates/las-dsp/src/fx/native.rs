@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The effects that the web version builds from Web Audio's own nodes (biquad
 //! filters, delays, a wave shaper, a convolver, oscillators): equaliser,
 //! overdrive, chorus, phaser, auto filter, stereo tool, maximizer and

@@ -68,6 +68,11 @@ GPL-3.0-or-later. See [LICENSE](LICENSE). Anyone may use, change and share this
 software; anyone who distributes a modified version must share its source under
 the same licence.
 
+The DSP crate `crates/las-dsp` is dual licensed: GPL-3.0-or-later, or a
+proprietary licence held by the copyright holder (see
+`crates/las-dsp/LICENSE-PROPRIETARY`). The copyright holder uses the second option
+for the closed-source Weave plugin. For everyone else, the GPL applies.
+
 Windows builds include ASIO support made with Steinberg's ASIO SDK
 (github.com/audiosdk/asio), used under its GPLv3 licence option.
 

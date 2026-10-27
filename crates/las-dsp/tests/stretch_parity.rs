@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The time stretch matches the web version's (`tools/project/stretch.gen.test.ts`).
 
 use las_dsp::stretch::time_stretch;

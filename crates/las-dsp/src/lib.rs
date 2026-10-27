@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! DSP for Lumen Audio Studio.
 //!
 //! Everything here is plain Rust with no allocation in the audio path, so the

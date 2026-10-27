@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! RBJ cookbook biquad magnitude response, for filter and EQ curves.
 //!
 //! Ported from `src/audio/dsp/biquad.ts` of the web version.

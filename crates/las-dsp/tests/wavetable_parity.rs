@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The wavetables match the ones built by the TypeScript code of the web
 //! version. The reference numbers come from `tools/parity/wavetable.gen.test.ts`.
 

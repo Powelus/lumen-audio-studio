@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Weave, a modular synth: modules (oscillators, envelopes, filters and so on) joined
 //! by cables. A cable runs from a module's output to another module's input, and every
 //! parameter is an input too, so anything can modulate anything; each cable has its
@@ -2503,7 +2503,19 @@ pub struct Modular {
     last_pitch: Option<f64>,
     /// The samples the patch's samplers play, by sample id.
     samples: Vec<(String, SampleBuf)>,
+    /// Module outputs watched for an editor's scopes: their output slots.
+    taps: [usize; MAX_TAPS],
+    tap_count: usize,
+    /// One ring of [`TAP_LEN`] samples per tap, summed over the voices.
+    tap_ring: Vec<f32>,
+    /// Samples written to the rings so far.
+    tap_written: u64,
 }
+
+/// How many module outputs can be watched at once.
+pub const MAX_TAPS: usize = 16;
+/// How many recent samples each watched output keeps.
+pub const TAP_LEN: usize = 4096;
 
 impl Modular {
     /// A synth playing a patch; a single input with several cables plays only the first.
@@ -2531,7 +2543,38 @@ impl Modular {
             held: Vec::with_capacity(128),
             last_pitch: None,
             samples,
+            taps: [0; MAX_TAPS],
+            tap_count: 0,
+            tap_ring: vec![0.0; MAX_TAPS * TAP_LEN],
+            tap_written: 0,
         }
+    }
+
+    /// Watch module outputs (node id, output index), at most [`MAX_TAPS`]; ones that
+    /// do not exist are skipped. Neither allocates nor frees, so the audio thread may
+    /// call it. Returns how many are watched, in the order given.
+    pub fn set_taps(&mut self, taps: &[(u32, usize)]) -> usize {
+        self.tap_count = 0;
+        for &(node, out) in taps {
+            if self.tap_count == MAX_TAPS {
+                break;
+            }
+            let Some(k) = self.graph.ids.iter().position(|&i| i == node) else {
+                continue;
+            };
+            let c = &self.graph.nodes[k];
+            if out < c.outputs {
+                self.taps[self.tap_count] = c.out + out;
+                self.tap_count += 1;
+            }
+        }
+        self.tap_count
+    }
+
+    /// The watched outputs' recent samples: one ring of [`TAP_LEN`] per tap, and how
+    /// many samples have been written (the newest is at `(written - 1) % TAP_LEN`).
+    pub fn taps(&self) -> (&[f32], usize, u64) {
+        (&self.tap_ring, self.tap_count, self.tap_written)
     }
 
     pub fn patch(&self) -> &Patch {
@@ -2776,11 +2819,23 @@ impl Modular {
             controls: self.controls,
         };
         let graph = &self.graph;
+        let (taps, nt) = (&self.taps[..self.tap_count], self.tap_count);
+        let n = l.len().min(r.len());
+        let at = (self.tap_written % TAP_LEN as u64) as usize;
+        let ring = &mut self.tap_ring;
+        for t in 0..nt {
+            for i in 0..n.min(TAP_LEN) {
+                ring[t * TAP_LEN + (at + i) % TAP_LEN] = 0.0;
+            }
+        }
         for v in self.voices.iter_mut().filter(|v| v.active) {
-            for (ol, or) in l.iter_mut().zip(r.iter_mut()) {
+            for (i, (ol, or)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
                 let (a, b) = step(graph, v, &ctx);
                 *ol += a;
                 *or += b;
+                for (t, &slot) in taps.iter().enumerate() {
+                    ring[t * TAP_LEN + (at + i) % TAP_LEN] += v.outs[slot];
+                }
                 if !v.gate {
                     if a.abs() + b.abs() < 1e-5 {
                         v.quiet += 1;
@@ -2794,6 +2849,7 @@ impl Modular {
                 }
             }
         }
+        self.tap_written += n as u64;
     }
 }
 
@@ -3433,6 +3489,29 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn taps_record_a_module_output_summed_over_voices() {
+        let p = Patch::default();
+        let mut m = Modular::new(&p, 48_000.0);
+        // the oscillator (node 2, output 0) and a module that is not there
+        assert_eq!(m.set_taps(&[(2, 0), (99, 0), (6, 0)]), 1);
+        m.note_on(60, 1.0);
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        m.render(&mut l, &mut r);
+        let (ring, n, written) = m.taps();
+        assert_eq!((n, written), (1, 256));
+        let osc = &ring[..256];
+        assert!(osc.iter().any(|x| x.abs() > 0.1), "the oscillator is heard");
+        let one = osc.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+        // a second voice adds to it
+        m.note_on(67, 1.0);
+        m.render(&mut l, &mut r);
+        let (ring, _, written) = m.taps();
+        assert_eq!(written, 512);
+        let peak = ring[256..512].iter().fold(0.0f32, |a, x| a.max(x.abs()));
+        assert!(peak > one * 1.2, "{one} -> {peak}");
+    }
 
     const SR: f64 = 48_000.0;
 

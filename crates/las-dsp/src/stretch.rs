@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Time stretch without a change of pitch: WSOLA (waveform similarity overlap
 //! add). Port of the web version's `audio/dsp/stretch.ts`.
 //!

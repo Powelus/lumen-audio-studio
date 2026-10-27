@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Step FX (a 16-step sequencer driving a filter, the volume and the pan) and
 //! the tempo-synced volume shaper. Ported from `src/audio/dsp/fx/stepfx.ts` and
 //! the shaper in `src/audio/worklets/fx.worklet.ts`.

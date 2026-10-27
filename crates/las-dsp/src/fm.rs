@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Facet: four-operator phase-modulation (FM) synth on the shared voice engine.
 //!
 //! Each operator is an oscillator with its own envelope. Algorithms decide which

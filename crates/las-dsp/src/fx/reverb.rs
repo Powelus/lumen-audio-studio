@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Algorithmic reverb: an 8-line feedback delay network with a Hadamard mixing
 //! matrix, input diffusion, frequency-dependent decay, gentle line modulation,
 //! pre-delay and freeze. Ported from `src/audio/dsp/fx/reverb2.ts`.

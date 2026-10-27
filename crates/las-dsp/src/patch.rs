@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Patch data shared by the engine-based instruments.
 //!
 //! Patches are JSON, as in the project format and the preset banks. A preset
