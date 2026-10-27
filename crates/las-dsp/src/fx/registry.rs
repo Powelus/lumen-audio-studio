@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The effect catalogue and the units that play them.
 //!
 //! The catalogue (names, categories, parameters with ranges and defaults, and

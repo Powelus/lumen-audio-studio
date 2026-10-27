@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Tape emulation, frequency shifter and pitch shifter.
 //! Ported from `src/audio/dsp/fx/modulation2.ts`.
 

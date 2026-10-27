@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! A `DynamicsCompressorNode` as Chromium makes it (the WebKit compressor): a
 //! 6 ms look-ahead, a detector that follows a shaped copy of the input, an
 //! adaptive release and automatic make-up gain. The web version's maximizer is

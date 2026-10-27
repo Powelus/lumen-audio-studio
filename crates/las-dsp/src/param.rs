@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! A Web Audio `AudioParam` with its automation timeline, as Chromium runs it:
 //! `setValueAtTime`, `linearRampToValueAtTime`, `setTargetAtTime` and
 //! `cancelScheduledValues`, evaluated for every frame.

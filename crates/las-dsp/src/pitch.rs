@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Pitch detection for the tuner: the YIN method (de Cheveigne and Kawahara), which
 //! finds the period of a monophonic signal from its difference function.
 

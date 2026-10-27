@@ -3,7 +3,7 @@ name = "las-dsp"
 description = "Audio DSP for Lumen Audio Studio: filters, oscillators, synth engines and effects"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary"
 repository.workspace = true
 rust-version.workspace = true
 

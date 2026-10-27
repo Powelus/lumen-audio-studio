@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Nebula's generated presets. Each family is one sound design (a supersaw lead, an
 //! acid bass, a chord stack) with a few parameters, and every name of the family
 //! plays a variation of it: other wavetables, filter settings, envelopes, layers and

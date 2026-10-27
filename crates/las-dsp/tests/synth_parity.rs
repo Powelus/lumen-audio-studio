@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The wavetable synth renders the same audio as the synth worklet of the web
 //! version. The reference files come from `tools/parity/synth.gen.test.ts`.
 

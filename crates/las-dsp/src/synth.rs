@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The wavetable synth engine behind Polaris, Vortex, Monolith, Zenith, Nebula
 //! and TriOsc: four wavetable oscillators with unison and warp, a sub oscillator,
 //! noise, two filters (twelve types), four envelopes, four LFOs and a modulation

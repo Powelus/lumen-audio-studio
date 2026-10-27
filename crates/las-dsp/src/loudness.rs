@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Loudness and peak measurement following ITU-R BS.1770-4 and EBU R128:
 //! K-weighting, momentary (400 ms), short-term (3 s) and gated integrated
 //! loudness, loudness range (EBU Tech 3342) and 4x oversampled true peak.

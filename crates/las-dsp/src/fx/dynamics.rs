@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Compressor, limiter, noise gate, transient shaper and bit crusher.
 //! Ported from `src/audio/worklets/fx.worklet.ts` and
 //! `src/audio/dsp/fx/dynamics2.ts`.

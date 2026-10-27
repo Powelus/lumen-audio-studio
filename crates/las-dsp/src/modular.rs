@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Weave, a modular synth: modules (oscillators, envelopes, filters and so on) joined
 //! by cables. A cable runs from a module's output to another module's input, and every
 //! parameter is an input too, so anything can modulate anything; each cable has its

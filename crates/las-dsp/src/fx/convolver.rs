@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Zero-latency partitioned convolution, for the convolution reverb.
 //!
 //! The first block of the impulse response is convolved directly, sample by

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! The effects render the same audio as the effect worklets of the web version.
 //! The reference files come from `tools/parity/fx.gen.test.ts`.
 

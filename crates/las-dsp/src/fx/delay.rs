@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Stereo echo: tempo-synced or free time, ping-pong, filtered and optionally
 //! saturated feedback, tape-style modulation and input ducking.
 //! Ported from `src/audio/dsp/fx/delay2.ts`.

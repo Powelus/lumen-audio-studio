@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Audio effects, ported from `src/audio/dsp/fx/*.ts` and
 //! `src/audio/worklets/fx.worklet.ts` of the web version.
 //!

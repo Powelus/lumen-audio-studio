@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Shared polyphonic voice engine for the engine-based instruments (FM, granular).
 //!
 //! Ported from `src/audio/synth/engine.ts` of the web version, step by step, so

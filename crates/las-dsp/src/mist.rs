@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Powelus-Proprietary
 //! Mist: the granular instrument, on the shared voice engine.
 //!
 //! Ported from `src/audio/synth/granular.ts` of the web version. Every voice
