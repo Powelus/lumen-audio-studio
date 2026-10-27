@@ -2107,6 +2107,11 @@ struct Compiled {
     base: Vec<f64>,
     /// The same in their units, so a parameter with no cable costs nothing to read.
     value: Vec<f64>,
+    /// For each log-scale parameter, ln(max / min) (0 for the others), so a
+    /// modulated one costs an exp per sample rather than a powf.
+    ln_ratio: Vec<f64>,
+    /// Bit `p` set when parameter `p` has a cable, so reading the others is one test.
+    modulated: u64,
     /// How many plain inputs and outputs it has.
     inputs: usize,
     outputs: usize,
@@ -2204,12 +2209,22 @@ impl Graph {
                 .filter(|_| node.kind == Kind::Sampler)
                 .and_then(|id| samples.iter().find(|(s, _)| s == id))
                 .map(|(_, b)| b.clone());
+            let ln_ratio = spec
+                .params
+                .iter()
+                .map(|p| if p.log { (p.max / p.min).ln() } else { 0.0 })
+                .collect();
+            let modulated = (0..spec.params.len().min(64))
+                .filter(|p| !sources[spec.inputs.len() + p].is_empty())
+                .fold(0u64, |m, p| m | 1 << p);
             nodes.push(Compiled {
                 kind: node.kind,
                 sample,
                 sources,
                 base,
                 value,
+                ln_ratio,
+                modulated,
                 inputs: spec.inputs.len(),
                 outputs: spec.outputs.len(),
                 out: first[k],
@@ -2414,7 +2429,7 @@ fn osc_wave(shape: u32, morph: f64, phase: f64, dt: f64, pw: f64) -> f64 {
 
 /// A triangle fold that leaves -1 to 1 as it is and folds back what goes past.
 fn fold(u: f64) -> f64 {
-    4.0 * (((u - 1.0) / 4.0).rem_euclid(1.0) - 0.5).abs() - 1.0
+    4.0 * (((u - 1.0) / 4.0).wrap1() - 0.5).abs() - 1.0
 }
 
 /// Read a delay line `d` samples (at least 1) behind where it writes next.
@@ -2874,12 +2889,43 @@ fn input(c: &Compiled, outs: &[f32], k: usize, unplugged: f32) -> f32 {
 /// A parameter of a module for this sample, with what its cables add, in its units.
 #[inline]
 fn param(c: &Compiled, outs: &[f32], p: usize) -> f64 {
-    let k = c.inputs + p;
-    if c.sources[k].is_empty() {
+    if c.modulated & (1u64 << p) == 0 {
         return c.value[p];
     }
+    let k = c.inputs + p;
     let m = f64::from(input(c, outs, k, 0.0));
-    c.kind.spec().params[p].denormalize(c.base[p] + m)
+    let spec = &c.kind.spec().params[p];
+    // ParamSpec::denormalize, with the log's ratio worked out once at compile
+    let n = (c.base[p] + m).clamp(0.0, 1.0);
+    let v = if spec.log {
+        spec.min * (n * c.ln_ratio[p]).exp()
+    } else {
+        spec.min + n * (spec.max - spec.min)
+    };
+    if spec.steps > 0 {
+        v.round()
+    } else {
+        v
+    }
+}
+
+/// The fractional part of a phase, in 0..1: `rem_euclid(1.0)` without the slow
+/// `fmod` call it compiles to (the same value for every phase this module keeps).
+trait Wrap1 {
+    fn wrap1(self) -> f64;
+}
+
+impl Wrap1 for f64 {
+    #[inline(always)]
+    fn wrap1(self) -> f64 {
+        let w = self - crate::floor(self);
+        // rounding can land a tiny negative just below 1
+        if w >= 1.0 {
+            0.0
+        } else {
+            w
+        }
+    }
 }
 
 /// `f(x)`, worked out again only when `x` changes.
@@ -3049,7 +3095,7 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
                     let y = (osc_wave(shape, morph, s.ph[0], dt, pw) * level) as f32;
                     outs[c.out] = y;
                     outs[c.out + 1] = y;
-                    s.ph[0] = (s.ph[0] + f / sr).rem_euclid(1.0);
+                    s.ph[0] = (s.ph[0] + f / sr).wrap1();
                 } else {
                     let (mut l, mut r) = (0.0, 0.0);
                     let last = (count - 1) as f64;
@@ -3069,7 +3115,7 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
                         let pan = spread * at;
                         l += y * (1.0 - pan).min(1.0);
                         r += y * (1.0 + pan).min(1.0);
-                        s.ph[j] = (s.ph[j] + f / sr).rem_euclid(1.0);
+                        s.ph[j] = (s.ph[j] + f / sr).wrap1();
                     }
                     let g = level / (count as f64).sqrt();
                     outs[c.out] = (l * g) as f32;
@@ -3094,7 +3140,7 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
                 let y = (2.0 * PI * (s.ph[0] + pm) + back).sin();
                 s.v[1] = s.v[0];
                 s.v[0] = y;
-                s.ph[0] = (s.ph[0] + f / sr).rem_euclid(1.0);
+                s.ph[0] = (s.ph[0] + f / sr).wrap1();
                 outs[c.out] = (y * level) as f32;
             }
             Kind::Noise => {
@@ -3133,7 +3179,7 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
                 if next >= 1.0 {
                     s.v[0] = s.rand();
                 }
-                s.ph[0] = next.rem_euclid(1.0);
+                s.ph[0] = next.wrap1();
             }
             Kind::Env => {
                 let gate = input(c, outs, 0, 0.0) > 0.5;
@@ -3188,7 +3234,7 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
                 } else {
                     s.ph[0] += rate / sr;
                     let wrap = s.ph[0] >= 1.0;
-                    s.ph[0] = s.ph[0].rem_euclid(1.0);
+                    s.ph[0] = s.ph[0].wrap1();
                     wrap
                 };
                 if take || fresh {
@@ -3358,7 +3404,7 @@ fn step(graph: &Graph, v: &mut Voice, ctx: &Ctx) -> (f32, f32) {
                 let yl = tap(line, s.n, dl);
                 let yr = tap(line, s.n, dr);
                 s.n = (s.n + 1) % len;
-                s.ph[0] = (s.ph[0] + rate / sr).rem_euclid(1.0);
+                s.ph[0] = (s.ph[0] + rate / sr).wrap1();
                 outs[c.out] = (x + (yl - x) * mix) as f32;
                 outs[c.out + 1] = (x + (yr - x) * mix) as f32;
             }
